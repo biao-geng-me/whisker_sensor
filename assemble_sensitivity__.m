@@ -3,20 +3,23 @@
 % dipole frequency.
 
 clear;clc;
-datdir = 'ch2-x2-dipole-1';
-savdir = '.';
+datdir = 'H:\Shared drives\Biao Reseach\Work\pt6_2024-07-11\dipole test\dipole_test_ch1';
+savdir = fullfile(datdir,'..');
+
+f = 15; % dipole frequency
+pat = sprintf('st*Hz%d_*p.dat',f);
+sav_ch = 1;
+dat_ch = 2; % channel index
+check_lvl = [2];
 
 % accelerometer data
 ac_data_dir = 'C:\Users\bigeme\Working\SealWhisker\sensor\prototype_tests\vibration-data-2024-04-24';
 
-f = 35; % dipole frequency
+
 Fs = 88; % sensor sample frequency
-
 t_fft = 30; % use 30 s for fft
-A_fft = 6e-4; % fft plot y range
-ich = 2; % channel index
+% A_fft = 1e-4; % fft plot y range
 
-pat = sprintf('st*%dHz_*p.dat',f);
 flist = dir(fullfile(datdir,pat));
 
 % get levels
@@ -31,11 +34,17 @@ end
 lvl = unique(lvl);
 nlvl = numel(lvl);
 
-% adjust
+% 
 close all;
-ilvl = 1:nlvl;
-show_fft = 0;
-savname = sprintf('ch%d_x2_sensitivity_%dHz.dat',ich,f);
+
+if ~isempty(check_lvl)
+    ilvl = check_lvl;
+    show_fft = 1;
+else
+    ilvl = 1:nlvl;
+    show_fft = 0;
+end
+savname = sprintf('ch%d_x3_sensitivity_%dHz.dat',sav_ch,f);
 
 % 
 fa = alias_frequency(f,Fs);  % aliased frequency
@@ -44,7 +53,7 @@ vel = zeros(nlvl,1);
 err = zeros(nlvl,1);
 
 for i=ilvl
-    pat = sprintf('st*%dHz_%dp*',f,lvl(i));
+    pat = sprintf('st*Hz%d_*%dp*',f,lvl(i));
     flist = dir(fullfile(datdir,pat));
     ns = numel(flist);
 
@@ -53,7 +62,7 @@ for i=ilvl
     for j=1:ns
         fname = fullfile(flist(j).folder,flist(j).name);
         dat = readtable(fname, "FileType","fixedwidth");
-        y = dat{:,2+ich};
+        y = dat{:,2+dat_ch};
         y1 = y(end-Fs*t_fft:end);
         [ff,pp] = fast_fourier(y1,Fs);
         
@@ -69,7 +78,9 @@ for i=ilvl
             plot(ff(imax),pmax,'or');
             
             xlim([0 Fs/2]);
-            ylim([0 A_fft]);
+            if exist('A_fft','var') && (A_fft>0)
+                ylim([0 A_fft]);
+            end
             ylabel('Amplitude (mV)')
             xlabel('Frequency (Hz)');
             title(sprintf('%d Hz %d%%', f, lvl(i)))
@@ -100,6 +111,9 @@ xlabel('whisker tip velocity (mm/s)');
 ylabel('Signal (mV)');
 
 %%
+if ~exist(savdir,"dir")
+    mkdir(savdir);
+end
 fid = fopen(fullfile(savdir,savname),'w');
 fprintf(fid,'%3d %12.5e %12.5e %12.5e\n',[lvl vtip amp err]');
 fclose(fid);

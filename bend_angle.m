@@ -1,5 +1,5 @@
 function ba = bend_angle(Lt,Lr,xh)
-% compute bend angle from bending configuration and deflection
+% compute bend angle from bending configuration and deflection, in degree
 % Lt - total length
 % Lr - flexible length
 % xh - deflection

@@ -1,25 +1,25 @@
 % bgeng 2024-04-29 process incremental load data
 
 clear;clc;close all
-datdir = 'H:\Shared drives\Biao Reseach\prototype4_2024-06-07\bend-1';
+datdir = 'H:\Shared drives\Biao Reseach\Work\prototype5_2024-06-07\bend-1';
 savdir = 'C:\Users\bigeme\Working\SealWhisker\sensor\prototype_tests\prototype4_2024-06-07\bend1';
 
 
 % constants
-tag = 'pt4';
+tag = 'pt5';
 cmd = [902 5 7 3 5 10]; % cmd used for inc test
 Fs = 88; % signal sample rate
 ns_sstep = 45; % number of sampling points during servo step
 rservo = 20; % servo arm radius, mm
-angle0 = 330; % rotation table read at zero load orientation
+angle0 = 315; % rotation table read at zero load orientation
 Lt = 80.3; % from cup surface to actuation point, mm
 Lr = 11.5; % flexible pdms part, mm
 % end
 
 %%%%%% find repeats %%%%%%%
 % angle-specific inputs
-n = 0; % angle index, 0 to 24, corresponding to 0° to 360°
-use_channel_no = 1; % for peak detection
+n = 6; % angle index, 0 to 24, corresponding to 0° to 360°
+use_channel_no = 2; % for peak detection
 hmin = 1e-3; % min peak height for detecting end of loading steps
 peak_sign = -1;
 
@@ -29,7 +29,7 @@ t_avg = 1; % time used to takge average for each level.
 
 angle = angle0 + n*15;
 if n*15~=360
-    if angle >= 360
+    if angle > 360
         angle = angle -360;
     end
 end
@@ -49,7 +49,7 @@ xh  = rservo*tand(0:qstep:qstep*nstep)';
 varr1 = zeros(nstep+1,nrepeat);
 varr2 = zeros(nstep+1,nrepeat);
 
-fname = sprintf("st_*_pt4_inc_%03dd.dat",angle); % change this to match data files
+fname = sprintf("st_*_pt5_inc_%03dd.dat",angle); % change this to match data files
 
 flist = dir(fullfile(datdir,fname));
 fname = flist.name;
@@ -65,10 +65,10 @@ dat = readtable(fullfile(datdir,fname), "FileType","fixedwidth");
 y1 = dat{:,3};
 y2 = dat{:,4};
 
-ib_m = 10*Fs; % index for mean calculation
+ib_m = 1*Fs; % index for mean calculation
 ind_m = ib_m:ib_m+3*Fs;
 
-v01 = mean(y1(ind_m));
+v01 = mean(y1(ind_m)); % initial values
 v02 = mean(y2(ind_m));
 
 
@@ -142,6 +142,12 @@ fid = fopen(fullfile(savdir,sprintf('%s.dat',tag)),'w');
 fprintf(fid,'%12.5e %12.5e %12.5e %12.5e %12.5e %12.5e\n',[xh var err bend_angle(Lt,Lr,xh)]');
 fclose(fid);
 
+%% calculate slope
+v = var;
+dq = bend_angle(Lt,Lr,xh(end))-bend_angle(Lt,Lr,xh(2));
+slope = (v(end,:)-v(2,:))/dq;
+fprintf('bend-signal slope:%5.3f, %5.3f\n',slope);
+
 
 %% plot signal (optional)
 
@@ -159,3 +165,5 @@ legend({'ch1','ch2'});
 title(sprintf('Orientation %d°',angle));
 
 figure(1)
+
+

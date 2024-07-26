@@ -1,32 +1,36 @@
 % step contour
 
 clear; close all
-datdir = '.';
+datdir = 'H:\Shared drives\Biao Reseach\Work\prototype5_2024-06-07\bend_processed';
+tag = 'pt4';
+Amp = 0.5;
+
 a = 0:15:360;
 
-v = zeros(7,25);
-v2 = v;
-err = v;
-err2 = v;
+v1 = zeros(8,25);
+v2 = v1;
+err1 = v1;
+err2 = v1;
 for i=1:numel(a)
-    fname = fullfile(datdir,sprintf('pt3_inc_%03d.dat',a(i)));
+    fname = fullfile(datdir,sprintf('%s_%03d.dat',tag,a(i)));
     info = load(fname);
-    v(:,i) = info(:,2);
+    xh = info(:,1);
+    v1(:,i) = info(:,2);
     v2(:,i) = info(:,3);
-    err(:,i) = info(:,4);
+    err1(:,i) = info(:,4);
     err2(:,i) = info(:,5);
 end
 xh = info(:,1);
 
 %% contour
 figure;
-contourf(a,xh,v);
+contourf(a,xh,v1);
 colormap jet
 c=colorbar;
 xticks(a(1:6:end));
 xlabel('load orientation (°)');
 ylabel('load amplitude (mm)');
-clim([-0.3 0.3001])
+clim([-1 1]*Amp)
 title('Ch1')
 
 figure;
@@ -36,14 +40,14 @@ c2=colorbar;
 xticks(a(1:6:end));
 xlabel('load orientation (°)');
 ylabel('load amplitude (mm)');
-clim([-0.3 0.3001])
+clim([-1 1]*Amp)
 title('Ch2');
 
 %% line plots
 
 figure;
 
-errorbar(a,v(end,:),err(end,:),'Color','r','LineWidth',2);
+errorbar(a,v1(end,:),err1(end,:),'Color','r','LineWidth',2);
 hold on
 errorbar(a,v2(end,:),err2(end,:),'Color','b','LineWidth',2);
 
@@ -56,7 +60,7 @@ box on
 xlim([0 360]);
 legend({'ch1','ch2'},'Location','best');
 title(sprintf('load amplitude %3.1f (mm)',xh(end)));
-ylim([-0.3 0.3])
+ylim([-1 1]*Amp)
 
 
 %% measured angle for selected loads
@@ -69,7 +73,7 @@ iload = [3 5 7];
 
 for j=1:numel(iload)
 i = iload(j);
-ma = atan2(v2(i,:),v(i,:))/pi*180;
+ma = atan2(v2(i,:),v1(i,:))/pi*180;
 ind = ma<0;
 
 ma(ind) = ma(ind) + 360;
@@ -89,7 +93,11 @@ ylabel('measured orientation (°)')
 grid on
 box on
 xlim([-15 360]);
-legend({'2.1 mm','4.3 mm','6.5 mm'});
+lgd = cell(1,3);
+for i = 1:numel(iload)
+    lgd{i} = sprintf('%3.1fmm',xh(iload(i)));
+end
+legend(lgd);
 
 % title(sprintf('load amplitude %3.1f (mm)',xh(end)));
 ylim([-15 360])
