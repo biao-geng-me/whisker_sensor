@@ -1,1 +1,8 @@
 *.asv
+/*.dat
+
+# explicitly exclude files from the ignore rules
+# (in otherwords, track these files)
+# turn on if necessary
+# !/acceleration_data/*.dat
+# !/sensor_data_samples/*.dat

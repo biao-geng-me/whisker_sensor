@@ -1,26 +1,42 @@
-% bgeng 2024-04-25 assemble dipole flow test data
+% bgeng 2024-04-25 
+% assemble dipole flow test data for 1 dipole frequency
 % check peak in fft, exclude data where there is no clear peak corresponding to the
-% dipole frequency.
+% dipole frequency
 
 clear;clc;
-datdir = 'H:\Shared drives\Biao Reseach\Work\pt6_2024-07-11\dipole test\dipole_test_ch1';
-savdir = fullfile(datdir,'..');
+%----------- user inputs ----------------
 
+% dipole flow configuration
+a = 0.0254/2; % meter, sphere radius
+d = 0.024; % meter, distance from whisker tip to sphere center
 f = 15; % dipole frequency
-pat = sprintf('st*Hz%d_*p.dat',f);
-sav_ch = 1;
-dat_ch = 2; % channel index
-check_lvl = [2];
+Fs = 88; % sampling frequency. The HX711 board nominal sampling rate is 80Hz,
+         % but could have more than 10% variance.
 
-% accelerometer data
-ac_data_dir = 'C:\Users\bigeme\Working\SealWhisker\sensor\prototype_tests\vibration-data-2024-04-24';
+% data file
+datdir = './sensor_data_samples';
+savdir = fullfile(datdir,'..');
+dat_ch = 1; % channel index in data log to use
+sav_ch = 1; % normally the same as dat_ch unless swapped during data collection
+savname = sprintf('ch%d_x3_sensitivity_%dHz.dat',sav_ch,f);
 
+% sensor data log filename pattern
+% use format specifier liker %d to represent numbers
+% use * to match any string
+filename_fmtstr = 'st_*%dHz_*'; % used to match all data logs for 1 frequency
+level_fmtstr = 'st_*%dHz_%dp*'; % used to match an amplitude level
+filename_pattern = sprintf(filename_fmtstr,f);
 
-Fs = 88; % sensor sample frequency
-t_fft = 30; % use 30 s for fft
-% A_fft = 1e-4; % fft plot y range
+% processing settings
+t_fft = 30; % seconds, time length for fft
+A_fft = 0; % fft plot y range, 0 to use automatic range
+check_lvl = []; % select a subset to check fft spectrum
+%------------ end of user inputs ------------
 
-flist = dir(fullfile(datdir,pat));
+flist = dir(fullfile(datdir,filename_pattern));
+if isempty(flist)
+    error('no data file found using pattern "%s" in %s\n',filename_pattern,datdir);
+end
 
 % get levels
 nfile = numel(flist);
@@ -36,32 +52,24 @@ nlvl = numel(lvl);
 
 % 
 close all;
-
-if ~isempty(check_lvl)
-    ilvl = check_lvl;
-    show_fft = 1;
-else
-    ilvl = 1:nlvl;
-    show_fft = 0;
-end
-savname = sprintf('ch%d_x3_sensitivity_%dHz.dat',sav_ch,f);
-
 % 
 fa = alias_frequency(f,Fs);  % aliased frequency
 amp = zeros(nlvl,1);
 vel = zeros(nlvl,1);
 err = zeros(nlvl,1);
 
-for i=ilvl
-    pat = sprintf('st*Hz%d_*%dp*',f,lvl(i));
+for i=1:nlvl
+    pat = sprintf(level_fmtstr,f,lvl(i));
     flist = dir(fullfile(datdir,pat));
-    ns = numel(flist);
 
+    if isempty(flist)
+        error('no data file found using pattern %s in %s\n',pat,datdir);
+    end
+    ns = numel(flist);
     ampp = zeros(ns,1);
-    
     for j=1:ns
         fname = fullfile(flist(j).folder,flist(j).name);
-        dat = readtable(fname, "FileType","fixedwidth");
+        dat = load_datalog(fname);
         y = dat{:,2+dat_ch};
         y1 = y(end-Fs*t_fft:end);
         [ff,pp] = fast_fourier(y1,Fs);
@@ -72,7 +80,7 @@ for i=ilvl
         imax = imax + ind_s -1;
         ampp(j) = pmax;
         
-        if (show_fft)
+        if ismember(i,check_lvl)
             figure;hold on
             plot(ff,pp)
             plot(ff(imax),pmax,'or');
@@ -91,24 +99,22 @@ for i=ilvl
     err(i) = std(ampp);
 end
 
-
 %% calc tip flow velocity
+% accelerometer data
+ac_data_dir = './acceleration_data';
 file = dir(fullfile(ac_data_dir,sprintf('%dHz*',f)));
 ac_data = load(fullfile(file.folder,file.name));
 ac = interp1(ac_data(:,1),ac_data(:,2),lvl);
 
 % calculate amplitude
 A = ac*9.8/(2*pi*f)^2; % amplitude
-a = 0.0254/2; % sphere radius
-
-d = 0.024; % distance from whisker tip to sphere center
 vtip = 2*pi()*f*A*a.^3*d^-3/2*1000; % mm/s
 
 figure; errorbar(vtip,amp,err,'-+k')
 xlim([0 max(vtip)*1.1]);
 ylim([0 max(amp)*1.1]);
 xlabel('whisker tip velocity (mm/s)');
-ylabel('Signal (mV)');
+ylabel('signal (mV)');
 
 %%
 if ~exist(savdir,"dir")
@@ -117,6 +123,3 @@ end
 fid = fopen(fullfile(savdir,savname),'w');
 fprintf(fid,'%3d %12.5e %12.5e %12.5e\n',[lvl vtip amp err]');
 fclose(fid);
-
-
-

@@ -61,7 +61,7 @@ end
 
 tag = sprintf("%s_%03d",tag,angle);
 
-dat = readtable(fullfile(datdir,fname), "FileType","fixedwidth");
+dat = load_datalog(fullfile(datdir,fname));
 y1 = dat{:,3};
 y2 = dat{:,4};
 
