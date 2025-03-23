@@ -1,5 +1,6 @@
 *.asv
 /*.dat
+*.plt
 
 # explicitly exclude files from the ignore rules
 # (in otherwords, track these files)

@@ -4,7 +4,7 @@ function ba = bend_angle(Lt,Lr,xh)
 % Lr - flexible length
 % xh - deflection
 
-% Lt = 80.3; % from cup surface to actuation point
+% Lt = 80.3; % from cup surface to actuation point, mm
 % Lr = 11.5; % flexible pdms part, mm
 
 
