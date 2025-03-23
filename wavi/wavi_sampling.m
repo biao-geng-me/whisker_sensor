@@ -1,10 +1,11 @@
-function wavi_sampling(s,A,Fs,ns_read,options)
- % 2 channels
+function wavi_sampling(s,A_fft,Fs,ns_read,options)
+    % WAVI_SAMPLING  Read data from serial port and plot
+    %   WAVI_SAMPLING(s,A_fft,Fs,ns_read,options) reads data from serial port s
     arguments
-        s
-        A
-        Fs
-        ns_read
+        s {mustBeA(s,'serial')}
+        A_fft (1,1) double {mustBeNonnegative}
+        Fs (1,1) double {mustBePositive}
+        ns_read (1,1) double {mustBeInteger,mustBePositive} % number of samples to read in each loop
         options.tag = '';
         options.tmax = 3600*10; % maximum run time
         options.outpath = '.';
@@ -25,16 +26,15 @@ function wavi_sampling(s,A,Fs,ns_read,options)
     end
     
     % settings
-    lgd_fs = 120;
+    % lgd_fs = 120; % legend fontsize
     tbuffer = 30; % buffer time, seconds
     tdis = 20;     % display time, seconds
     t_fft = min(tbuffer,options.t_fft);   % fft time length
     t_spec = 20; % spectrogram duration
-    A_fft = A;
+    % A_fft = A_fft;
 
-    an_pos = [0.5,0.6,1.0,0.3];
-    an_pos2 = [0.5,0.5,1.0,0.3];
-
+    % an_pos = [0.5,0.6,1.0,0.3]; % position of annotation
+    % an_pos2 = [0.5,0.5,1.0,0.3];
 
     nch = nsensor*2;
 
@@ -63,15 +63,15 @@ function wavi_sampling(s,A,Fs,ns_read,options)
         ln_sig(i*2-1) = line(darr,sig(:,i*2-1),'Color','r','LineWidth',2,'Marker','+');
         ln_sig(i*2) = line(darr,sig(:,i*2),'Color','b','LineWidth',2,'Marker','None');
     end
-%     note_dR=annotation('textbox',  an_pos,'String',sprintf('ch2 = %12.6f',0),"FontSize",lgd_fs,'EdgeColor','none');
+    % fft
     if options.showfft
         [fh1,sh,bh,fft_ax1,fft_ax2] = init_fft_surf(nch,nfreq,t_fft);
     end
-
+    % spectrogram
     if options.showspec
         [fh3,mh] = init_spec_plot(spec_data,Fs,ns_read);
     end
-
+    % trace
     if options.showtrace
         [fh4,hfar,htrace] = init_trace(Fs,sig,3,3);
     end
@@ -82,12 +82,12 @@ function wavi_sampling(s,A,Fs,ns_read,options)
     
     % Extract desired format for filename (year, month, day, hour, minute, second)
     fileName = sprintf('st_%04d-%02d-%02d_%02d%02d_%05.2f_%s.dat',currentTime.Year,...
-                                                          currentTime.Month,...
-                                                          currentTime.Day,...
-                                                          currentTime.Hour,...
-                                                          currentTime.Minute,...
-                                                          currentTime.Second,...
-                                                          tag);
+                                                                  currentTime.Month,...
+                                                                  currentTime.Day,...
+                                                                  currentTime.Hour,...
+                                                                  currentTime.Minute,...
+                                                                  currentTime.Second,...
+                                                                  tag);
     
     % Open a new file with the generated filename and '.txt' extension
     if ~exist(options.outpath,'dir')
@@ -103,13 +103,15 @@ function wavi_sampling(s,A,Fs,ns_read,options)
     % get initial values
     tic
     flush(s);
-    % align 
+    % align data read
+    % the value 2024 is a marker to indicate the start of a data frame (see HX711_array Arduino code)
+    % this while loop is necessary be cause the line feed \n can randomly appear in the data stream
     tmpv =0;
     while(tmpv~=2024)
         readline(s);
         tmpv = read(s,1,'single');
     end
-    
+    % clear old frames from serial buffer
     fprintf('clearing buffer\n');
     while(s.NumBytesAvailable>(nch+1)*4)
         read(s,(nch+1)*4+1,'char');
@@ -153,7 +155,7 @@ function wavi_sampling(s,A,Fs,ns_read,options)
         darr(end-ns_read+1:end) = linspace(darr(end-ns_read)+seconds(1/Fs),darr(end-ns_read)+seconds(ns_read/Fs),ns_read);
 
         if 1==1 % update plot
-        %   line plot
+            % line plot
             set(0,'CurrentFigure',fh2);
             for i=1:nsensor
                 for j=1:2
@@ -186,7 +188,7 @@ function wavi_sampling(s,A,Fs,ns_read,options)
                 update_fft_surf(sh,bh,fft_map,fft_ax1,fft_ax2);
             end 
 
-            % fh3, spec
+            % fh3, spectrogram
             if(options.showspec)
                 set(0,'CurrentFigure',fh3);
                 update_spec_plot(mh,spec_data);
@@ -196,7 +198,7 @@ function wavi_sampling(s,A,Fs,ns_read,options)
             if options.showtrace
                 set(0,'CurrentFigure',fh4);
                 qd = update_trace(fh4,htrace,hfar,sig(end-Fs:end,:)-V0,Fs,3,3);
-%                 title(sprintf('%5.1f° %s',round(qd)),datetime('now')-dt_loop_start);
+                % title(sprintf('%5.1f° %s',round(qd)),datetime('now')-dt_loop_start);
             end
 
             drawnow
@@ -206,22 +208,20 @@ function wavi_sampling(s,A,Fs,ns_read,options)
         for j=1:ns_read
             currentTime = darr(end-ns_read+j);
             dtstr = sprintf('%04d-%02d-%02d %02d:%02d:%06.3f',currentTime.Year,...
-                                                                      currentTime.Month,...
-                                                                      currentTime.Day,...
-                                                                      currentTime.Hour,...
-                                                                      currentTime.Minute,...
-                                                                      currentTime.Second);
+                                                              currentTime.Month,...
+                                                              currentTime.Day,...
+                                                              currentTime.Hour,...
+                                                              currentTime.Minute,...
+                                                              currentTime.Second);
         
             fprintf(fid,['%s' repmat(' %12.6f',1,nch) '\n'],dtstr,sig(end-ns_read+j,:));
         end
     
-%         fprintf('%s %12.5f %12.3f\n',dtstr,sig(end),toc(tc_s));
+        % fprintf('%s %12.5f %12.3f\n',dtstr,sig(end),toc(tc_s));
     
         if (toc(t_loop_start)>tmax)
             fprintf('maximum time reached\n');
-%             cleanUpFunc(s,fid);
-            
-            
+        % cleanUpFunc(s,fid);
             return
         end
         tcycle = tcycle + toc(tc_s);
@@ -236,9 +236,6 @@ function wavi_sampling(s,A,Fs,ns_read,options)
             nc_read =0;
         end
     end
-
-
-
 end
 
 function cleanUpFunc(s,fid)
