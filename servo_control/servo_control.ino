@@ -10,6 +10,7 @@ int angle0 = initAngle;
 int angleInc = 5;
 int ninc = 8;
 int thold = 1; // seconds
+long SERIAL_WAIT_TIME = 1800*1000L; // ms, L to indicate long integer
 
 
 int cmdInt = 0;
@@ -20,7 +21,7 @@ void setup() {
 
   Serial.begin(9600);
   Serial.println("Arduino is ready");
-  Serial.setTimeout(3600*1000); //ms
+  Serial.setTimeout(SERIAL_WAIT_TIME); //ms
 
   while(1){
       int potReading = analogRead(potPin1);
@@ -135,13 +136,23 @@ void step_inc_release() {
 
       delay(thold*1000);
     }
-
+    
     // slow release
-    for (int i=ninc*angleInc; i>=0; i--){
-      a = angle0+i;
-      servo1.write(a);
-      Serial.println(servo1.read());
-      delay(100);
+    if (angleInc>0) {
+      for (int i=ninc*angleInc; i>=0; i--){
+        a = angle0+i;
+        servo1.write(a);
+        Serial.println(servo1.read());
+        delay(100);
+      }
+    }
+    else {
+      for (int i=ninc*angleInc; i<=0; i++){
+        a = angle0+i;
+        servo1.write(a);
+        Serial.println(servo1.read());
+        delay(100);
+      }
     }
     delay(t_rep*1000);
   }
