@@ -12,6 +12,4 @@ function fa = alias_frequency(f,Fs)
         fa = Fm - mod(f,Fm);
     else
         fa = mod(f,Fm);
-        
-
     end

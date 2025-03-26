@@ -13,9 +13,12 @@ y2 = dat{:,4};
 y1 = y1-y1(1);
 y2 = y2-y2(1);
 
-figure;hold on
-plot(dtime,y1,'-+')
-plot(dtime,y2,'-o')
+h=figure(Units="inch",Position=[1,1,5.2,1.5]);hold on;box on;grid on
+set(gca, 'FontName', 'Times', 'FontSize', 10);
+plot(t,y1,'-+r','LineWidth',1.5);
+plot(t,y2,'-o')
+% xlim([14 15.5])
+% ylim([-0.5 1.5])
 xlabel('time (s)')
 ylabel('signal (mV)')
 legend('ch 1','ch 2')

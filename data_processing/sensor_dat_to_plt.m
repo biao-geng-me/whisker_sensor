@@ -1,8 +1,15 @@
 % convert sensor data (.dat) to Tecplot format (.plt)
 
-function sensor_dat_to_plt(pathname)
-
+function sensor_dat_to_plt(pathname,options)
+    arguments
+        pathname (1,:) char
+        options.remove_offset (1,1) logical = true
+    end
     dat_table = load_datalog(pathname);
+    if isempty(dat_table)
+        fprintf('no data found in %s\n',pathname);
+        return
+    end
     dtime = datetime([datestr(dat_table{:,1}) datestr(dat_table{:,2},' HH:MM:SS.FFF')]);
     ttime = dtime - dtime(1);
     t = seconds(ttime); % time in seconds
@@ -13,6 +20,15 @@ function sensor_dat_to_plt(pathname)
     dat(:,1) = t;
     for i=1:nch
         dat(:,i+1) = dat_table{:,i+2};
+    end
+    % remove nan entries
+    dat = dat(~any(isnan(dat),2),:);
+    ntime = size(dat,1);
+
+    if options.remove_offset
+        for i=2:nch+1
+            dat(:,i) = dat(:,i)-dat(1,i);
+        end
     end
 
     out_pathname = replace(pathname,'.dat','.plt');
