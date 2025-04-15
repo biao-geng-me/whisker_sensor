@@ -1,10 +1,10 @@
-function update_fft_surf(h,bh,fft_map,fft_ax1,fft_ax2)
+function update_fft_surf(fh,sh,bh,fft_map,fft_ax1,fft_ax2)
    % h - surface plot handle
    % bh - bar plot handle
-
-    axes(fft_ax1);
-    h.ZData(:,2:end-1) = fft_map;
-    h.CData = h.ZData;
+    
+    fh.CurrentAxes=fft_ax1;
+    sh.ZData(:,2:end-1) = fft_map;
+    sh.CData = sh.ZData;
 
     amax = max(fft_map(:));
     acrit = 3e-4;
@@ -16,7 +16,7 @@ function update_fft_surf(h,bh,fft_map,fft_ax1,fft_ax2)
         zlim([0 amax]);
     end
     
-    axes(fft_ax2)
+    fh.CurrentAxes=fft_ax2;
     bh.YData = max(fft_map);
     if ~isnan(amax)
         ylim([0 (ceil(amax/acrit)+1)*acrit]);

@@ -1,5 +1,5 @@
 function [fh,sh,bh,ah,ah2] = init_fft_surf(nch,nfreq,t_fft)
-
+    % plot fft as a surface
     % return figure and contour map handles
 
     fh = figure('Position',[960+1920, 60, 960, 920]);
@@ -11,7 +11,7 @@ function [fh,sh,bh,ah,ah2] = init_fft_surf(nch,nfreq,t_fft)
     
     colormap jet
     ah = gca;
-    ah.Position(2) = 0.38;
+    ah.Position(2) = 0.38; % change vertical position
     ah.Position(4) = 0.55;
     
     sh = surface(X,Y,zeros(nfreq,nch+2),'FaceColor','interp','EdgeColor','none',...
@@ -26,10 +26,11 @@ function [fh,sh,bh,ah,ah2] = init_fft_surf(nch,nfreq,t_fft)
     myy = yticks;
     ytlabel = cell(size(myy));
     for i=1:numel(myy)
-        ytlabel{i} = sprintf('%d',myy(i)/t_fft);
+        ytlabel{i} = sprintf('%d',myy(i)/t_fft); % 1/t_fft is the frequency resolution
     end
     yticklabels(ytlabel);
 
+    % plot amplitudes at the bottom
     pos = ah.Position;
     pos(2) = 0.07;
     pos(4) = 0.25;

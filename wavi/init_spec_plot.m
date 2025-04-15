@@ -1,8 +1,8 @@
 function [fh,mh] = init_spec_plot(fft_map,Fs,nread)
-
+    % initialize spectrogram plot
     % return figure and contour map handles
 
-    fh = figure('Position',[1920+960, 240, 640, 480]);
+    fh = figure('Position',[1920+20, 480+20, 640, 480]);
     grid on;
     box on
     %
@@ -11,7 +11,7 @@ function [fh,mh] = init_spec_plot(fft_map,Fs,nread)
     set(mh,'alphadata',isfinite(fft_map));
 %     mh.XData = (1:size(fft_map,2))*dt;
     ylabel('Frequency');
-    yticks(0:Fs/2+1:Fs*20)
+    yticks(0:Fs/2+1:Fs*20) % 20 is the number of maximum channels
     myy = yticks;
     ytlabel = cell(size(myy));
     for i=1:numel(myy)
@@ -29,6 +29,7 @@ function [fh,mh] = init_spec_plot(fft_map,Fs,nread)
         xtlabel{i} = sprintf('%4.1f',(myx(i)-nsample)/fps);
     end
     xticklabels(xtlabel);
+    xlabel('Time (s)');
 
 
 

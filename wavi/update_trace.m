@@ -1,7 +1,7 @@
-function qc = update_trace(fh,pl,far,sig,Fs,nsensor_x,nsensor_y)
+function qc = update_trace(fh,pl,far,sig,Fs,nsensor)
 
-% 
-
+    % 
+    [nsensor_y,nsensor_x]=square_layout(nsensor);
     % correction curve data
     al = -180:15:180;
     am = [-189.68 -175.47 -160.70 -140.22 -119.42 -98.98 -82.22 -65.84 -53.22 -40.49 -30.80 -19.82  -8.67   3.93  21.91  39.02  61.31  81.08 100.44 113.55 125.90 138.31 149.54 158.49 170.32];
@@ -18,6 +18,9 @@ function qc = update_trace(fh,pl,far,sig,Fs,nsensor_x,nsensor_y)
     for iy=1:nsensor_y
     for ix=1:nsensor_x
         isensor=(iy-1)*nsensor_y + ix;
+        if (isensor>nsensor)
+            break
+        end
 
         y1 = sig(end-npt+1:end,isensor*2-1);
         y2 = sig(end-npt+1:end,isensor*2);

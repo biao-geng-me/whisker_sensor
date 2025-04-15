@@ -1,7 +1,8 @@
-function [fh,far,pl] = init_trace(Fs,sig,nsensor_x,nsensor_y)
+function [fh,far,pl] = init_trace(Fs,sig,nsensor)
     % return two line handles, one for filled arrow, one for the trace
 
-    fh=figure('Position',[0, 40, 960, 960]);
+    [nsensor_y,nsensor_x]=square_layout(nsensor);
+    fh=figure('Position',[0, 60, 940, 940]);
     pbaspect([1 1 1]);
     daspect([1 1 1]);
     xlim([0 nsensor_x+1])
@@ -16,6 +17,9 @@ function [fh,far,pl] = init_trace(Fs,sig,nsensor_x,nsensor_y)
     for ix=1:nsensor_x
 
         i=(iy-1)*nsensor_y + ix;
+        if(i>nsensor)
+            break
+        end
         x = sig(1:npt,i*2-1)+ix;
         y = sig(1:npt,i*2)+iy;
         pl(i)=line(x,y,'Color',[1 1 1]*0.5,'linewidth',4);

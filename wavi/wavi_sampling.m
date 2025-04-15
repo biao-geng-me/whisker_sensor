@@ -2,7 +2,7 @@ function wavi_sampling(s,A_fft,Fs,ns_read,options)
     % WAVI_SAMPLING  Read data from serial port and plot
     %   WAVI_SAMPLING(s,A_fft,Fs,ns_read,options) reads data from serial port s
     arguments
-        s {mustBeA(s,'serial')}
+        s {mustBeA(s,'internal.Serialport')}
         A_fft (1,1) double {mustBeNonnegative}
         Fs (1,1) double {mustBePositive}
         ns_read (1,1) double {mustBeInteger,mustBePositive} % number of samples to read in each loop
@@ -11,7 +11,8 @@ function wavi_sampling(s,A_fft,Fs,ns_read,options)
         options.outpath = '.';
         options.showtrace = true;
         options.showfft = true;
-        options.showspec = true;
+        options.show_spectrogram = true;
+        options.show_spectrum = true;
         options.nsensor = 1;
         options.t_fft = 1;
         options.scale = 1;
@@ -31,7 +32,6 @@ function wavi_sampling(s,A_fft,Fs,ns_read,options)
     tdis = 20;     % display time, seconds
     t_fft = min(tbuffer,options.t_fft);   % fft time length
     t_spec = 20; % spectrogram duration
-    % A_fft = A_fft;
 
     % an_pos = [0.5,0.6,1.0,0.3]; % position of annotation
     % an_pos2 = [0.5,0.5,1.0,0.3];
@@ -52,13 +52,14 @@ function wavi_sampling(s,A_fft,Fs,ns_read,options)
     buff = nan(ns_read,nch);
 
     % fft result buffer
-    nfreq = (round(Fs/2*t_fft)) + 1;
+    t_fft = round(Fs*t_fft)/Fs; % adjust to integer number of samples
+    nfreq = (round(Fs/2*t_fft)) + 1; % maximum frequency / resolution + 1
     spec_data = zeros(nfreq*nch,t_spec*ceil(Fs/ns_read));
     dt_spec = ns_read/Fs;
 
     %%% setup plots
     % time history window
-    fh2 = figure('Position',[1920, 120,960, 640]);hold on;grid on;box on
+    fh2 = figure('Position',[1940,40,720,480]);hold on;grid on;box on
     for i=1:nsensor
         ln_sig(i*2-1) = line(darr,sig(:,i*2-1),'Color','r','LineWidth',2,'Marker','+');
         ln_sig(i*2) = line(darr,sig(:,i*2),'Color','b','LineWidth',2,'Marker','None');
@@ -68,12 +69,16 @@ function wavi_sampling(s,A_fft,Fs,ns_read,options)
         [fh1,sh,bh,fft_ax1,fft_ax2] = init_fft_surf(nch,nfreq,t_fft);
     end
     % spectrogram
-    if options.showspec
+    if options.show_spectrogram
         [fh3,mh] = init_spec_plot(spec_data,Fs,ns_read);
     end
     % trace
     if options.showtrace
-        [fh4,hfar,htrace] = init_trace(Fs,sig,3,3);
+        [fh4,hfar,htrace] = init_trace(Fs,sig,nsensor);
+    end
+    % spectrum
+    if options.show_spectrum
+        [fh5,fft_lines] = init_spectrum(nsensor,nfreq,t_fft);
     end
     %%% done 
     
@@ -105,11 +110,18 @@ function wavi_sampling(s,A_fft,Fs,ns_read,options)
     flush(s);
     % align data read
     % the value 2024 is a marker to indicate the start of a data frame (see HX711_array Arduino code)
-    % this while loop is necessary be cause the line feed \n can randomly appear in the data stream
+    % this while loop is necessary because the line feed \n can randomly appear in the data stream
     tmpv =0;
+    fprintf('searching frame start\n');
+    ncount = 0;
     while(tmpv~=2024)
+        fprintf('.')
+        ncount = ncount + 1;
         readline(s);
         tmpv = read(s,1,'single');
+        if mod(ncount,100)==0
+            fprintf('\n');
+        end
     end
     % clear old frames from serial buffer
     fprintf('clearing buffer\n');
@@ -168,15 +180,15 @@ function wavi_sampling(s,A_fft,Fs,ns_read,options)
             xlim([darr(1) darr(end)])
             ylim([0 nsensor+1]);
 
-            % fft
-            if(options.showfft || options.showspec)
+            % compute fft
+            if(options.showfft || options.show_spectrogram || options.show_spectrum)
                 % shift spectrogram
                 spec_data(:,1:end-1) = spec_data(:,2:end);
             
                 for i=1:size(sig,2) % channels
-                    [~,pp] = fast_fourier(sig(end-t_fft*Fs+1:end,i),Fs);
+                    [~,pp] = fast_fourier(sig(floor(end-t_fft*Fs+1):end,i),Fs);
                     n = numel(pp);
-                    ind = (1:n) + (i-1)*n;
+                    ind = (1:n) + (i-1)*nfreq;
                     spec_data(ind,end) = pp;
                 end 
             end
@@ -185,11 +197,11 @@ function wavi_sampling(s,A_fft,Fs,ns_read,options)
             if(options.showfft)
                 set(0,'CurrentFigure',fh1);
                 fft_map = reshape(spec_data(:,end),nfreq,nch);
-                update_fft_surf(sh,bh,fft_map,fft_ax1,fft_ax2);
+                update_fft_surf(fh1,sh,bh,fft_map,fft_ax1,fft_ax2);
             end 
 
             % fh3, spectrogram
-            if(options.showspec)
+            if(options.show_spectrogram)
                 set(0,'CurrentFigure',fh3);
                 update_spec_plot(mh,spec_data);
             end 
@@ -197,10 +209,16 @@ function wavi_sampling(s,A_fft,Fs,ns_read,options)
             % fh4, trace
             if options.showtrace
                 set(0,'CurrentFigure',fh4);
-                qd = update_trace(fh4,htrace,hfar,sig(end-Fs:end,:)-V0,Fs,3,3);
+                qd = update_trace(fh4,htrace,hfar,sig(end-Fs:end,:)-V0,Fs,nsensor);
                 % title(sprintf('%5.1f° %s',round(qd)),datetime('now')-dt_loop_start);
             end
 
+            % fh5, spectrum
+            if options.show_spectrum
+                set(0,'CurrentFigure',fh5);
+                fft_map = reshape(spec_data(:,end),nfreq,nch);
+                update_spectrum(fft_lines,fft_map,A_fft);
+            end
             drawnow
         end % plot
     
