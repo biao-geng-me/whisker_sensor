@@ -1,5 +1,8 @@
 function [dat_table,dt_str,tag] = load_datalog(pathname)
 
+    if ~strcmp(pathname(end-3:end),'.dat')
+        pathname = [pathname '.dat'];
+    end
     dat_table = readtable(pathname, "FileType","fixedwidth");
 
     % extract meta data from datalog filename

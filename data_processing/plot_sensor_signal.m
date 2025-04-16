@@ -23,16 +23,17 @@ function fh=plot_sensor_signal(datalog,isensor,opt)
     t_fft     = opt.t_fft;
     fontsize  = opt.fontsize;
 
+    % --------- end of user input ---------------
+
+    % load data
+    [dat,dt_str,tag] = load_datalog(datalog);
+
     if isempty(opt.title)
-        tag = sprintf('Sensor %d',isensor);
+        tag = sprintf('%s Sensor %d',tag,isensor);
     else
         tag = opt.title;
     end
 
-    % --------- end of user input ---------------
-
-    % load data
-    dat = load_datalog(datalog);
     dtime = datetime([datestr(dat{:,1}) datestr(dat{:,2},' HH:MM:SS.FFF')]);
     ttime = dtime - dtime(1);
     t = seconds(ttime); % time in seconds

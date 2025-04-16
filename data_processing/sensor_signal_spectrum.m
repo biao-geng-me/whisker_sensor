@@ -36,5 +36,11 @@ function [ff,pp1,pp2,fh] = sensor_signal_spectrum(datalog,isensor,opt)
         if ~isempty(opt.title)
             title(opt.title)
         end
+        xlabel ('Frequency (Hz)')
+        ylabel ('Amplitude (mV)')
+
+        if ~isempty(t_range)
+            title(sprintf('Time range: [%g,%g]',t_range));
+        end
     end
 
