@@ -1,6 +1,5 @@
 
 % check sensor signal using the plot_sensor_signal function
-
 clear;clc;close all
 
 % -------------------
@@ -28,8 +27,17 @@ for k = 1:numel(files)
         params = get_params(files(k).name,{'_test_(\S+)_two'}); 
         tag = sprintf ("400 RPM, two motor, %s, sensor %d",params{1},isensor);
         file = fullfile(files(k).folder,files(k).name);
-        fh(k) = plot_sensor_signal(file,isensor,title=tag,f_range=f_range);
-        saveas(fh(k),sprintf('%s_%d',params{1},isensor));
+        fh(k) = plot_sensor_signal(file,isensor,title=tag,f_range=f_range,clickable=true);
+        savefig(fh(k),sprintf('%s_%d',params{1},isensor),'compact');
     end
 end
+
+%% spectrum plot example
+
+%  use the sensor_signal_spectrum function to do fft of a signal segment
+path = 'sensor_data_samples';
+name = 'st_2025-04-09_1115_27.00_400RPM_20x40bar_test_edge_two_motor.dat';
+isensor = 1;
+[ff,pp1,pp2,fh] = sensor_signal_spectrum(fullfile(path,name),isensor,show_fft=true,t_range=[23 33]);
+
 
