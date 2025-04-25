@@ -1,8 +1,16 @@
 function [fh,sh,bh,ah,ah2] = init_fft_surf(nch,nfreq,t_fft)
     % plot fft as a surface
     % return figure and contour map handles
+    monp = get(groot,'MonitorPositions');
+    if size(monp,1)>1 % show on second monitor,
+        monp = monp(2,:);
+        fig_pos = [monp(1), 49, monp(3)*0.5, monp(4)-80];
+    else % show on first monitor reduced size
+        monp = monp(1,:);
+        fig_pos = [monp(1)+monp(3)*0.5, 49, monp(3)*0.4, monp(4) - 100];
+    end
 
-    fh = figure('Position',[960+1920, 60, 960, 920]);
+    fh = figure('OuterPosition',fig_pos);
     grid on;
     box on
     %
