@@ -8,7 +8,7 @@ function qc = update_trace(fh,pl,far,sig,Fs,nsensor)
 
     set(0,'CurrentFigure',fh);
     trace_length = 0.5; % seconds
-    ahp = 0.1; % arrow head length percentage
+    ahp = 0.2; % arrow head length percentage
     h = 0.01;
     npt = round(trace_length*Fs);
 

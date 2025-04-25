@@ -58,24 +58,31 @@ function wavi_sampling(s,A_fft,Fs,ns_read,options)
     dt_spec = ns_read/Fs;
 
     %%% setup plots
+
     % time history window
-    fh2 = figure('Position',[1940,40,720,480]);hold on;grid on;box on
+    display_info=get(groot);
+    pos1 = display_info.MonitorPositions(1,:);
+    fh2 = figure('OuterPosition',[0,61,pos1(3)*0.5,pos1(4)-80]);hold on;grid on;box on
     for i=1:nsensor
         ln_sig(i*2-1) = line(darr,sig(:,i*2-1),'Color','r','LineWidth',2,'Marker','+');
         ln_sig(i*2) = line(darr,sig(:,i*2),'Color','b','LineWidth',2,'Marker','None');
     end
+
     % fft
     if options.showfft
         [fh1,sh,bh,fft_ax1,fft_ax2] = init_fft_surf(nch,nfreq,t_fft);
     end
+
     % spectrogram
     if options.show_spectrogram
         [fh3,mh] = init_spec_plot(spec_data,Fs,ns_read);
     end
+
     % trace
     if options.showtrace
         [fh4,hfar,htrace] = init_trace(Fs,sig,nsensor);
     end
+
     % spectrum
     if options.show_spectrum
         [fh5,fft_lines] = init_spectrum(nsensor,nfreq,t_fft);
@@ -164,7 +171,8 @@ function wavi_sampling(s,A_fft,Fs,ns_read,options)
         t_read = t_read+toc;
         
         sig(end-ns_read+1:end,:) = filloutliers(buff,'linear');
-        darr(end-ns_read+1:end) = linspace(darr(end-ns_read)+seconds(1/Fs),darr(end-ns_read)+seconds(ns_read/Fs),ns_read);
+        darr(end-ns_read+1:end) = linspace(darr(end-ns_read)+seconds(1/Fs),...
+                                           darr(end-ns_read)+seconds(ns_read/Fs),ns_read);
 
         if 1==1 % update plot
             % line plot

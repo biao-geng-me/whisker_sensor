@@ -2,7 +2,20 @@ function [fh,far,pl] = init_trace(Fs,sig,nsensor)
     % return two line handles, one for filled arrow, one for the trace
 
     [nsensor_y,nsensor_x]=square_layout(nsensor);
-    fh=figure('Position',[0, 60, 940, 940]);
+
+    monp = get(groot,'MonitorPositions');
+    if size(monp,1)>1 % show on second monitor,
+        monp = monp(2,:);
+        npixel = round(min(monp(3)*0.8/nsensor_x,monp(4)*0.8/nsensor_y));
+        fig_pos = [monp(1)+50, 49, npixel*nsensor_x, npixel*nsensor_y];
+    else % show on first monitor reduced size
+        monp = monp(1,:);
+        npixel = round(min(monp(3)*0.6/nsensor_x,monp(4)*0.6/nsensor_y));
+        fig_pos = [monp(1)+100, monp(2)+monp(4)*0.2, npixel*nsensor_x, npixel*nsensor_y];
+    end
+
+    fh = figure('Position',fig_pos);
+
     pbaspect([1 1 1]);
     daspect([1 1 1]);
     xlim([0 nsensor_x+1])
@@ -28,7 +41,7 @@ function [fh,far,pl] = init_trace(Fs,sig,nsensor)
         L = norm([x(end),y(end)]);
     
         q = atan2(y(end),x(end));
-        ahp = 0.1; % arrow head length percentage
+        ahp = 0.2; % arrow head length percentage
     
         h = 0.01;
         L1 = L*(1-ahp);

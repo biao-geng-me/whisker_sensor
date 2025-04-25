@@ -2,7 +2,7 @@
 clear; clc; fclose all; close all
 
 fprintf('Setting up arduino\n')
-s=serialport("COM7",2000000); % change COM number accordingly
+s=serialport("COM4",2000000); % change COM number accordingly
 fopen(s);
 
 
@@ -15,10 +15,10 @@ nrepeat = 1;
 tmax = 4000;
 tag = 'test';
 
-Fs = 12;
-Afft = 1e-4;
-nread = 2;
-nsensor = 3;
+Fs = 84;
+Afft = 0;
+nread = 4;
+nsensor = 1;
 
 for i=1:nrepeat
     wavi_sampling(s,Afft,Fs,nread,'tag',tag,'tmax',tmax,'outpath',outpath,'showtrace',true,...

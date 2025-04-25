@@ -2,7 +2,16 @@ function [fh,mh] = init_spec_plot(fft_map,Fs,nread)
     % initialize spectrogram plot
     % return figure and contour map handles
 
-    fh = figure('Position',[1920+20, 480+20, 640, 480]);
+    monp = get(groot,'MonitorPositions');
+    if size(monp,1)>1 % show on second monitor,
+        monp = monp(2,:);
+        fig_pos = [monp(1)+monp(3)*0.5, 49, monp(3)*0.5, monp(4)-80];
+    else % show on first monitor reduced size
+        monp = monp(1,:);
+        fig_pos = [monp(1)+20, 49+ monp(4)*0.4, monp(3)*0.5, monp(4)*0.6 - 60];
+    end
+
+    fh = figure('OuterPosition',fig_pos);
     grid on;
     box on
     %
