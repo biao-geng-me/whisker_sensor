@@ -63,23 +63,28 @@
 #define HANDLE_ALERTS (1)
  
 // Define the acceleration limits to be used for each move, pulses per sec^2
-int32_t accelerationLimit = 20000;
+int32_t accelerationLimit = 10000;
+int32_t velocityLimit = 8000;
 int32_t aoa_acc_limit = 10000;
 int32_t aoa_vel_limit = 3200;
- 
+
+//--------------------------------------------------------------------------------------
 // Declares user-defined helper functions.
 // The definition/implementations of these functions are at the bottom of the sketch.
 void init_clearpath(MotorDriver &motor, const char* name);
-// void init_long_axis_motor(const char* name);
-// void init_short_axis_motor(const char* name);
 void init_generic_stepper();
 bool MoveAtVelocity(MotorDriver &motor, int32_t velocity, const char* name);
+bool MoveAbsolutePosition(MotorDriver &motor, int32_t pos, const char* name);
 void MoveDistance(MotorDriver &motor, int32_t distance);
 void PrintAlerts(MotorDriver &motor);
 void HandleAlerts(MotorDriver &motor);
 void recv_until_end_marker();
-void update_speed_from_serial();
-void move_xy(int32_t xv, int32_t yv);
+void update_cmd_from_serial();
+void move_axis(MotorDriver &motor, const char *name, const char *cmd, int32_t &current_speed);
+void move_xy(int32_t la_vel, int32_t sa_vel);
+void print_current_position();
+void handle_motor_alert(MotorDriver &motor, const char * action);
+//--------------------------------------------------------------------------------------
 
 int32_t current_direction = 0;
 int32_t current_x_speed = 0;
@@ -132,13 +137,7 @@ void setup() {
     init_clearpath(long_axis_motor, "Long axis motor");
     init_generic_stepper();
 
-    x_pos = long_axis_motor.PositionRefCommanded();
-    y_pos = short_axis_motor.PositionRefCommanded();
-    Serial.print("current position: [");
-    Serial.print(x_pos);
-    Serial.print(",");
-    Serial.print(y_pos);
-    Serial.println("].");
+    print_current_position();
     // Test drive
     if (1==1) {
 
@@ -150,17 +149,15 @@ void setup() {
 
         // Command a 0 steps/sec velocity to stop motion for 2000ms
         move_xy(0,0);
-        Delay_ms(2000);
-        x_pos = long_axis_motor.PositionRefCommanded();
-        y_pos = short_axis_motor.PositionRefCommanded();
-        Serial.print("current position: [");
-        Serial.print(x_pos);
-        Serial.print(",");
-        Serial.print(y_pos);
-        Serial.println("].");
+        Delay_ms(200);
+        print_current_position();
         // reset position reference
-        long_axis_motor.PositionRefSet(0);
-        short_axis_motor.PositionRefSet(0);
+        // long_axis_motor.PositionRefSet(0);
+        // short_axis_motor.PositionRefSet(0);
+        
+        // return to power-on position
+        MoveAbsolutePosition(long_axis_motor, 0, "Long axis");
+        MoveAbsolutePosition(short_axis_motor, 0, "Short axis");
     }
     MoveDistance(aoa_motor,800);
     Delay_ms(1000);
@@ -172,32 +169,18 @@ void loop() {
     int32_t loop_time = Milliseconds();
     loop_count++;
     if (Serial.available()) {
-        update_speed_from_serial();
+        update_cmd_from_serial();
     }
-    else {
-        target_x_speed = 0;
-        target_y_speed = 0;
-    }
-
-    if (current_x_speed != target_x_speed || current_y_speed != target_y_speed) {
-        Serial.print("Changing speed to [");
-        Serial.print(target_x_speed);
-        Serial.print(", ");
-        Serial.print(target_y_speed);
-        Serial.println("].");
-        move_xy(target_x_speed, target_y_speed);
-        current_x_speed = target_x_speed;
-        current_y_speed = target_y_speed;
+    else { // set all motor to move at 0 speed (automatic decelerate)
+        command_fields[0] = "VEL0";
+        command_fields[1] = "VEL0";
+        command_fields[2] = "VEL0";
     }
 
-    // get current position
-    x_pos = long_axis_motor.PositionRefCommanded();
-    y_pos = short_axis_motor.PositionRefCommanded();
-    Serial.print("current position: [");
-    Serial.print(x_pos);
-    Serial.print(",");
-    Serial.print(y_pos);
-    Serial.println("].");
+    move_axis(long_axis_motor, "Long axis", command_fields[0], current_x_speed);
+    move_axis(short_axis_motor, "Short axis", command_fields[1], current_y_speed);
+
+    print_current_position();
 
     loop_time = Milliseconds() - loop_time;
     work_time+= loop_time;
@@ -231,6 +214,9 @@ void loop() {
         Serial.print(work_time/nAvg);
         Serial.print(", Highest possible FPS=");
         Serial.println(1000.0/work_time*nAvg);
+        
+        // get current position
+
     }
 }
 
@@ -246,9 +232,10 @@ void init_clearpath(MotorDriver &motor, const char* name) {
     motor.HlfbMode(MotorDriver::HLFB_MODE_HAS_BIPOLAR_PWM);
     // Set the HFLB carrier frequency to 482 Hz
     motor.HlfbCarrier(MotorDriver::HLFB_CARRIER_482_HZ);
+    // Sets the maximum velocity for each move
+    motor.VelMax(velocityLimit);
     // Set the maximum acceleration for each move
     motor.AccelMax(accelerationLimit);
-
     // Enables the motors; homing will begin automatically if enabled
     motor.EnableRequest(true);
     Serial.print(name);
@@ -262,30 +249,75 @@ void init_clearpath(MotorDriver &motor, const char* name) {
         Serial.println(motor.HlfbState());
         Serial.print("Wating for: ");
         Serial.println(MotorDriver::HLFB_ASSERTED);
-        Delay_ms(1000);
+        Delay_ms(100);
         continue;
     }
 
     // Check if motor alert occurred during enabling
     // Clear alert if configured to do so 
-    if (motor.StatusReg().bit.AlertsPresent) {
-        Serial.println("Motor alert detected.");       
-        PrintAlerts(motor);
-        if(HANDLE_ALERTS){
-            HandleAlerts(motor);
-        } else {
-            Serial.println("Enable automatic alert handling by setting HANDLE_ALERTS to 1.");
-        }
-        Serial.println("Enabling may not have completed as expected. Proceed with caution.");      
-        Serial.println();
-    } else {
-        Serial.println("Motor Ready"); 
-    }
+    handle_motor_alert(motor, "Enabling");
+    // if (motor.StatusReg().bit.AlertsPresent) {
+    //     Serial.println("Motor alert detected.");       
+    //     PrintAlerts(motor);
+    //     if(HANDLE_ALERTS){
+    //         HandleAlerts(motor);
+    //     } else {
+    //         Serial.println("Enable automatic alert handling by setting HANDLE_ALERTS to 1.");
+    //     }
+    //     Serial.println("Enabling may not have completed as expected. Proceed with caution.");      
+    //     Serial.println();
+    // } else {
+    //     Serial.println("Motor Ready"); 
+    // }
 }
 
 void move_xy(int32_t la_vel, int32_t sa_vel) {
     MoveAtVelocity(long_axis_motor, la_vel, "Long axis");
     MoveAtVelocity(short_axis_motor, sa_vel, "Short axis");
+}
+
+void move_axis(MotorDriver &motor,
+                    const char* name,
+                    const char* cmd,
+                    int32_t & current_speed) {
+
+    if (strncmp(cmd,"VEL",3)==0) { // Velocity move
+        int32_t target_speed = atoi(cmd+3);
+        if (current_speed != target_speed) {
+            MoveAtVelocity(motor, target_speed, name);
+            current_speed = target_speed;
+        }
+    }
+    else if (strncmp(cmd,"ABS",3)==0) { // Move to absolute position
+        int32_t pos = atoi(cmd+3);
+        MoveAbsolutePosition(motor, pos, name);
+    }
+    else if (strncmp(cmd,"SET",3)==0) { // Set current position as absolute 0 (home position)
+        motor.PositionRefSet(0);
+        handle_motor_alert(motor,cmd);
+    }
+    else if (strncmp(cmd,"PRE",3)==0) { // Continue Previous action
+        /* no change */
+    }
+    else if (strncmp(cmd,"CVL",3)==0) { // Change velocity limit
+        uint32_t vel = atoi(cmd+3);
+        motor.VelMax(vel); // todo: add bounds
+        handle_motor_alert(motor,cmd);
+    }
+    else if (strncmp(cmd,"CAL",3)==0) { // Change acceleration limit
+        uint32_t acl = atoi(cmd+3);
+        motor.AccelMax(acl); // todo: add bounds
+        handle_motor_alert(motor,cmd);
+    }
+    else { // unknown commands treated as move at 0 speed
+        Serial.print(name);
+        Serial.print(' unknown command: ');
+        Serial.print(cmd);
+        Serial.print(', Stopping.');
+        int32_t target_speed = 0;
+        MoveAtVelocity(motor, target_speed, name);
+        current_speed = target_speed;
+    }
 }
 
 /*------------------------------------------------------------------------------
@@ -350,7 +382,75 @@ bool MoveAtVelocity(MotorDriver &motor, int32_t velocity, const char* name) {
     }
 }
 //------------------------------------------------------------------------------
+
+/*------------------------------------------------------------------------------
+ * MoveAbsolutePosition
+ *
+ *    Command step pulses to move the motor's current position to the absolute
+ *    position specified by "position"
+ *    Prints the move status to the USB serial port
+ *    Returns when HLFB asserts (indicating the motor has reached the commanded
+ *    position)
+ *
+ * Parameters:
+ *    int position  - The absolute position, in step pulses, to move to
+ *
+ * Returns: True/False depending on whether the move was successfully triggered.
+ */
+bool MoveAbsolutePosition(MotorDriver &motor, int32_t position, const char* name) {
+    // Check if a motor alert is currently preventing motion
+    // Clear alert if configured to do so 
+    if (motor.StatusReg().bit.AlertsPresent) {
+        Serial.println("Motor alert detected.");       
+        PrintAlerts(motor);
+        if(HANDLE_ALERTS){
+            HandleAlerts(motor);
+        } else {
+            Serial.println("Enable automatic alert handling by setting HANDLE_ALERTS to 1.");
+        }
+        Serial.println("Move canceled.");      
+        Serial.println();
+        return false;
+    }
+    Serial.print(name);
+    Serial.print(" moving to absolute position: ");
+    Serial.println(position);
  
+    // Command the move of absolute distance
+    motor.Move(position, MotorDriver::MOVE_TARGET_ABSOLUTE);
+ 
+    // Waits for HLFB to assert (signaling the move has successfully completed)
+    Serial.println("Moving.. HLFB skipped");
+
+    // while ( (!motor.StepsComplete() || motor.HlfbState() != MotorDriver::HLFB_ASSERTED) &&
+    //         !motor.StatusReg().bit.AlertsPresent) {
+    //     Serial.print(motor.StepsComplete());
+    //     Serial.print('\t');
+    //     Serial.println(motor.HlfbState());
+    //     Delay_ms(100);
+    //     continue;
+    // }
+
+    // Check if motor alert occurred during move
+    // Clear alert if configured to do so 
+    if (motor.StatusReg().bit.AlertsPresent) {
+        Serial.println("Motor alert detected.");       
+        PrintAlerts(motor);
+        if(HANDLE_ALERTS){
+            HandleAlerts(motor);
+        } else {
+            Serial.println("Enable automatic fault handling by setting HANDLE_ALERTS to 1.");
+        }
+        Serial.println("Motion may not have completed as expected. Proceed with caution.");
+        Serial.println();
+        return false;
+    } else {
+        Serial.println("Command done");
+        return true;
+    }
+}
+//------------------------------------------------------------------------------
+
 // for generic stepper motor
 void MoveDistance(MotorDriver &motor, int32_t distance) {
     Serial.print("Moving distance: ");
@@ -427,7 +527,7 @@ void MoveDistance(MotorDriver &motor, int32_t distance) {
 //------------------------------------------------------------------------------
  
 
-void update_speed_from_serial() {
+void update_cmd_from_serial() {
     while(Serial.available()){
         recv_until_end_marker();
     }
@@ -441,13 +541,11 @@ void update_speed_from_serial() {
     ptr = strtok(cmd_char_array,",");
     while (ptr != NULL) {
         command_fields[index] = ptr;
-        Serial.println(command_fields[index]);
+        // Serial.println(command_fields[index]);
         index++;
         // Subsequent calls to strtok takes NULL and use internal static status to continue from previous position
         ptr = strtok(NULL, ","); 
     }
-    target_x_speed = atoi(command_fields[0]);
-    target_y_speed = atoi(command_fields[1]);
 }
 
 void recv_until_end_marker() {
@@ -477,5 +575,35 @@ void recv_until_end_marker() {
     }
     cmd_char_array[ndx] = '\0'; // terminate the string
 }
- 
+
+void print_current_position() {
+    x_pos = long_axis_motor.PositionRefCommanded();
+    y_pos = short_axis_motor.PositionRefCommanded();
+    Serial.print("\tcurrent position: [");
+    Serial.print(x_pos);
+    Serial.print(",");
+    Serial.print(y_pos);
+    Serial.println("].");
+}
+
+void handle_motor_alert(MotorDriver &motor, const char * action) {
+
+     // Check if motor alert occurred during action
+    // Clear alert if configured to do so 
+    if (motor.StatusReg().bit.AlertsPresent) {
+        Serial.println("Motor alert detected.");       
+        PrintAlerts(motor);
+        if(HANDLE_ALERTS){
+            HandleAlerts(motor);
+        } else {
+            Serial.println("Enable automatic alert handling by setting HANDLE_ALERTS to 1.");
+        }
+        Serial.print(action);
+        Serial.println(" may not have completed as expected. Proceed with caution.");      
+        Serial.println();
+    } else {
+        Serial.print(action);
+        Serial.println(" done.");
+    }
+}
  
