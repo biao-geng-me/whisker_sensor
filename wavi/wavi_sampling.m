@@ -10,7 +10,7 @@ function wavi_sampling(s,A_fft,Fs,ns_read,options)
         options.tmax = 3600*10; % maximum run time
         options.outpath = '.';
         options.showtrace = true;
-        options.showfft = true;
+        options.showfft = true; 
         options.show_spectrogram = true;
         options.show_spectrum = true;
         options.nsensor = 1;
@@ -227,7 +227,7 @@ function wavi_sampling(s,A_fft,Fs,ns_read,options)
                 fft_map = reshape(spec_data(:,end),nfreq,nch);
                 update_spectrum(fft_lines,fft_map,A_fft);
             end
-            drawnow
+            drawnow limitrate
         end % plot
     
         % save data

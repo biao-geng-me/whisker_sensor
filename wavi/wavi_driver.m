@@ -1,8 +1,13 @@
 % reconnect serial port
+try
+    delete(s);
+catch
+end
+%%
 clear; clc; fclose all; close all
 
 fprintf('Setting up arduino\n')
-s=serialport("COM4",2000000); % change COM number accordingly
+s=serialport("COM13",2000000); % change COM number accordingly
 fopen(s);
 
 
@@ -15,14 +20,19 @@ nrepeat = 1;
 tmax = 4000;
 tag = 'test';
 
-Fs = 84;
+Fs = 10;
 Afft = 0;
-nread = 4;
+nread = 2;
 nsensor = 1;
 
 for i=1:nrepeat
-    wavi_sampling(s,Afft,Fs,nread,'tag',tag,'tmax',tmax,'outpath',outpath,'showtrace',true,...
-                  'nsensor',nsensor,'showfft',true,'show_spectrogram',true,'t_fft',1,'scale',1);
+    wavi_sampling(s,Afft,Fs,nread,'tag',tag,'tmax',tmax,'outpath',outpath,'nsensor',nsensor, ...
+        'showtrace',false,...
+        'showfft',true, ...
+        'show_spectrogram',true, ...
+        'show_spectrum', false, ...
+        't_fft',1, ...
+        'scale',1);
 end
 
 fprintf("%s all done\n",tag);
