@@ -63,7 +63,7 @@
 #define HANDLE_ALERTS (1)
  
 // Define the acceleration limits to be used for each move, pulses per sec^2
-int32_t accelerationLimit = 10000;
+int32_t accelerationLimit = 20000;
 int32_t velocityLimit = 8000;
 int32_t aoa_acc_limit = 10000;
 int32_t aoa_vel_limit = 3200;
@@ -96,7 +96,8 @@ int32_t target_x_speed = 0;
 int32_t target_y_speed = 0;
 
 #define tAvg 2000; // time interval for reporting performance
-#define STEADY_CYCLE_TIME 25 // time interval to check input, to ensure smoothness, the input firing rate must be equal or higher.
+#define STEADY_CYCLE_TIME 5 // time interval to check input
+uint32_t input_check_count = 0;
 uint32_t loop_count = 0;
 uint32_t work_time = 0;
 uint32_t total_time = 0; // total loop time for averaging
@@ -170,11 +171,19 @@ void loop() {
     loop_count++;
     if (Serial.available()) {
         update_cmd_from_serial();
+        input_check_count = 0;
+    }
+    else if (input_check_count * STEADY_CYCLE_TIME < 50) {
+        command_fields[0] = "PRE";
+        command_fields[1] = "PRE";
+        command_fields[2] = "PRE";
+        input_check_count++; 
     }
     else { // set all motor to move at 0 speed (automatic decelerate)
         command_fields[0] = "VEL0";
         command_fields[1] = "VEL0";
         command_fields[2] = "VEL0";
+        input_check_count++;
     }
 
     move_axis(long_axis_motor, "Long axis", command_fields[0], current_x_speed);
@@ -309,11 +318,16 @@ void move_axis(MotorDriver &motor,
         motor.AccelMax(acl); // todo: add bounds
         handle_motor_alert(motor,cmd);
     }
+    else if (strncmp(cmd,"NUL",3)==0) { // NUL stop
+        int32_t target_speed = 0;
+        MoveAtVelocity(motor, target_speed, name);
+        current_speed = target_speed;
+    }
     else { // unknown commands treated as move at 0 speed
         Serial.print(name);
-        Serial.print(' unknown command: ');
+        Serial.print(" unknown command: ");
         Serial.print(cmd);
-        Serial.print(', Stopping.');
+        Serial.print(", Stopping.");
         int32_t target_speed = 0;
         MoveAtVelocity(motor, target_speed, name);
         current_speed = target_speed;
@@ -348,9 +362,9 @@ bool MoveAtVelocity(MotorDriver &motor, int32_t velocity, const char* name) {
         Serial.println();
         return false;
     }
-    Serial.print(name);
-    Serial.print(" commanding velocity: ");
-    Serial.println(velocity);
+    // Serial.print(name);
+    // Serial.print(" commanding velocity: ");
+    // Serial.println(velocity);
  
     // Command the velocity move
     motor.MoveVelocity(velocity);
@@ -377,7 +391,7 @@ bool MoveAtVelocity(MotorDriver &motor, int32_t velocity, const char* name) {
         Serial.println();
         return false;
     } else {
-        Serial.println("Move Done");
+        // Serial.println("Move Done");
         return true;
     }
 }
@@ -532,8 +546,8 @@ void update_cmd_from_serial() {
         recv_until_end_marker();
     }
 
-    Serial.print("\nReceived ");
-    Serial.println(cmd_char_array);
+    // Serial.print("\nReceived ");
+    // Serial.println(cmd_char_array);
 
     // Parse command
     byte index = 0;
@@ -579,11 +593,14 @@ void recv_until_end_marker() {
 void print_current_position() {
     x_pos = long_axis_motor.PositionRefCommanded();
     y_pos = short_axis_motor.PositionRefCommanded();
+    
     Serial.print("\tcurrent position: [");
     Serial.print(x_pos);
     Serial.print(",");
     Serial.print(y_pos);
-    Serial.println("].");
+    Serial.print("],");
+    Serial.print(Milliseconds());
+    Serial.println(".");
 }
 
 void handle_motor_alert(MotorDriver &motor, const char * action) {
