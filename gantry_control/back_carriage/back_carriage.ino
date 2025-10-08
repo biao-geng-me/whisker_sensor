@@ -41,6 +41,15 @@
 // Specifies which motor to move.
 // Options are: ConnectorM0, ConnectorM1, ConnectorM2, or ConnectorM3.
 // Note: generic stepper motors (non-ClearPath) can only be connected to M0
+#define HAS_AOA 1
+#define IS_AOA_GENERIC 1
+
+#if IS_AOA_GENERIC
+#define STEPS_PER_REV 6400 // genric stepper, use maximum for smoother motion
+#else
+#define STEPS_PER_REV 800 // clearpath motor default setting
+#endif
+
 #define aoa_motor ConnectorM0
 #define long_axis_motor ConnectorM1
 #define short_axis_motor ConnectorM2
@@ -63,22 +72,22 @@
 #define HANDLE_ALERTS (1)
  
 // Define the acceleration limits to be used for each move, pulses per sec^2
-int32_t accelerationLimit = 20000;
-int32_t velocityLimit = 8000;
-int32_t aoa_acc_limit = 10000;
-int32_t aoa_vel_limit = 3200;
+int32_t accelerationLimit = 10000;
+int32_t velocityLimit = 6000;
+int32_t aoa_acc_limit = 6400; // reduce this if the motor struggles
+int32_t aoa_vel_limit = 6400;
 
 //--------------------------------------------------------------------------------------
 // Declares user-defined helper functions.
 // The definition/implementations of these functions are at the bottom of the sketch.
-void init_clearpath(MotorDriver &motor, const char* name);
+void init_clearpath(MotorDriver &motor, const char* name, int32_t vmax, int32_t amax);
 void init_generic_stepper();
 bool MoveAtVelocity(MotorDriver &motor, int32_t velocity, const char* name);
 bool MoveAbsolutePosition(MotorDriver &motor, int32_t pos, const char* name);
-void MoveDistance(MotorDriver &motor, int32_t distance);
+void GenericStepperMoveDistance(MotorDriver &motor, int32_t distance);
 void PrintAlerts(MotorDriver &motor);
 void HandleAlerts(MotorDriver &motor);
-void recv_until_end_marker();
+bool recv_until_end_marker();
 void update_cmd_from_serial();
 void move_axis(MotorDriver &motor, const char *name, const char *cmd, int32_t &current_speed);
 void move_xy(int32_t la_vel, int32_t sa_vel);
@@ -89,11 +98,10 @@ void handle_motor_alert(MotorDriver &motor, const char * action);
 int32_t current_direction = 0;
 int32_t current_x_speed = 0;
 int32_t current_y_speed = 0;
+int32_t current_a_speed = 0; // AOA
 int32_t x_pos = 0;
 int32_t y_pos = 0;
-
-int32_t target_x_speed = 0;
-int32_t target_y_speed = 0;
+int32_t a_pos = 0;
 
 #define tAvg 2000; // time interval for reporting performance
 #define STEADY_CYCLE_TIME 5 // time interval to check input
@@ -134,9 +142,8 @@ void setup() {
     // Init the motors
     // init_long_axis_motor("Long axis");
     // init_short_axis_motor("Short axis");
-    init_clearpath(short_axis_motor, "Short axis motor");
-    init_clearpath(long_axis_motor, "Long axis motor");
-    init_generic_stepper();
+    init_clearpath(short_axis_motor, "Short axis motor", velocityLimit, accelerationLimit);
+    init_clearpath(long_axis_motor, "Long axis motor", velocityLimit, accelerationLimit);
 
     print_current_position();
     // Test drive
@@ -160,16 +167,59 @@ void setup() {
         MoveAbsolutePosition(long_axis_motor, 0, "Long axis");
         MoveAbsolutePosition(short_axis_motor, 0, "Short axis");
     }
-    MoveDistance(aoa_motor,800);
-    Delay_ms(1000);
 
+    if(HAS_AOA && !IS_AOA_GENERIC) {
+        init_clearpath(aoa_motor, "AOA motor", aoa_vel_limit, aoa_acc_limit);
+
+        MoveAbsolutePosition(aoa_motor, STEPS_PER_REV/2, "AOA");
+        Delay_ms(500);
+        MoveAbsolutePosition(aoa_motor, 0, "AOA");
+        Delay_ms(500);
+        MoveAbsolutePosition(aoa_motor, -STEPS_PER_REV, "AOA");
+        Delay_ms(500);
+        MoveAbsolutePosition(aoa_motor, 0, "AOA");
+    }
+    else if (HAS_AOA && IS_AOA_GENERIC){
+        init_generic_stepper();
+        GenericStepperMoveDistance(aoa_motor, STEPS_PER_REV/8);
+        Delay_ms(1000);
+        GenericStepperMoveDistance(aoa_motor,-STEPS_PER_REV/4);
+        Delay_ms(1000);
+        GenericStepperMoveDistance(aoa_motor, STEPS_PER_REV/8);
+        Delay_ms(1000);
+    }
     prev_time = Milliseconds();
 }
 
 void loop() {
     int32_t loop_time = Milliseconds();
     loop_count++;
-    if (Serial.available()) {
+
+    /* For testing ClearPath AOA motor*/
+    // Delay_ms(5000);
+    // MoveAbsolutePosition(aoa_motor, 80, "AOA axis");
+    // Delay_ms(2000);
+    // MoveAbsolutePosition(aoa_motor, -80, "AOA axis");
+    // Delay_ms(2000);
+    // MoveAbsolutePosition(aoa_motor, 0, "AOA axis");
+    // Delay_ms(2000);
+
+    /* For testing generic stepper AOA motor*/
+    // GenericStepperMoveDistance(aoa_motor, STEPS_PER_REV/2);
+    // Delay_ms(1500);
+    // GenericStepperMoveDistance(aoa_motor,-STEPS_PER_REV);
+    // Delay_ms(3000);
+    // GenericStepperMoveDistance(aoa_motor, STEPS_PER_REV/2);
+    // Delay_ms(1500);
+    // Delay_ms(3000);
+
+
+    if(IS_AOA_GENERIC && !aoa_motor.StepsComplete()){ // wait for generic motor to complete rotation
+        command_fields[0] = "PRE";
+        command_fields[1] = "PRE";
+        command_fields[2] = "PRE";
+    }
+    else if (Serial.available()) {
         update_cmd_from_serial();
         input_check_count = 0;
     }
@@ -188,7 +238,27 @@ void loop() {
 
     move_axis(long_axis_motor, "Long axis", command_fields[0], current_x_speed);
     move_axis(short_axis_motor, "Short axis", command_fields[1], current_y_speed);
-
+    if(HAS_AOA) {
+        if(IS_AOA_GENERIC){ // tobe refactored into move_axis_generic function
+            const char* cmd = command_fields[2];
+            if (strncmp(cmd,"SET",3)==0){
+                a_pos = 0;
+            }
+            else if (strncmp(cmd,"ABS",3)==0){
+                int32_t pos = atoi(cmd+3);
+                GenericStepperMoveDistance(aoa_motor, pos-a_pos);
+                a_pos = pos;
+            }
+            else if (strncmp(cmd,"REL",3)==0){
+                int32_t dis = atoi(cmd+3);
+                GenericStepperMoveDistance(aoa_motor, dis);
+                a_pos +=dis;
+            }
+        }
+        else{
+            move_axis(aoa_motor, "AOA axis", command_fields[2], current_a_speed);
+        }
+    }
     print_current_position();
 
     loop_time = Milliseconds() - loop_time;
@@ -235,16 +305,16 @@ void init_generic_stepper() {
     aoa_motor.EnableRequest(true);
 }
 
-void init_clearpath(MotorDriver &motor, const char* name) {
+void init_clearpath(MotorDriver &motor, const char* name, int32_t vel_max, int32_t accel_max) {
 
     // Set the motor's HLFB mode to bipolar PWM
     motor.HlfbMode(MotorDriver::HLFB_MODE_HAS_BIPOLAR_PWM);
     // Set the HFLB carrier frequency to 482 Hz
     motor.HlfbCarrier(MotorDriver::HLFB_CARRIER_482_HZ);
     // Sets the maximum velocity for each move
-    motor.VelMax(velocityLimit);
+    motor.VelMax(vel_max);
     // Set the maximum acceleration for each move
-    motor.AccelMax(accelerationLimit);
+    motor.AccelMax(accel_max);
     // Enables the motors; homing will begin automatically if enabled
     motor.EnableRequest(true);
     Serial.print(name);
@@ -265,19 +335,6 @@ void init_clearpath(MotorDriver &motor, const char* name) {
     // Check if motor alert occurred during enabling
     // Clear alert if configured to do so 
     handle_motor_alert(motor, "Enabling");
-    // if (motor.StatusReg().bit.AlertsPresent) {
-    //     Serial.println("Motor alert detected.");       
-    //     PrintAlerts(motor);
-    //     if(HANDLE_ALERTS){
-    //         HandleAlerts(motor);
-    //     } else {
-    //         Serial.println("Enable automatic alert handling by setting HANDLE_ALERTS to 1.");
-    //     }
-    //     Serial.println("Enabling may not have completed as expected. Proceed with caution.");      
-    //     Serial.println();
-    // } else {
-    //     Serial.println("Motor Ready"); 
-    // }
 }
 
 void move_xy(int32_t la_vel, int32_t sa_vel) {
@@ -466,20 +523,20 @@ bool MoveAbsolutePosition(MotorDriver &motor, int32_t position, const char* name
 //------------------------------------------------------------------------------
 
 // for generic stepper motor
-void MoveDistance(MotorDriver &motor, int32_t distance) {
-    Serial.print("Moving distance: ");
-    Serial.println(distance);
+void GenericStepperMoveDistance(MotorDriver &motor, int32_t distance) {
+    // Serial.print("Moving distance: ");
+    // Serial.println(distance);
  
     // Command the move of incremental distance
     motor.Move(distance);
  
     // Waits for all step pulses to output
     // Serial.println("Moving... Waiting for the step output to finish...");
-    // while (!motor.StepsComplete()) {
-    //     continue;
-    // }
+    while (!motor.StepsComplete()) {
+        continue;
+    }
 
-    Serial.println("Done");
+    // Serial.println("Done");
 }
  
 /*------------------------------------------------------------------------------
@@ -543,10 +600,14 @@ void MoveDistance(MotorDriver &motor, int32_t distance) {
 
 void update_cmd_from_serial() {
     while(Serial.available()){
-        recv_until_end_marker();
+        if(recv_until_end_marker()!=0){
+            strcpy(cmd_char_array, "PRE,PRE,PRE>"); // cmd receiving error, use previous command
+            break;
+        };
     }
-
-    // Serial.print("\nReceived ");
+    
+    // Serial.print(Milliseconds());
+    // Serial.print("\tReceived ");
     // Serial.println(cmd_char_array);
 
     // Parse command
@@ -558,46 +619,79 @@ void update_cmd_from_serial() {
         // Serial.println(command_fields[index]);
         index++;
         // Subsequent calls to strtok takes NULL and use internal static status to continue from previous position
-        ptr = strtok(NULL, ","); 
+        ptr = strtok(NULL, ",");
     }
 }
 
-void recv_until_end_marker() {
+bool recv_until_end_marker() {
     // block reading
     // make sure that communication is fast
 
     byte ndx = 0;
     char endMarker = '>';
     char rc;
-    
+
+    uint32_t timeout = 10000; // 10s, should be much shorter, 10s is for debug purpose
+    uint32_t startTime = Milliseconds();
+
     rc = Serial.read();
     while (rc != endMarker) {
         cmd_char_array[ndx] = rc;
         // Serial.println(rc);
         ndx++;
         if (ndx >= RECV_BUFFER_LENGTH) {
+            Serial.print("Command longer than ");
+            Serial.print(RECV_BUFFER_LENGTH);
+            Serial.println(" characters. Truncated");
             ndx = RECV_BUFFER_LENGTH - 1;
         }
-        while (!Serial.available()) { 
+
+        while (!Serial.available()) {
             // Block until serial is available
             // This is necessary because Serial data is slow compared to the read function
             // Serial.println("waiting for end marker '>'");
             Delay_ms(1);
-            continue;
+
+            if(Milliseconds()-startTime > timeout) {
+                Serial.print("Next character in command not received in ");
+                Serial.print(timeout);
+                Serial.print(" ms. The following command is skipped:\n  ");
+                Serial.println(cmd_char_array);
+                return 1;
+            }
         }
+
         rc = Serial.read();
     }
     cmd_char_array[ndx] = '\0'; // terminate the string
+    
+    return 0;
 }
 
 void print_current_position() {
     x_pos = long_axis_motor.PositionRefCommanded();
     y_pos = short_axis_motor.PositionRefCommanded();
+    if(HAS_AOA){
+        if(IS_AOA_GENERIC){
+            // a_pos set in moving function
+        }
+        else {
+            a_pos = aoa_motor.PositionRefCommanded();   
+        }
+    }
     
     Serial.print("\tcurrent position: [");
     Serial.print(x_pos);
     Serial.print(",");
     Serial.print(y_pos);
+    
+    // for interface consistence, a_pos is output regardless whether aoa is present
+    Serial.print(",");
+    Serial.print(a_pos);
+    Serial.print(",");
+    Serial.print(int(float(a_pos)/STEPS_PER_REV*360));
+    
+
     Serial.print("],");
     Serial.print(Milliseconds());
     Serial.println(".");
