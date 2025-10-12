@@ -118,7 +118,8 @@ uint32_t nAvg = (int)2000/STEADY_CYCLE_TIME;
 #define RECV_BUFFER_LENGTH 128 // 128 is the maximum? for ClearCore.
 
 // command parsing
-char *command_fields[3];
+#define NUM_CMD_FIELDS 3
+char *command_fields[NUM_CMD_FIELDS];
 char cmd_char_array[RECV_BUFFER_LENGTH];
 
 void setup() {
@@ -149,10 +150,10 @@ void setup() {
     // Test drive
     if (1==1) {
 
-        move_xy(1000,1000);
+        move_xy(-200,-200);
         Delay_ms(1000);
 
-        move_xy(-1000,-1000);
+        move_xy(200,200);
         Delay_ms(1000);
 
         // Command a 0 steps/sec velocity to stop motion for 2000ms
@@ -171,11 +172,11 @@ void setup() {
     if(HAS_AOA && !IS_AOA_GENERIC) {
         init_clearpath(aoa_motor, "AOA motor", aoa_vel_limit, aoa_acc_limit);
 
-        MoveAbsolutePosition(aoa_motor, STEPS_PER_REV/2, "AOA");
+        MoveAbsolutePosition(aoa_motor, STEPS_PER_REV/4, "AOA");
         Delay_ms(500);
         MoveAbsolutePosition(aoa_motor, 0, "AOA");
         Delay_ms(500);
-        MoveAbsolutePosition(aoa_motor, -STEPS_PER_REV, "AOA");
+        MoveAbsolutePosition(aoa_motor, -STEPS_PER_REV/4, "AOA");
         Delay_ms(500);
         MoveAbsolutePosition(aoa_motor, 0, "AOA");
     }
@@ -620,6 +621,17 @@ void update_cmd_from_serial() {
         index++;
         // Subsequent calls to strtok takes NULL and use internal static status to continue from previous position
         ptr = strtok(NULL, ",");
+    }
+
+    if(index!=NUM_CMD_FIELDS){
+        Serial.print("Command must have ");
+        Serial.print(NUM_CMD_FIELDS);
+        Serial.print(" fields. Command '");
+        Serial.print(cmd_char_array);
+        Serial.println("' discarded.");
+        command_fields[0] = "PRE";
+        command_fields[1] = "PRE";
+        command_fields[2] = "PRE";
     }
 }
 
