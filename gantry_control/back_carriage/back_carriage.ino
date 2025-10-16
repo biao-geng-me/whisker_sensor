@@ -41,7 +41,7 @@
 // Specifies which motor to move.
 // Options are: ConnectorM0, ConnectorM1, ConnectorM2, or ConnectorM3.
 // Note: generic stepper motors (non-ClearPath) can only be connected to M0
-#define HAS_AOA 1
+#define HAS_AOA 0
 #define IS_AOA_GENERIC 1
 
 #if IS_AOA_GENERIC
@@ -53,6 +53,13 @@
 #define aoa_motor ConnectorM0
 #define long_axis_motor ConnectorM1
 #define short_axis_motor ConnectorM2
+
+// Per-axis sign flips. Set to 1 or -1 depending on motor installation.
+// If a motor is installed reversed relative to the controller's coordinate
+// convention, set the corresponding SIGN to -1 to invert direction in firmware.
+#define LONG_AXIS_SIGN -1 // -1 for front carriage,  1 for back carriage
+#define SHORT_AXIS_SIGN 1
+#define AOA_SIGN 1
  
 // Select the baud rate to match the target serial device
 #define baudRate 2000000
@@ -89,7 +96,7 @@ void PrintAlerts(MotorDriver &motor);
 void HandleAlerts(MotorDriver &motor);
 bool recv_until_end_marker();
 void update_cmd_from_serial();
-void move_axis(MotorDriver &motor, const char *name, const char *cmd, int32_t &current_speed);
+void move_axis(MotorDriver &motor, const char *name, const char *cmd, int32_t &current_speed, int axis_sign);
 void move_xy(int32_t la_vel, int32_t sa_vel);
 void print_current_position();
 void handle_motor_alert(MotorDriver &motor, const char * action);
@@ -182,11 +189,11 @@ void setup() {
     }
     else if (HAS_AOA && IS_AOA_GENERIC){
         init_generic_stepper();
-        GenericStepperMoveDistance(aoa_motor, STEPS_PER_REV/8);
+        GenericStepperMoveDistance(aoa_motor, AOA_SIGN * (STEPS_PER_REV/8));
         Delay_ms(1000);
-        GenericStepperMoveDistance(aoa_motor,-STEPS_PER_REV/4);
+        GenericStepperMoveDistance(aoa_motor, AOA_SIGN * (-STEPS_PER_REV/4));
         Delay_ms(1000);
-        GenericStepperMoveDistance(aoa_motor, STEPS_PER_REV/8);
+        GenericStepperMoveDistance(aoa_motor, AOA_SIGN * (STEPS_PER_REV/8));
         Delay_ms(1000);
     }
     prev_time = Milliseconds();
@@ -237,8 +244,8 @@ void loop() {
         input_check_count++;
     }
 
-    move_axis(long_axis_motor, "Long axis", command_fields[0], current_x_speed);
-    move_axis(short_axis_motor, "Short axis", command_fields[1], current_y_speed);
+    move_axis(long_axis_motor, "Long axis", command_fields[0], current_x_speed, LONG_AXIS_SIGN);
+    move_axis(short_axis_motor, "Short axis", command_fields[1], current_y_speed, SHORT_AXIS_SIGN);
     if(HAS_AOA) {
         if(IS_AOA_GENERIC){ // tobe refactored into move_axis_generic function
             const char* cmd = command_fields[2];
@@ -247,17 +254,18 @@ void loop() {
             }
             else if (strncmp(cmd,"ABS",3)==0){
                 int32_t pos = atoi(cmd+3);
-                GenericStepperMoveDistance(aoa_motor, pos-a_pos);
-                a_pos = pos;
+                    // convert external pos to motor units and move the delta
+                    GenericStepperMoveDistance(aoa_motor, AOA_SIGN * (pos - a_pos));
+                    a_pos = pos;
             }
             else if (strncmp(cmd,"REL",3)==0){
                 int32_t dis = atoi(cmd+3);
-                GenericStepperMoveDistance(aoa_motor, dis);
-                a_pos +=dis;
+                    GenericStepperMoveDistance(aoa_motor, AOA_SIGN * dis);
+                    a_pos += dis;
             }
         }
         else{
-            move_axis(aoa_motor, "AOA axis", command_fields[2], current_a_speed);
+            move_axis(aoa_motor, "AOA axis", command_fields[2], current_a_speed, AOA_SIGN);
         }
     }
     print_current_position();
@@ -339,17 +347,21 @@ void init_clearpath(MotorDriver &motor, const char* name, int32_t vel_max, int32
 }
 
 void move_xy(int32_t la_vel, int32_t sa_vel) {
-    MoveAtVelocity(long_axis_motor, la_vel, "Long axis");
-    MoveAtVelocity(short_axis_motor, sa_vel, "Short axis");
+    // Apply installation sign flips so external commands remain consistent
+    MoveAtVelocity(long_axis_motor, LONG_AXIS_SIGN * la_vel, "Long axis");
+    MoveAtVelocity(short_axis_motor, SHORT_AXIS_SIGN * sa_vel, "Short axis");
 }
 
 void move_axis(MotorDriver &motor,
                     const char* name,
                     const char* cmd,
-                    int32_t & current_speed) {
+                    int32_t & current_speed,
+                    int axis_sign) {
 
     if (strncmp(cmd,"VEL",3)==0) { // Velocity move
         int32_t target_speed = atoi(cmd+3);
+        // apply sign flip based on caller-provided axis_sign
+        target_speed *= axis_sign;
         if (current_speed != target_speed) {
             MoveAtVelocity(motor, target_speed, name);
             current_speed = target_speed;
@@ -357,6 +369,8 @@ void move_axis(MotorDriver &motor,
     }
     else if (strncmp(cmd,"ABS",3)==0) { // Move to absolute position
         int32_t pos = atoi(cmd+3);
+        // apply sign flip provided by caller
+        pos *= axis_sign;
         MoveAbsolutePosition(motor, pos, name);
     }
     else if (strncmp(cmd,"SET",3)==0) { // Set current position as absolute 0 (home position)
@@ -688,14 +702,15 @@ void print_current_position() {
             // a_pos set in moving function
         }
         else {
-            a_pos = aoa_motor.PositionRefCommanded();   
+            // Present positions in external coordinate system by applying sign
+            a_pos = AOA_SIGN * aoa_motor.PositionRefCommanded();   
         }
     }
     
     Serial.print("\tcurrent position: [");
-    Serial.print(x_pos);
+    Serial.print(LONG_AXIS_SIGN * x_pos);
     Serial.print(",");
-    Serial.print(y_pos);
+    Serial.print(SHORT_AXIS_SIGN * y_pos);
     
     // for interface consistence, a_pos is output regardless whether aoa is present
     Serial.print(",");
