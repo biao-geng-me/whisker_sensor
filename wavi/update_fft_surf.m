@@ -1,7 +1,8 @@
 function update_fft_surf(fh,sh,bh,fft_map,fft_ax1,fft_ax2)
    % h - surface plot handle
    % bh - bar plot handle
-    
+   
+    set(0,'CurrentFigure',fh);
     fh.CurrentAxes=fft_ax1;
     sh.ZData(:,2:end-1) = fft_map;
     sh.CData = sh.ZData;
@@ -23,7 +24,6 @@ function update_fft_surf(fh,sh,bh,fft_map,fft_ax1,fft_ax2)
     end
     grid on;
     title(sprintf("%7.5f",amax))
-    drawnow
         
 
 

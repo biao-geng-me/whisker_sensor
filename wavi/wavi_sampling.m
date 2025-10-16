@@ -16,16 +16,18 @@ function wavi_sampling(s,A_fft,Fs,ns_read,options)
         options.nsensor = 1;
         options.t_fft = 1;
         options.scale = 1;
+        options.ch_map = [];
     end
     nsensor = options.nsensor;
+    if isempty(options.ch_map)
+        ch_map = 1:2*nsensor;
+    else
+        ch_map = options.ch_map;
+    end
     tag = options.tag;
     tmax = options.tmax;
     set(0, 'DefaultAxesFontSize', 20);
 
-    if ~exist(options.outpath,'dir')
-        mkdir(options.outpath);
-    end
-    
     % settings
     % lgd_fs = 120; % legend fontsize
     tbuffer = 30; % buffer time, seconds
@@ -101,7 +103,7 @@ function wavi_sampling(s,A_fft,Fs,ns_read,options)
                                                                   currentTime.Second,...
                                                                   tag);
     
-    % Open a new file with the generated filename and '.txt' extension
+    % Open a new file with the generated filename
     if ~exist(options.outpath,'dir')
         mkdir(options.outpath);
     end
@@ -135,7 +137,7 @@ function wavi_sampling(s,A_fft,Fs,ns_read,options)
     while(s.NumBytesAvailable>(nch+1)*4)
         read(s,(nch+1)*4+1,'char');
     end
-    fprintf('%g seconds to find sample start\n',toc)
+    fprintf('%g seconds to find sample start\n',toc);
 
     % initial values
     for j=1:round(Fs)
@@ -143,7 +145,7 @@ function wavi_sampling(s,A_fft,Fs,ns_read,options)
         readline(s);
         read(s,1,'single');
     end 
-
+    V0 = V0(ch_map);
     fprintf(['\n' repmat(' %12.6f',1,nch) '\n'],V0);
 
     t_loop_start = tic;
@@ -152,7 +154,7 @@ function wavi_sampling(s,A_fft,Fs,ns_read,options)
     nc_avg = ceil(Fs/ns_read);
     dt_loop_start = datetime('now');
 
-    nc_read=0;
+    nc_read=0; % counter
 
     while (1)
         nc_read=nc_read+1;
@@ -170,7 +172,7 @@ function wavi_sampling(s,A_fft,Fs,ns_read,options)
         end
         t_read = t_read+toc;
         
-        sig(end-ns_read+1:end,:) = filloutliers(buff,'linear');
+        sig(end-ns_read+1:end,:) = filloutliers(buff(:,ch_map),'linear');
         darr(end-ns_read+1:end) = linspace(darr(end-ns_read)+seconds(1/Fs),...
                                            darr(end-ns_read)+seconds(ns_read/Fs),ns_read);
 

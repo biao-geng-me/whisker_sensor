@@ -1,4 +1,4 @@
-function [fh,mh] = init_spec_plot(fft_map,Fs,nread)
+function [fh,mh] = init_spec_plot(spec_data,Fs,nread)
     % initialize spectrogram plot
     % return figure and contour map handles
 
@@ -15,10 +15,10 @@ function [fh,mh] = init_spec_plot(fft_map,Fs,nread)
     grid on;
     box on
     %
-    mh = imagesc(fft_map);
+    mh = imagesc(spec_data);
     colormap jet
-    set(mh,'alphadata',isfinite(fft_map));
-%     mh.XData = (1:size(fft_map,2))*dt;
+    set(mh,'alphadata',isfinite(spec_data));
+%     mh.XData = (1:size(spec_data,2))*dt;
     ylabel('Frequency');
     yticks(0:Fs/2+1:Fs*20) % 20 is the number of maximum channels
     myy = yticks;
@@ -29,7 +29,7 @@ function [fh,mh] = init_spec_plot(fft_map,Fs,nread)
     yticklabels(ytlabel);
     
     fps = round(Fs/nread);
-    nsample = size(fft_map,2);
+    nsample = size(spec_data,2);
     myx = nsample:-fps*5:0;
     xticks(sort(myx))
     myx = xticks;

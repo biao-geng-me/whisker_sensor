@@ -1,6 +1,7 @@
 function [fh,sh,bh,ah,ah2] = init_fft_surf(nch,nfreq,t_fft)
     % plot fft as a surface
     % return figure and contour map handles
+    
     monp = get(groot,'MonitorPositions');
     if size(monp,1)>1 % show on second monitor,
         monp = monp(2,:);
