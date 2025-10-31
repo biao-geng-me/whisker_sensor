@@ -349,7 +349,7 @@ classdef ControlModePanel < handle
 
         end
 
-        function pd = createPathDataFromSelection(app)
+        function [pd,fullpath] = createPathDataFromSelection(app)
             % Return a PathData object built from the single selected file.
             selItems = app.FileListBox.Value;
             if isempty(selItems) || numel(selItems)~=1

@@ -14,7 +14,9 @@ classdef Jakiro < handle
         run_start_time = [] % time when experiment started
         cc1_done = false; % flag indicating carriage 1 finished path tracking
         cc2_done = false; % flag indicating carriage 2 finished path tracking
-        pathpath_update_interval = 1; % update interval for path tracking
+        pathpath_tick_period = 25; % period of path tracking timer in ms
+        pathpath_redraw_interval = 2; % update interval for path tracking
+        outpath % output path for wavi data
     end
     methods
         function app = Jakiro()
@@ -34,31 +36,47 @@ classdef Jakiro < handle
             ax.Layout.Column = [1 3];
             ax.Layout.Row = 3;
 
+            % Front carriage
             cc1_panel = uipanel(uigl,BackgroundColor=[0 0.4470 0.7410]);
             cc1_panel.Layout.Column = 1;
             cc1_panel.Layout.Row = [1 2];
             app.CC1 = CarriageApp(cc1_panel,ax);
             app.CC1.Car.origin = [3870, 0]; % parking position for carriage 1 (steps)
             app.CC1.Car.origin_mm = app.CC1.Car.origin * app.CC1.Car.step2mm;
-            app.CC1.Car.path_dx_max = 3900; % max x movement range (mm)
+            app.CC1.Car.path_dx_max = 3800; % max x movement range (mm)
             app.CC1.Car.name = 'Front Carriage';
+            app.CC1.CarView.mark.DisplayName = 'Front Carriage';
             
+            % Back carriage
             cc2_panel = uipanel(uigl);
             cc2_panel.Layout.Column = 2;
             cc2_panel.Layout.Row = [1 2];
             app.CC2 = CarriageApp(cc2_panel,ax);
             app.CC2.Car.joystick_side = 'R';
-            app.CC2.Car.path_dx_max = 3600; % max x movement range (mm)
+            app.CC2.Car.path_dx_max = 3500; % max x movement range (mm)
             app.CC2.Car.name = 'Back Carriage';
-            
+            app.CC2.CarView.mark.DisplayName = 'Back Carriage';
+            app.CC2.CarView.mark.Marker = 's';
+
+            % Data acquisition
             wa_panel = uipanel(uigl);
             wa_panel.Layout.Column = 3;
             wa_panel.Layout.Row = 1;
-            try
-                app.WA = wavi(wa_panel,true);
-            catch
-                % wavi not present, ignore
+            user_dir = getenv('USERPROFILE');
+            if isempty(user_dir)
+                user_dir = getenv('HOME');
             end
+            if isempty(user_dir)
+                user_dir = '.';
+            end
+            outpath = fullfile(user_dir,'wavi_data');
+            if ~isfolder(outpath)
+                mkdir(outpath);
+            end
+            app.outpath = outpath;
+            app.WA = wavi(wa_panel,false,n_update=4,...
+                            ch_map =load('channel_map.txt'),... % not standalone mode
+                            outpath = outpath);
 
             % Experiment control panel in row 2, column 3
             exp_panel_parent = uipanel(uigl,'Title','Experiment');
@@ -132,6 +150,14 @@ classdef Jakiro < handle
             catch
             end
 
+            % Stop/cleanup Wavi (data acquisition)
+            try
+                if isprop(app,'WA') && ~isempty(app.WA)
+                    app.WA.cleanup();
+                end
+            catch
+            end
+
             % close UIFigure
             try
                 if isvalid(app.UIFigure)
@@ -144,7 +170,7 @@ classdef Jakiro < handle
         function onStartExperiment(app, ~, ~)
             % coordinate the two carriages using parameters from ExpPanel
             try
-                [v1,v2,delay_s] = app.ExpPanel.getParameters();
+                [v1,v2,delay_s,run_tag] = app.ExpPanel.getParameters();
             catch
                 warning('Failed to read experiment parameters.');
                 return
@@ -154,7 +180,7 @@ classdef Jakiro < handle
             app.CC1.Car.vel_max = round(v1*1000/app.CC1.Car.step2mm);
             app.CC2.Car.vel_max = round(v2*1000/app.CC2.Car.step2mm);
 
-            [xp,yp,rp,L,start_x,start_y,start_s] = app.CC1.prepare_pathtracking_data(); % generate data from selected file
+            [xp,yp,rp,L,start_x,start_y,start_s,pathtag1] = app.CC1.prepare_pathtracking_data(); % generate data from selected file
             try
                 start(app.CC1.redrawTimer);
             catch
@@ -163,7 +189,7 @@ classdef Jakiro < handle
             app.CC1.Car.init_pathtracking_variables(xp,yp,rp,L,start_s);
             stop(app.CC1.redrawTimer);
 
-            [xp,yp,rp,L,start_x,start_y,start_s] = app.CC2.prepare_pathtracking_data(); % generate data from selected file
+            [xp,yp,rp,L,start_x,start_y,start_s,pathtag2] = app.CC2.prepare_pathtracking_data(); % generate data from selected file
             try
                 start(app.CC2.redrawTimer);
             catch
@@ -175,7 +201,7 @@ classdef Jakiro < handle
             % create or reconfigure the timer
             if isempty(app.pathpathTimer) || ~isvalid(app.pathpathTimer)
                 app.pathpathTimer = timer('TimerFcn',@(src,evt) app.path_path_tick(src,evt),...
-                    'Period', 25/1000, 'ExecutionMode','fixedrate', 'Name','Path Path timer', 'BusyMode','drop');
+                    'Period', app.pathpath_tick_period/1000, 'ExecutionMode','fixedrate', 'Name','Path Path timer', 'BusyMode','drop');
                 else
                     try
                         stop(app.pathpathTimer);
@@ -183,9 +209,16 @@ classdef Jakiro < handle
                     end
             end
             
+            % prepare daq
+            if ~isempty(app.WA.s)
+                app.WA.tag = sprintf('%s_%s-v1=%.2f_%s-v2=%.2f_delay=%.1f',run_tag,pathtag1,v1,pathtag2,v2,delay_s);
+                app.WA.init_datalog_file();
+                app.WA.align_data_read();
+                app.WA.average_signal_as_offset(round(app.WA.Fs));
+                app.WA.spec_data = nan(size(app.WA.spec_data)); % reset spectrogram
+            end
             app.run_start_time = datetime('now');
             start(app.pathpathTimer);
-            
         end
     end
 
@@ -198,7 +231,6 @@ classdef Jakiro < handle
                 app.cc2_done = false;
             end
 
-            
             % both carriages run in path tracking mode
             if ~app.cc1_done
                 app.cc1_done = app.CC1.Car.pathTrackingTick();
@@ -212,8 +244,9 @@ classdef Jakiro < handle
             end
 
             % app.WA.read_serial_data(app.WA.ns_read, app.WA.ns_fill);
+            app.WA.read_update_tick();
 
-            if mod(src.TasksExecuted,app.pathpath_update_interval)==0
+            if mod(src.TasksExecuted,app.pathpath_redraw_interval)==0
                 app.CC1.update_view();
                 app.CC2.update_view();
                 % app.WA.update_visuals();
@@ -224,6 +257,7 @@ classdef Jakiro < handle
                 % finished path tracking for carriage 1
                 try
                     stop(src);
+                    fclose(app.WA.fout);
                 catch
                 end
             end

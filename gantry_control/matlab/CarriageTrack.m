@@ -3,6 +3,7 @@ classdef CarriageTrack < handle
     %   Detailed explanation goes here
     
     properties
+        name = 'Carriage'; % name of the carriage
         ax  % parent ax
         x = 0.5;
         y = 0.5;
@@ -13,6 +14,7 @@ classdef CarriageTrack < handle
         mark
         traj % trajectory plot handle
         big_num = 1e6;
+        marker_symbol = '+';
         marker_size = 50;
         traj_marker_size = 10;
         istart_traj = 2;
@@ -53,16 +55,19 @@ classdef CarriageTrack < handle
             b = obj.big_num;
             obj.hor_line = line(obj.ax,[-b b],[obj.y, obj.y]);
             obj.ver_line = line(obj.ax,[obj.x, obj.x], [-b, b]);
+            obj.hor_line.Annotation.LegendInformation.IconDisplayStyle = 'off';
+            obj.ver_line.Annotation.LegendInformation.IconDisplayStyle = 'off';
 
             obj.xt = zeros(obj.nt,1); % for trajectory
             obj.yt = zeros(obj.nt,1); % for trajectory
 
             hold(obj.ax,'on');
             obj.mark = scatter(obj.ax,obj.x,obj.y,obj.marker_size, ...
-                "red","filled","+",...
+                "red",obj.marker_symbol,...
                 "MarkerEdgeColor",[1 0 0], ...
                 "MarkerFaceColor",[1 0 0], ...
-                "LineWidth",obj.marker_lw);
+                "LineWidth",obj.marker_lw, ...
+                "DisplayName",obj.name);
 
             obj.traj = scatter(obj.ax,obj.xt(1:end-obj.istart_traj), ...
                 obj.yt(1:end-obj.istart_traj), ...
@@ -70,6 +75,7 @@ classdef CarriageTrack < handle
                 "red","filled","o",...
                 "MarkerEdgeColor",'None', ...
                 "MarkerFaceColor",[0.2 0.2 0.2]);
+            obj.traj.Annotation.LegendInformation.IconDisplayStyle = 'off';
             alpha = 1:obj.nt;
             obj.traj.MarkerFaceAlpha = 'flat';
             obj.traj.AlphaData = alpha(1:end-obj.istart_traj);

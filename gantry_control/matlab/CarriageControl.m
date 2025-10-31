@@ -33,8 +33,8 @@ classdef CarriageControl < handle
         joystick_side
         step2mm = 0.0499; % clearpath motor steps to mm conversion, measured from installation
         polling_interval = 25 % ms
-        aoa_motor_type = 'Stepper'
-        control_aoa = false;
+        aoa_motor_type = 'ClearPath' % 'Stepper' or 'ClearPath'
+        control_aoa = true % whether to control AOA automatically (keep 0 aoa)
 
         wait_prev = 0
         vx_current = 0 % current x vel, command value
@@ -44,9 +44,9 @@ classdef CarriageControl < handle
         current_pos = [0 0 0 0 0] % [x, y, aoa_pos, aoa_angle, controller time]
         prev_pos = [0 0 0 0 0]
         
-        vel_max = 5000
-        vx_max = 5000
-        vy_max = 5000
+        vel_max = 10000
+        vx_max = 10000
+        vy_max = 10000
 
         % target velocity
         vx_cruise = 0
@@ -81,7 +81,14 @@ classdef CarriageControl < handle
         path_npoll = 0           % poll counter
         path_CMD_INTERVAL =  25   % ms (default)
         path_stopRequested = 0   % flag to request stop from outside
-        path_dx_max = 3800       % max x movement range (mm)
+        path_dx_max = 3600       % max x movement range (mm)
+
+        % movement boundaries (mm). Leave empty (Inf) for no bound.
+        x_min_mm = -Inf
+        x_max_mm = Inf
+        y_min_mm = -Inf
+        y_max_mm = Inf
+        boundary_margin_mm = 20    % margin (mm) near boundary to start blocking motion
     end
 
     properties
@@ -162,12 +169,13 @@ classdef CarriageControl < handle
             obj.s = s;
             obj.name = opt.name;
 
-            motor_settings.MAX_SPEED = 6000;
+            motor_settings.MAX_SPEED = 20000; % max speed steps/sec
             motor_settings.INC_SPEED = 200; % to do: base this on FPS
             motor_settings.X_SIGN = opt.X_Sign;
             motor_settings.Y_SIGN = opt.Y_Sign;
             motor_settings.ACC = 20000; % acceleration steps/sec^2
-            motor_settings.STEPS_PER_REV = 6400;
+            % motor_settings.STEPS_PER_REV = 6400; % for generic stepper
+            motor_settings.STEPS_PER_REV = 800*20; % for ClearPath with 20:1 gearbox
             obj.motor_settings = motor_settings;
 
             % 'native' is necessary. WARNING: control will be active even when MATLAB is out of focus
@@ -400,7 +408,9 @@ classdef CarriageControl < handle
                         obj.vy_current = sign(obj.vy_current)*obj.vy_max;
                     end
                 end
-                
+
+                % enforce movement boundaries (zero velocity component if at/near boundary)
+                [obj.vx_current, obj.vy_current] = obj.limit_velocity_by_bounds(obj.vx_current, obj.vy_current);
                 
                 % compose commands
                 if xdir ~= 0
@@ -432,9 +442,9 @@ classdef CarriageControl < handle
                 % -------------
                 if obj.control_aoa && (xdir ~= 0 || ydir~=0)
                     aoa = atan(obj.vy_current/obj.vx_current);
+                    spr = obj.motor_settings.STEPS_PER_REV;
+                    tgt_aoa_pos = round(aoa/(2*pi)*spr);
                     if strcmpi(obj.aoa_motor_type,'Stepper')
-                        spr = obj.motor_settings.STEPS_PER_REV;
-                        tgt_aoa_pos = round(aoa/(2*pi)*spr);
                         % dist = round(tgt_aoa_pos - obj.current_pos(3)*(-1));
                         % limit range due to buggy control
                         % dist = min(dist,spr/2);
@@ -448,7 +458,7 @@ classdef CarriageControl < handle
                         % end
     
                     elseif strcmpi(obj.aoa_motor_type,'ClearPath')
-                        % todo
+                        cmd_a = sprintf('ABS%d',tgt_aoa_pos);
                     end
                 elseif obj.wait_prev
                     cmd_a = 'PRE';
@@ -458,10 +468,10 @@ classdef CarriageControl < handle
             
                 if buttons(L_BTN)
                     % for generic stepper, move RELative steps
-                    cmd_a = sprintf('REL-%d',16); 
+                    cmd_a = sprintf('VEL%d',-160); 
                     fprintf('🎮LB ');
                 elseif buttons(R_BTN)
-                    cmd_a = sprintf('REL%d',16);
+                    cmd_a = sprintf('VEL%d',160);
                     fprintf('🎮RB ');
                 end
             
@@ -571,7 +581,7 @@ classdef CarriageControl < handle
 
             if abs(curr(1)*obj.step2mm) > obj.path_dx_max
                 % reached end
-                fprintf('%s Path tracking reached the max range.\n',obj.name);
+                fprintf('%s Path tracking reached the max X range.\n',obj.name);
                 obj.stopPathTracking();
                 is_done = true;
                 return
@@ -611,17 +621,21 @@ classdef CarriageControl < handle
             obj.vx_current = obj.vx_cruise;
             obj.vy_current = obj.vy_cruise;
 
+            % enforce movement boundaries for path tracking
+            [obj.vx_current, obj.vy_current] = obj.limit_velocity_by_bounds(obj.vx_current, obj.vy_current);
+
             % compose velocity commands (simple direct set)
-            cmd_x = sprintf('VEL%d',round(obj.vx_cruise));
-            cmd_y = sprintf('VEL%d',round(obj.vy_cruise));
+            cmd_x = sprintf('VEL%d',round(obj.vx_current));
+            cmd_y = sprintf('VEL%d',round(obj.vy_current));
             if obj.control_aoa 
                 aoa = atan(obj.vy_current/obj.vx_current);
+                spr = obj.motor_settings.STEPS_PER_REV;
+                tgt_aoa_pos = round(aoa/(2*pi)*spr);
                 if strcmpi(obj.aoa_motor_type,'Stepper')
-                    spr = obj.motor_settings.STEPS_PER_REV;
-                    tgt_aoa_pos = round(aoa/(2*pi)*spr);
                     cmd_a = sprintf('ABS%d',tgt_aoa_pos*(-1));
                 elseif strcmpi(obj.aoa_motor_type,'ClearPath')
                     % todo
+                    cmd_a = sprintf('ABS%d',tgt_aoa_pos);
                 end
             else
                 cmd_a = 'NUL'; % keep previous AOA command
@@ -888,6 +902,42 @@ classdef CarriageControl < handle
                 fprintf('User interrupt: Sent immediate stop command to controller.\n');
                 interrupted = true;
             end
+        end
+
+        function [vx_out, vy_out] = limit_velocity_by_bounds(obj, vx_in, vy_in)
+            % limit_velocity_by_bounds Zeroes velocity components if movement would
+            % drive the carriage beyond configured x/y bounds (within margin).
+            % vx_in, vy_in are in steps/sec. Returns possibly modified velocities.
+
+            vx_out = vx_in;
+            vy_out = vy_in;
+
+            % convert to mm/sec
+            vx_mm = vx_in * obj.step2mm;
+            vy_mm = vy_in * obj.step2mm;
+
+            % current position in mm
+            pos = obj.real_loc; % [x y]
+            margin = obj.boundary_margin_mm;
+
+            % X axis
+            if isfinite(obj.x_max_mm) && (pos(1) >= obj.x_max_mm - margin) && (vx_mm > 0)
+                vx_out = 0;
+            end
+            if isfinite(obj.x_min_mm) && (pos(1) <= obj.x_min_mm + margin) && (vx_mm < 0)
+                vx_out = 0;
+            end
+
+            % Y axis
+            if isfinite(obj.y_max_mm) && (pos(2) >= obj.y_max_mm - margin) && (vy_mm > 0)
+                vy_out = 0;
+            end
+            if isfinite(obj.y_min_mm) && (pos(2) <= obj.y_min_mm + margin) && (vy_mm < 0)
+                vy_out = 0;
+            end
+
+            % If velocities were zeroed, also update cruise/current values to keep UI consistent
+            % (callers assign returned values back into obj.vx_current / obj.vy_current)
         end
 
         function sendStopCommand(obj)

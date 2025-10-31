@@ -157,7 +157,7 @@ classdef CarriageApp < handle
             % This starts pathtracking routine
             try
                 disp('Pathtracking start requested');
-                [xp,yp,rp,L,start_x,start_y,start_s] = app.prepare_pathtracking_data();
+                [xp,yp,rp,L,start_x,start_y,start_s,~] = app.prepare_pathtracking_data();
 
                 % Start redraw timer if not running
                 if strcmp(app.redrawTimer.Running,'off')
@@ -326,10 +326,12 @@ classdef CarriageApp < handle
     end
 
     methods 
-        function [xp,yp,rp,L,start_x,start_y,start_s] = prepare_pathtracking_data(app)
+        function [xp,yp,rp,L,start_x,start_y,start_s,pathtag] = prepare_pathtracking_data(app)
             % Build PathData from selected file in ModePanel (must be single file)
             try
-                pd = app.ModePanel.createPathDataFromSelection();
+                [pd, fullpath] = app.ModePanel.createPathDataFromSelection();
+                [~, name1, ~] = fileparts(fullpath);
+                pathtag= erase(name1,'xy_');
             catch ME
                 uialert(app.Fig, sprintf('Failed to load path: %s', ME.message), 'Path Error');
                 return
