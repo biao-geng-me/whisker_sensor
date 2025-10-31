@@ -39,6 +39,7 @@ function [fh,mh] = init_spec_plot(spec_data,Fs,nread)
     end
     xticklabels(xtlabel);
     xlabel('Time (s)');
+    % ylim([0,Fs/2*9]);
 
 
 

@@ -25,7 +25,8 @@ Fs = 80;
 Afft = 0;
 nread = 6;
 nsensor = 9;
-ch_map = load('channel_map.txt');
+% ch_map = load('channel_map.txt');
+ch_map = 1:nsensor*2;
 
 for i=1:nrepeat
     wavi_sampling(s,Afft,Fs,nread,'tag',tag,'tmax',tmax,'outpath',outpath,'nsensor',nsensor, ...

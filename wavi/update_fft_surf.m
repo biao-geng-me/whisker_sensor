@@ -19,6 +19,8 @@ function update_fft_surf(fh,sh,bh,fft_map,fft_ax1,fft_ax2)
     
     fh.CurrentAxes=fft_ax2;
     bh.YData = max(fft_map);
+    nch = size(fft_map,2);
+    xticks(1:nch);
     if ~isnan(amax)
         ylim([0 (ceil(amax/acrit)+1)*acrit]);
     end
