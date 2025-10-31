@@ -41,13 +41,13 @@
 // Specifies which motor to move.
 // Options are: ConnectorM0, ConnectorM1, ConnectorM2, or ConnectorM3.
 // Note: generic stepper motors (non-ClearPath) can only be connected to M0
-#define HAS_AOA 0
-#define IS_AOA_GENERIC 1
+#define HAS_AOA 1
+#define IS_AOA_GENERIC 0
 
 #if IS_AOA_GENERIC
 #define STEPS_PER_REV 6400 // genric stepper, use maximum for smoother motion
 #else
-#define STEPS_PER_REV 800 // clearpath motor default setting
+#define STEPS_PER_REV 800*20 // clearpath motor default setting, multiplied by gear ratio
 #endif
 
 #define aoa_motor ConnectorM0
@@ -57,9 +57,9 @@
 // Per-axis sign flips. Set to 1 or -1 depending on motor installation.
 // If a motor is installed reversed relative to the controller's coordinate
 // convention, set the corresponding SIGN to -1 to invert direction in firmware.
-#define LONG_AXIS_SIGN -1 // -1 for front carriage,  1 for back carriage
+#define LONG_AXIS_SIGN 1 // -1 for front carriage,  1 for back carriage
 #define SHORT_AXIS_SIGN 1
-#define AOA_SIGN 1
+#define AOA_SIGN -1
  
 // Select the baud rate to match the target serial device
 #define baudRate 2000000
@@ -79,10 +79,10 @@
 #define HANDLE_ALERTS (1)
  
 // Define the acceleration limits to be used for each move, pulses per sec^2
-int32_t accelerationLimit = 10000;
-int32_t velocityLimit = 6000;
-int32_t aoa_acc_limit = 6400; // reduce this if the motor struggles
-int32_t aoa_vel_limit = 6400;
+int32_t accelerationLimit = 8000;
+int32_t velocityLimit = 10000;
+int32_t aoa_acc_limit = 50000; // reduce this if the motor struggles
+int32_t aoa_vel_limit = 824000;
 
 //--------------------------------------------------------------------------------------
 // Declares user-defined helper functions.
@@ -91,6 +91,7 @@ void init_clearpath(MotorDriver &motor, const char* name, int32_t vmax, int32_t 
 void init_generic_stepper();
 bool MoveAtVelocity(MotorDriver &motor, int32_t velocity, const char* name);
 bool MoveAbsolutePosition(MotorDriver &motor, int32_t pos, const char* name);
+bool MoveRelativePosition(MotorDriver &motor, int32_t pos, const char* name);
 void GenericStepperMoveDistance(MotorDriver &motor, int32_t distance);
 void PrintAlerts(MotorDriver &motor);
 void HandleAlerts(MotorDriver &motor);
@@ -179,21 +180,21 @@ void setup() {
     if(HAS_AOA && !IS_AOA_GENERIC) {
         init_clearpath(aoa_motor, "AOA motor", aoa_vel_limit, aoa_acc_limit);
 
-        MoveAbsolutePosition(aoa_motor, STEPS_PER_REV/4, "AOA");
+        MoveAbsolutePosition(aoa_motor, STEPS_PER_REV/36, "AOA");
         Delay_ms(500);
         MoveAbsolutePosition(aoa_motor, 0, "AOA");
         Delay_ms(500);
-        MoveAbsolutePosition(aoa_motor, -STEPS_PER_REV/4, "AOA");
+        MoveAbsolutePosition(aoa_motor, -STEPS_PER_REV/36, "AOA");
         Delay_ms(500);
         MoveAbsolutePosition(aoa_motor, 0, "AOA");
     }
     else if (HAS_AOA && IS_AOA_GENERIC){
         init_generic_stepper();
-        GenericStepperMoveDistance(aoa_motor, AOA_SIGN * (STEPS_PER_REV/8));
+        GenericStepperMoveDistance(aoa_motor, AOA_SIGN * (STEPS_PER_REV/36));
         Delay_ms(1000);
-        GenericStepperMoveDistance(aoa_motor, AOA_SIGN * (-STEPS_PER_REV/4));
+        GenericStepperMoveDistance(aoa_motor, AOA_SIGN * (-STEPS_PER_REV/18));
         Delay_ms(1000);
-        GenericStepperMoveDistance(aoa_motor, AOA_SIGN * (STEPS_PER_REV/8));
+        GenericStepperMoveDistance(aoa_motor, AOA_SIGN * (STEPS_PER_REV/36));
         Delay_ms(1000);
     }
     prev_time = Milliseconds();
@@ -507,6 +508,64 @@ bool MoveAbsolutePosition(MotorDriver &motor, int32_t position, const char* name
  
     // Waits for HLFB to assert (signaling the move has successfully completed)
     Serial.println("Moving.. HLFB skipped");
+
+    // while ( (!motor.StepsComplete() || motor.HlfbState() != MotorDriver::HLFB_ASSERTED) &&
+    //         !motor.StatusReg().bit.AlertsPresent) {
+    //     Serial.print(motor.StepsComplete());
+    //     Serial.print('\t');
+    //     Serial.println(motor.HlfbState());
+    //     Delay_ms(100);
+    //     continue;
+    // }
+
+    // Check if motor alert occurred during move
+    // Clear alert if configured to do so 
+    if (motor.StatusReg().bit.AlertsPresent) {
+        Serial.println("Motor alert detected.");       
+        PrintAlerts(motor);
+        if(HANDLE_ALERTS){
+            HandleAlerts(motor);
+        } else {
+            Serial.println("Enable automatic fault handling by setting HANDLE_ALERTS to 1.");
+        }
+        Serial.println("Motion may not have completed as expected. Proceed with caution.");
+        Serial.println();
+        return false;
+    } else {
+        Serial.println("Command done");
+        return true;
+    }
+}
+//------------------------------------------------------------------------------
+
+/*------------------------------------------------------------------------------
+ * MoveRelativePosition
+ *
+ */
+bool MoveRelativePosition(MotorDriver &motor, int32_t position, const char* name) {
+    // Check if a motor alert is currently preventing motion
+    // Clear alert if configured to do so 
+    if (motor.StatusReg().bit.AlertsPresent) {
+        Serial.println("Motor alert detected.");       
+        PrintAlerts(motor);
+        if(HANDLE_ALERTS){
+            HandleAlerts(motor);
+        } else {
+            Serial.println("Enable automatic alert handling by setting HANDLE_ALERTS to 1.");
+        }
+        Serial.println("Move canceled.");      
+        Serial.println();
+        return false;
+    }
+    Serial.print(name);
+    Serial.print(" moving to relative position: ");
+    Serial.println(position);
+ 
+    // Command the move of relative distance
+    motor.Move(position);
+ 
+    // Waits for HLFB to assert (signaling the move has successfully completed)
+    // Serial.println("Moving.. HLFB skipped");
 
     // while ( (!motor.StepsComplete() || motor.HlfbState() != MotorDriver::HLFB_ASSERTED) &&
     //         !motor.StatusReg().bit.AlertsPresent) {
