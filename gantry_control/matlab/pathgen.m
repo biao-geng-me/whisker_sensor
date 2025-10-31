@@ -1,7 +1,7 @@
 % generate a path xy data
 clc; clear; close all
 % domain size, mm
-L = 3900;
+L = 3800;
 H = 800;
 
 % ----------------------------------
@@ -9,8 +9,9 @@ H = 800;
 % ----------------------------------
 interp_method = 'linear';
 nm = 4;
-xm = linspace(0,L,4);
-ym = [0.9 0.9 0.1 0.1]*H;
+% xm = linspace(0,L,4);
+xm = [0.0 0.1 0.3 0.5 0.7 1.0]*L;
+ym = [0.1 0.1 0.9 0.9 0.1 0.1]*H;
 fy = griddedInterpolant(xm,ym,interp_method,'spline');
 
 x = 0:10:L;
@@ -45,6 +46,6 @@ plot(xp(1:10:s(end)),yp(1:10:s(end)),'r');
 
 %% save 
 
-fid = fopen(fullfile('paths','xy_path4.dat'),'w');
+fid = fopen(fullfile('paths','xy_path6.dat'),'w');
 fprintf(fid,'%12.5f, %12.5f\n',[x;y]);
 fclose(fid);
