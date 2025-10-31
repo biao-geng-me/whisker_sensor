@@ -1,7 +1,7 @@
 #include "HX711.h"
 
 // HX711 circuit wiring
-const int num_sensor = 1;
+const int num_sensor = 9;
 const int nch = num_sensor*2; // total number of channels
 const bool DEBUG = 0;
 const float Delim= 2024.0; // delimiter value
@@ -28,8 +28,14 @@ byte *p = (byte *) volt;
 void setup() {
   Serial.begin(2000000);
   for(int i=1;i<=nch;i++){
-                    // Data pin, clock pin
-    scale[i-1].begin(2*i,2*i+1);
+    // Data pin, clock pin
+    int dpin = 2*i;
+    int cpin = 2*i+1;  
+    // if(i==6) { // avoid pin 13 as inputd (2025-10-29 bgeng: The official doc says pin13 is hard to use as input, but the issue was loose ground connection not pin13.)
+    //   dpin = 52;
+    //   cpin = 53;
+    // }
+    scale[i-1].begin(dpin,cpin);
   }
 }
 
