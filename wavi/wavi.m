@@ -18,6 +18,7 @@ classdef wavi < handle
         % runtime helpers
         readTimer % matlab timer object used for fixed-rate reading
         readCount = 0 % number of timer ticks / read iterations performed
+        fout % file handle for data logging
     end
     
     properties % sampling settings
@@ -68,7 +69,7 @@ classdef wavi < handle
                 options.ns_read (1,1) double {mustBeInteger,mustBePositive} = 4 % number of samples to read in each loop
                 options.tag = '';
                 options.tmax = 3600*10; % maximum run time
-                options.outpath = './test';
+                options.outpath = [];
                 options.show_line = true;
                 options.show_trace = true;
                 options.show_fft = true; 
@@ -106,7 +107,13 @@ classdef wavi < handle
             obj.ns_read          = options.ns_read;
             obj.tag              = options.tag;
             obj.tmax             = options.tmax;
-            obj.outpath          = options.outpath;
+
+            if isempty(options.outpath)
+                obj.outpath = obj.set_outpath();
+            else
+                obj.outpath = options.outpath;
+            end
+
             obj.show_line        = options.show_line;
             obj.show_trace       = options.show_trace;
             obj.show_fft         = options.show_fft;
@@ -126,10 +133,6 @@ classdef wavi < handle
                 obj.ch_map = 1:obj.nch;
             else
                 obj.ch_map = options.ch_map;
-            end
-        
-            if ~exist(options.outpath,'dir')
-                mkdir(options.outpath);
             end
 
             %%% setup data buffers
@@ -164,6 +167,12 @@ classdef wavi < handle
             obj.SerialApp = SerialPortApp(obj.SerialPanel);
             obj.SerialApp.baudrate = obj.baudrate;
             addlistener(obj.SerialApp,'SerialConnected',@(src,evt) obj.onSerialConnected(src,evt));
+            % listen for serial disconnect to cleanup resources
+            try
+                addlistener(obj.SerialApp,'SerialDisconnected',@(src,evt) obj.onSerialDisconnected(src,evt));
+            catch
+                % SerialPortApp may not implement SerialDisconnected; ignore if absent
+            end
             
             obj.button_gl = uigridlayout(obj.gl,[5,1],'ColumnWidth',{'1x','1x','1x','1x','1x'},'RowHeight',{'1x'},'Padding',[0 0 0 0]);
             fft_btn = FigureToggler(obj.fft_fig.fh, obj.button_gl, 'FFT', [0 0 20 20]);
@@ -174,6 +183,24 @@ classdef wavi < handle
 
         end
 
+        function outpath =set_outpath(obj)
+            % set default output path to user home/wavi_data
+            user_dir = getenv('USERPROFILE');
+            if isempty(user_dir)
+                user_dir = getenv('HOME');
+            end
+            if isempty(user_dir)
+                user_dir = '.';
+            end
+            outpath = fullfile(user_dir,'wavi_data');
+            if ~isfolder(outpath)
+                mkdir(outpath);
+            end
+            obj.outpath = outpath;
+        end
+    end
+
+    methods % event handlers
         function onSerialConnected(obj,src,evt)
 
             obj.s = obj.SerialApp.s;
@@ -187,6 +214,65 @@ classdef wavi < handle
                 disp(me);
             end
         end
+
+        function onSerialDisconnected(obj, src, ~)
+            % Called when SerialPortApp emits SerialDisconnected (if available)
+            try
+                obj.cleanup();
+            catch me
+                warning('wavi:onSerialDisconnected','Cleanup failed: %s', me.message);
+            end
+        end
+
+        function onAppClose(obj)
+            % Called by parent app when closing
+            obj.cleanup();
+            % stop and delete timer if running
+            try
+                if ~isempty(obj.readTimer) && isvalid(obj.readTimer)
+                    stop(obj.readTimer);
+                    delete(obj.readTimer);
+                end
+            catch
+            end
+        end
+
+        function cleanup(obj)
+            % Close serial port and data file (if open)
+            try
+                if ~isempty(obj.s)
+                    % if serialport object
+                    try
+                        if isvalid(obj.s)
+                            flush(obj.s);
+                            delete(obj.s);
+                        end
+                    catch
+                        % older MATLAB cannot isvalid serialport; attempt delete
+                        try
+                            delete(obj.s);
+                        catch
+                        end
+                    end
+                    obj.s = [];
+                end
+            catch me
+                warning('wavi:cleanup','Error closing serial: %s', me.message);
+            end
+
+            try
+                if ~isempty(obj.fout) && obj.fout ~= -1
+                    fclose(obj.fout);
+                    obj.fout = [];
+                end
+            catch me
+                % warning('wavi:cleanup','Error closing file: %s', me.message);
+            end
+        end
+
+    end
+
+    methods % data acquisition
 
         function run(obj)
             % Start fixed-rate timer to read serial data in chunks of ns_read
@@ -206,13 +292,13 @@ classdef wavi < handle
                 'StartDelay', 0, ...
                 'TasksToExecute', Inf, ...
                 'BusyMode','queue', ...
-                'TimerFcn', @(src,evt) obj.onReadTimer(src,evt) ...
+                'TimerFcn', @(src,evt) obj.read_update_tick(src,evt) ...
             );
-
+            obj.init_datalog_file();
             start(obj.readTimer);
         end
 
-        function onReadTimer(obj, src, ~)
+        function read_update_tick(obj, src, ~)
             % Timer callback: read serial data and update visuals/printing
             try
                 obj.readCount = obj.readCount + 1;
@@ -225,9 +311,10 @@ classdef wavi < handle
                 if mod(obj.readCount, round(obj.Fs / obj.ns_read)) == 0
                     obj.print_sig_vals();
                 end
+                obj.write_data_samples();
             catch me
                 % Stop timer on error to avoid silent failure loop
-                warning('wavi:onReadTimer','Timer callback error: %s', me.message);
+                warning('wavi:read_update_tick','Timer callback error: %s', me.message);
                 if ~isempty(src) && isvalid(src)
                     stop(src);
                     delete(src);
@@ -332,7 +419,41 @@ classdef wavi < handle
             obj.fft_fig.update(obj.fft_map);
             obj.spec_fig.update(obj.spec_data);
 
-            drawnow limitrate
+            % drawnow limitrate
+        end
+
+        function init_datalog_file(obj)
+            % Get current date and time
+            currentTime = datetime('now');
+            
+            % Extract desired format for filename (year, month, day, hour, minute, second)
+            fileName = sprintf('st_%04d-%02d-%02d_%02d%02d_%05.2f_%s.dat',currentTime.Year,...
+                                                                        currentTime.Month,...
+                                                                        currentTime.Day,...
+                                                                        currentTime.Hour,...
+                                                                        currentTime.Minute,...
+                                                                        currentTime.Second,...
+                                                                        obj.tag);
+            obj.fout = fopen(fullfile(obj.outpath, fileName), 'w');
+            if obj.fout == -1
+                error('wavi:init_datalog_file','Failed to open file for writing: %s', fullfile(obj.outpath, fileName));
+            else
+                fprintf('Logging data to file: %s\n', fullfile(obj.outpath, fileName));
+            end
+        end
+
+        function write_data_samples(obj)
+            for j=1:obj.ns_read
+                currentTime = obj.darr(end-obj.ns_read+j);
+                dtstr = sprintf('%04d-%02d-%02d %02d:%02d:%06.3f',currentTime.Year,...
+                                                                currentTime.Month,...
+                                                                currentTime.Day,...
+                                                                currentTime.Hour,...
+                                                                currentTime.Minute,...
+                                                                currentTime.Second);
+            
+                fprintf(obj.fout,['%s' repmat(' %12.6f',1,obj.nch) '\n'],dtstr,obj.sig(end-obj.ns_read+j,:));
+            end
         end
     end
 
