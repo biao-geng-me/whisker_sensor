@@ -44,7 +44,9 @@ classdef Jakiro < handle
             app.CC1.Car.origin = [3870, 0]; % parking position for carriage 1 (steps)
             app.CC1.Car.origin_mm = app.CC1.Car.origin * app.CC1.Car.step2mm;
             app.CC1.Car.path_dx_max = 3800; % max x movement range (mm)
+            app.CC1.Car.motor_settings.ACC = 10000;
             app.CC1.Car.name = 'Front Carriage';
+            app.CC1.Car.control_aoa = false;
             app.CC1.CarView.mark.DisplayName = 'Front Carriage';
             
             % Back carriage
@@ -54,9 +56,13 @@ classdef Jakiro < handle
             app.CC2 = CarriageApp(cc2_panel,ax);
             app.CC2.Car.joystick_side = 'R';
             app.CC2.Car.path_dx_max = 3500; % max x movement range (mm)
+            app.CC2.Car.motor_settings.ACC = 10000;
             app.CC2.Car.name = 'Back Carriage';
+            app.CC2.Car.control_aoa = true;
+            app.CC2.hArrow.Visible = 'on';
             app.CC2.CarView.mark.DisplayName = 'Back Carriage';
             app.CC2.CarView.mark.Marker = 's';
+
 
             % Data acquisition
             wa_panel = uipanel(uigl);
@@ -180,23 +186,25 @@ classdef Jakiro < handle
             app.CC1.Car.vel_max = round(v1*1000/app.CC1.Car.step2mm);
             app.CC2.Car.vel_max = round(v2*1000/app.CC2.Car.step2mm);
 
-            [xp,yp,rp,L,start_x,start_y,start_s,pathtag1] = app.CC1.prepare_pathtracking_data(); % generate data from selected file
-            try
-                start(app.CC1.redrawTimer);
-            catch
-            end
-            app.CC1.Car.moveToPositionMM(start_x-app.CC1.Car.origin_mm(1), start_y-app.CC1.Car.origin_mm(2), 20, 1, false); 
-            app.CC1.Car.init_pathtracking_variables(xp,yp,rp,L,start_s);
-            stop(app.CC1.redrawTimer);
-
-            [xp,yp,rp,L,start_x,start_y,start_s,pathtag2] = app.CC2.prepare_pathtracking_data(); % generate data from selected file
+            % move back carriage first
+            [xp,yp,rp,thetap2,L,start_x,start_y,start_s,pathtag2] = app.CC2.prepare_pathtracking_data(); % generate data from selected file
             try
                 start(app.CC2.redrawTimer);
             catch
             end
             app.CC2.Car.moveToPositionMM(start_x-app.CC2.Car.origin_mm(1), start_y-app.CC2.Car.origin_mm(2), 20, 1, false); 
-            app.CC2.Car.init_pathtracking_variables(xp,yp,rp,L,start_s);
+            app.CC2.Car.init_pathtracking_variables(xp,yp,rp,L,start_s,thetap2);
             stop(app.CC2.redrawTimer);
+            
+            %
+            [xp,yp,rp,thetap1,L,start_x,start_y,start_s,pathtag1] = app.CC1.prepare_pathtracking_data(); % generate data from selected file
+            try
+                start(app.CC1.redrawTimer);
+            catch
+            end
+            app.CC1.Car.moveToPositionMM(start_x-app.CC1.Car.origin_mm(1), start_y-app.CC1.Car.origin_mm(2), 20, 1, false); 
+            app.CC1.Car.init_pathtracking_variables(xp,yp,rp,L,start_s,thetap1);
+            stop(app.CC1.redrawTimer);
             
             % create or reconfigure the timer
             if isempty(app.pathpathTimer) || ~isvalid(app.pathpathTimer)
@@ -223,8 +231,8 @@ classdef Jakiro < handle
     end
 
     methods %
-        function path_path_tick(app,src,evt)
-
+        function path_path_tick(app,src,event)
+            tic;
             fprintf('Path path tick %d\n', src.TasksExecuted);
             if src.TasksExecuted <= 1
                 app.cc1_done = false;
@@ -233,14 +241,17 @@ classdef Jakiro < handle
 
             % both carriages run in path tracking mode
             if ~app.cc1_done
-                app.cc1_done = app.CC1.Car.pathTrackingTick();
+                app.cc1_done = app.CC1.Car.pathTrackingTick(src,event);
             end
             
             now_dt = datetime('now');
             elapsed_time_sec = seconds(now_dt - app.run_start_time);
             
             if elapsed_time_sec > app.ExpPanel.DelayField.Value && ~app.cc2_done
-                app.cc2_done = app.CC2.Car.pathTrackingTick();
+                app.cc2_done = app.CC2.Car.pathTrackingTick(src,event);
+                % update path target location arrow
+                app.CC2.hArrow.XData = [app.CC2.Car.real_loc(1), app.CC2.Car.path_target_loc(1)];
+                app.CC2.hArrow.YData = [app.CC2.Car.real_loc(2), app.CC2.Car.path_target_loc(2)];
             end
 
             % app.WA.read_serial_data(app.WA.ns_read, app.WA.ns_fill);
@@ -261,7 +272,7 @@ classdef Jakiro < handle
                 catch
                 end
             end
-
+            toc;
         end
     end
 end

@@ -25,6 +25,7 @@ classdef CarriageApp < handle
         CarView
         redrawTimer
         redrawRate = 20; % Hz
+        hArrow % connect current position and target position for path tracking debugging
     end
 
     properties % parameters
@@ -100,6 +101,11 @@ classdef CarriageApp < handle
                            'Name', 'Redraw timer',...
                            'Period', 1/app.redrawRate, ...% Period is in seconds
                            'ExecutionMode', 'fixedSpacing');
+
+            app.hArrow = line(app.Ax,[0,0],[0,0],'Color','red','LineWidth',2,'Marker','+');
+            app.hArrow.Visible = 'off';
+            app.hArrow.Annotation.LegendInformation.IconDisplayStyle = 'off';
+
             if app.isStandAlone
 
             else
@@ -157,7 +163,7 @@ classdef CarriageApp < handle
             % This starts pathtracking routine
             try
                 disp('Pathtracking start requested');
-                [xp,yp,rp,L,start_x,start_y,start_s,~] = app.prepare_pathtracking_data();
+                [xp,yp,rp,thetap,L,start_x,start_y,start_s,~] = app.prepare_pathtracking_data();
 
                 % Start redraw timer if not running
                 if strcmp(app.redrawTimer.Running,'off')
@@ -177,7 +183,7 @@ classdef CarriageApp < handle
 
                 % start path tracking on CarriageControl at start_s
                 flush(app.Car.s); % clear controller buffer (it takes time to read serial data)
-                app.Car.startPathTracking(xp,yp,rp,L,start_s); % todo: change this to runPathTracking and handle the finish
+                app.Car.startPathTracking(xp,yp,rp,thetap,L,start_s); % todo: change this to runPathTracking and handle the finish
 
             catch ME
                 disp(ME.message)
@@ -326,7 +332,7 @@ classdef CarriageApp < handle
     end
 
     methods 
-        function [xp,yp,rp,L,start_x,start_y,start_s,pathtag] = prepare_pathtracking_data(app)
+    function [xp,yp,rp,thetap,L,start_x,start_y,start_s,pathtag] = prepare_pathtracking_data(app)
             % Build PathData from selected file in ModePanel (must be single file)
             try
                 [pd, fullpath] = app.ModePanel.createPathDataFromSelection();
@@ -337,7 +343,7 @@ classdef CarriageApp < handle
                 return
             end
 
-            [xp,yp,rp,L] = pd.getInterpolants();
+            [xp,yp,rp,thetap,L] = pd.getInterpolants();
 
             % compute starting arc-length where path x(s) matches this carriage origin x
             try
@@ -358,6 +364,8 @@ classdef CarriageApp < handle
             % compute start coordinates and move carriage there (in mm)
             start_x = xp(start_s);
             start_y = yp(start_s);
+        
+        % return the precomputed tangent interpolant so controllers can use it
         end
     end
 

@@ -60,10 +60,11 @@ classdef CarriageControl < handle
         controller_time1 = 0
         controller_time2 = 0
         last_status_time = []   % datetime of last status update
-
+        
         % status
         real_loc = [0, 0] % physical location
         real_vel = [0, 0] % physical velocity
+        aoa_old = 0        % previous aoa (radians), for smoothing
 
         % gantry origin in the tank coordinate system
         origin = [0,0]
@@ -74,14 +75,16 @@ classdef CarriageControl < handle
         path_xp                  % griddedInterpolant for x(arc)
         path_yp                  % griddedInterpolant for y(arc)
         path_rp                  % griddedInterpolant for radius(arc)
+        path_thetap              % griddedInterpolant or function handle for tangent angle(arc)
         path_Ltot = 0            % total arc length
         path_arc_len = 0         % current arc length travelled (mm)
-        path_d_trav = 0          % cumulative travelled steps (steps)
+        path_d_trav = 0          % cumulative travelled distance (mm)
         path_xy_old = [0 0]      % previous position steps
         path_npoll = 0           % poll counter
-        path_CMD_INTERVAL =  25   % ms (default)
+        path_CMD_INTERVAL =  10  % ms (default)
         path_stopRequested = 0   % flag to request stop from outside
         path_dx_max = 3600       % max x movement range (mm)
+        path_target_loc = [0,0]  % target location for path tracking (mm)
 
         % movement boundaries (mm). Leave empty (Inf) for no bound.
         x_min_mm = -Inf
@@ -517,7 +520,7 @@ classdef CarriageControl < handle
             end
         end
 
-        function is_done =pathTrackingTick(obj, src, event)
+    function is_done =pathTrackingTick(obj, src, event)
             % follow prescribed path
             % Minimal path tracking tick: read controller position, compute
             % target along interpolants, send velocity commands. This
@@ -526,6 +529,11 @@ classdef CarriageControl < handle
             
             tStart = tic;
             is_done = false;
+
+            poll_time = datetime(event.Data.time);
+            poll_time.Format = 'dd-MMM-uuuu HH:mm:ss.SSS';
+            dt_str = sprintf('%10d %s',src.TasksExecuted, poll_time);
+
             % If stop requested externally, stop timer and return
             if obj.path_stopRequested || obj.check_user_interrupt()
                 try
@@ -560,18 +568,25 @@ classdef CarriageControl < handle
             curr = obj.current_pos(1:2)+obj.origin;
             prev_vec = curr - prev;
             prev_dist_steps = norm(prev_vec);
-            obj.path_d_trav = obj.path_d_trav + prev_dist_steps;
+            obj.path_d_trav = obj.path_d_trav + prev_dist_steps*obj.step2mm;
             obj.path_xy_old = curr;
+            
 
             % convert to mm
             if obj.path_npoll == 1
-                look_ahead_dist = obj.vel_max * obj.path_CMD_INTERVAL/1000 * obj.step2mm * 0.5;
+                look_ahead_dist = obj.vel_max * obj.path_CMD_INTERVAL/1000 * obj.step2mm*2.0;
             else
-                look_ahead_dist = prev_dist_steps * obj.step2mm * obj.vel_max/800; % scale lookahead with speed, 800 steps/sec is a good reference
+                % the previous distance travelled is a good estimate of lookahead distance
+                look_ahead_dist = prev_dist_steps * obj.step2mm * obj.vel_max/1000; % scale lookahead with speed, 800 steps/sec is a good reference
+                look_ahead_dist = max(look_ahead_dist, obj.vel_max*obj.path_CMD_INTERVAL/1000*obj.step2mm*0.8); % limit minimum to avoid overshoot
+                look_ahead_dist = min(look_ahead_dist, obj.vel_max*obj.path_CMD_INTERVAL/1000*obj.step2mm*2.0); % limit maximum to improve accuracy
             end
-            obj.path_arc_len = (obj.path_d_trav)*obj.step2mm + look_ahead_dist; % travelled distance is only an approximate of the arc
+            % Set new target position along path. 
+            % Note that travelled distance is only an approximate of the arc.
+            % A better way is to find the closest point on the path to the current position.
+            new_path_arc_len = obj.path_d_trav + look_ahead_dist;
 
-            if (obj.path_d_trav)*obj.step2mm > obj.path_Ltot
+            if obj.path_d_trav > obj.path_Ltot
                 % reached end
                 fprintf('%s Path tracking reached the end of path.\n',obj.name);
                 obj.stopPathTracking();
@@ -587,9 +602,17 @@ classdef CarriageControl < handle
                 return
             end
 
+            % don't decrease arc length (no going backwards, this is to avoid AOA oscillations)
+            if new_path_arc_len > obj.path_arc_len
+                obj.path_arc_len = new_path_arc_len;
+            else
+                obj.path_arc_len = obj.path_arc_len + prev_dist_steps*obj.step2mm; % advance a little
+            end
+
             % compute target in steps
-            target_x = round(obj.path_xp(obj.path_arc_len)/obj.step2mm);
-            target_y = round(obj.path_yp(obj.path_arc_len)/obj.step2mm);
+            obj.path_target_loc = [obj.path_xp(obj.path_arc_len), obj.path_yp(obj.path_arc_len)];
+            target_x = round(obj.path_target_loc(1)/obj.step2mm);
+            target_y = round(obj.path_target_loc(2)/obj.step2mm);
             target_r = obj.path_rp(obj.path_arc_len)/obj.step2mm;
             curve_speed_limit = round(sqrt(obj.motor_settings.ACC*0.5*target_r));
 
@@ -597,8 +620,9 @@ classdef CarriageControl < handle
             xvec = target_x - curr(1);
             yvec = target_y - curr(2);
             aoa = atan2(double(yvec), double(xvec));
-            vel_amp = obj.vel_max;
-            vel_amp = min(vel_amp, curve_speed_limit);
+            vel_amp = obj.vel_max*obj.path_npoll/20; % ramp up speed over first calls
+
+            vel_amp = min([vel_amp, curve_speed_limit, obj.vel_max]);
             vx_amp = abs(round(vel_amp*cos(aoa)));
             vy_amp = abs(round(vel_amp*sin(aoa)));
 
@@ -627,9 +651,21 @@ classdef CarriageControl < handle
             % compose velocity commands (simple direct set)
             cmd_x = sprintf('VEL%d',round(obj.vx_current));
             cmd_y = sprintf('VEL%d',round(obj.vy_current));
-            if obj.control_aoa 
-                aoa = atan(obj.vy_current/obj.vx_current);
+            if obj.control_aoa
+                
+                if ~isempty(obj.path_thetap) % use tangent interpolant
+                % if 1==0
+                    aoa_tmp = (obj.path_thetap(obj.path_arc_len)+obj.path_thetap(obj.path_d_trav))/2;
+                else
+                    aoa_tmp = atan(obj.vy_current/obj.vx_current); % use instantaneous velocity vector
+                end
+                aoa = 0.5*obj.aoa_old + 0.5*aoa_tmp; % smooth AOA changes
+                obj.aoa_old = aoa;
+
+                fprintf('%s path tangent angle: %.1f %.1f\n',dt_str, aoa/pi*180,obj.path_arc_len);
                 spr = obj.motor_settings.STEPS_PER_REV;
+                aoa = max(min(pi/2,aoa),-pi/2); % limit AOA (hardware limitation, to avoid cable issues)
+
                 tgt_aoa_pos = round(aoa/(2*pi)*spr);
                 if strcmpi(obj.aoa_motor_type,'Stepper')
                     cmd_a = sprintf('ABS%d',tgt_aoa_pos*(-1));
@@ -644,7 +680,9 @@ classdef CarriageControl < handle
             command = sprintf('%s,%s,%s%c',cmd_x,cmd_y,cmd_a,obj.END_MARKER);
             try
                 write(obj.s,command,'char');
-                % fprintf('PathTick: Sent command: %s\n',command);
+                fprintf('%s path tick: %.1f %.1f %.1f\n',dt_str, obj.path_arc_len, ...
+                                        obj.path_d_trav, look_ahead_dist);
+                fprintf('PathTick: Sent command: %s\n',command);
             catch me
                 warning(me.identifier, '%s', me.message);
             end
@@ -653,13 +691,14 @@ classdef CarriageControl < handle
             set(obj.hInputText, 'Text', sprintf('Path tracking %6d call time %5.2f ms',obj.path_npoll,toc(tStart)*1000));
         end
 
-        function startPathTracking(obj,xp,yp,rp,Ltot,start_s)
+        function startPathTracking(obj,xp,yp,rp,thetap,Ltot,start_s)
             % Initialize path tracking and start timer-driven ticks.
             % xp,yp,rp - interpolants mapping arc length (mm) -> x,y, curvature radius
+            % thetap - angle interpolant mapping arc length (mm) -> tangent angle (radians)
             % Ltot - total arc length (mm)
             % start_s - starting arc length (mm)
 
-            obj.init_pathtracking_variables(xp,yp,rp,Ltot,start_s);
+            obj.init_pathtracking_variables(xp,yp,rp,Ltot,start_s,thetap);
             % start the timer (init_pathtracking_variables ensures pathTimer exists)
             try
                 flush(obj.s);
@@ -671,15 +710,16 @@ classdef CarriageControl < handle
             end
         end
 
-        function init_pathtracking_variables(obj,xp,yp,rp,Ltot,start_s)
+    function init_pathtracking_variables(obj,xp,yp,rp,Ltot,start_s,thetap)
             % Initialize internal path tracking state and
             % create (but do not start) the path timer. Accepts the same
 
             obj.path_xp = xp;
             obj.path_yp = yp;
             obj.path_rp = rp;
+            obj.path_thetap = thetap;
             obj.path_Ltot = Ltot;
-            obj.path_d_trav = round(start_s/obj.step2mm);
+            obj.path_d_trav = start_s;
 
             % initialize arc-length counters
             obj.path_arc_len = 0;

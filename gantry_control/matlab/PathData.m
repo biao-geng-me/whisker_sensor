@@ -6,9 +6,11 @@ classdef PathData
         y
         arc % cumulative arc length vector (same units as x,y spacing)
         r % radius of curvature at arc locations
+        a % tangent angle (radians) at arc locations
         xp % griddedInterpolant for x(arc)
         yp % griddedInterpolant for y(arc)
         rp % griddedInterpolant for r(arc)
+        ap % griddedInterpolant for a(arc)
         Ltot % total arc length
     end
 
@@ -48,6 +50,8 @@ classdef PathData
             dx = diff(obj.x);
             dy = diff(obj.y);
             dl = sqrt(dx.^2 + dy.^2);
+            obj.a = atan(dy./dx); % tangent angle
+            obj.a = [obj.a; obj.a(end)]; % pad to same length
             obj.arc = [0; cumsum(dl(:))];
             obj.Ltot = obj.arc(end);
 
@@ -69,10 +73,11 @@ classdef PathData
             obj.xp = griddedInterpolant(obj.arc, obj.x, 'linear', 'nearest');
             obj.yp = griddedInterpolant(obj.arc, obj.y, 'linear', 'nearest');
             obj.rp = griddedInterpolant(obj.arc, obj.r, 'linear', 'nearest');
+            obj.ap = griddedInterpolant(obj.arc, obj.a, 'linear', 'nearest');
         end
 
-        function [xp,yp,rp,L] = getInterpolants(obj)
-            xp = obj.xp; yp = obj.yp; rp = obj.rp; L = obj.Ltot;
+        function [xp,yp,rp,ap,L] = getInterpolants(obj)
+            xp = obj.xp; yp = obj.yp; rp = obj.rp; ap = obj.ap; L = obj.Ltot;
         end
     end
 end
