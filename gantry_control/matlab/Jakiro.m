@@ -14,8 +14,8 @@ classdef Jakiro < handle
         run_start_time = [] % time when experiment started
         cc1_done = false; % flag indicating carriage 1 finished path tracking
         cc2_done = false; % flag indicating carriage 2 finished path tracking
-        pathpath_tick_period = 25; % period of path tracking timer in ms
-        pathpath_redraw_interval = 2; % update interval for path tracking
+        pathpath_tick_period_ms = 20; % period of path tracking timer in ms
+        pathpath_redraw_interval = 3; % update interval for path tracking
         outpath % output path for wavi data
     end
     methods
@@ -47,6 +47,7 @@ classdef Jakiro < handle
             app.CC1.Car.motor_settings.ACC = 10000;
             app.CC1.Car.name = 'Front Carriage';
             app.CC1.Car.control_aoa = false;
+            app.CC1.Car.path_CMD_INTERVAL = app.pathpath_tick_period_ms;
             app.CC1.CarView.mark.DisplayName = 'Front Carriage';
             
             % Back carriage
@@ -59,6 +60,7 @@ classdef Jakiro < handle
             app.CC2.Car.motor_settings.ACC = 10000;
             app.CC2.Car.name = 'Back Carriage';
             app.CC2.Car.control_aoa = true;
+            app.CC2.Car.path_CMD_INTERVAL = app.pathpath_tick_period_ms;
             app.CC2.hArrow.Visible = 'on';
             app.CC2.CarView.mark.DisplayName = 'Back Carriage';
             app.CC2.CarView.mark.Marker = 's';
@@ -209,7 +211,7 @@ classdef Jakiro < handle
             % create or reconfigure the timer
             if isempty(app.pathpathTimer) || ~isvalid(app.pathpathTimer)
                 app.pathpathTimer = timer('TimerFcn',@(src,evt) app.path_path_tick(src,evt),...
-                    'Period', app.pathpath_tick_period/1000, 'ExecutionMode','fixedrate', 'Name','Path Path timer', 'BusyMode','drop');
+                    'Period', app.pathpath_tick_period_ms/1000, 'ExecutionMode','fixedrate', 'Name','Path Path timer', 'BusyMode','drop');
                 else
                     try
                         stop(app.pathpathTimer);
@@ -226,13 +228,71 @@ classdef Jakiro < handle
                 app.WA.spec_data = nan(size(app.WA.spec_data)); % reset spectrogram
             end
             app.run_start_time = datetime('now');
-            start(app.pathpathTimer);
+            % start(app.pathpathTimer);
+
+            % blocking path tracking loop
+            period = app.pathpath_tick_period_ms/1000; % seconds
+            t0 = tic;
+            n = 0;
+            app.CC1.hArrow.Visible = 'on';
+            app.CC2.hArrow.Visible = 'on';
+
+            % Main loop: build src/event and call pathTrackingTick(app,src,event)
+            while true
+                t1 = tic;
+                n = n + 1;
+
+                % synthetic src/event objects to mimic timer callback
+                src = struct();
+                src.TasksExecuted = n;
+                ev = struct();
+                ev.Data.time = datetime('now');
+
+                % call tick; it returns true when done
+                try
+                    is_done = app.path_path_tick(src, ev);
+                catch ME
+                    warning('pathTrackingTick:error','Error in pathTrackingTick: %s', ME.message);
+                    is_done = true;
+                end
+
+                if is_done
+                    break;
+                end
+
+                % schedule next tick using tic/toc to reduce drift
+                next_time = n * period;
+                elapsed = toc(t0);
+
+                fprintf('PathPath Tick %d: elapsed total=%.3f s, frame=%.1f ms, avg FPS=%.1f\n', n, elapsed, toc(t1)*1000, n/elapsed);
+                sleep_time = next_time - elapsed;
+                if sleep_time > 0.005
+                    % sleep most of the remaining time
+                    pause(sleep_time - 0.002);
+                end
+                
+                % busy-wait the final few ms to reduce jitter
+                while toc(t0) < next_time
+                    pause(0); % yield briefly to keep UI responsive
+                end
+            end
+
+            % ensure any requested stop is applied and notify listeners
+            try
+                app.CC1.Car.stopPathTracking();
+                app.CC2.Car.stopPathTracking();
+            catch
+            end
+            app.CC1.hArrow.Visible = 'off';
+            app.CC2.hArrow.Visible = 'off';
         end
+
     end
 
     methods %
-        function path_path_tick(app,src,event)
-            tic;
+        function is_done = path_path_tick(app,src,event)
+            is_done = false;
+
             fprintf('Path path tick %d\n', src.TasksExecuted);
             if src.TasksExecuted <= 1
                 app.cc1_done = false;
@@ -249,9 +309,6 @@ classdef Jakiro < handle
             
             if elapsed_time_sec > app.ExpPanel.DelayField.Value && ~app.cc2_done
                 app.cc2_done = app.CC2.Car.pathTrackingTick(src,event);
-                % update path target location arrow
-                app.CC2.hArrow.XData = [app.CC2.Car.real_loc(1), app.CC2.Car.path_target_loc(1)];
-                app.CC2.hArrow.YData = [app.CC2.Car.real_loc(2), app.CC2.Car.path_target_loc(2)];
             end
 
             % app.WA.read_serial_data(app.WA.ns_read, app.WA.ns_fill);
@@ -265,6 +322,7 @@ classdef Jakiro < handle
             end
             
             if app.cc1_done && app.cc2_done
+                is_done = true;
                 % finished path tracking for carriage 1
                 try
                     stop(src);
@@ -272,7 +330,6 @@ classdef Jakiro < handle
                 catch
                 end
             end
-            toc;
         end
     end
 end

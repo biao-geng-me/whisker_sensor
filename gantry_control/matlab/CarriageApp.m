@@ -183,7 +183,8 @@ classdef CarriageApp < handle
 
                 % start path tracking on CarriageControl at start_s
                 flush(app.Car.s); % clear controller buffer (it takes time to read serial data)
-                app.Car.startPathTracking(xp,yp,rp,thetap,L,start_s); % todo: change this to runPathTracking and handle the finish
+                stop(app.redrawTimer); % stop timer during blocking pathtracking
+                app.runPathTracking(xp,yp,rp,thetap,L,start_s);
 
             catch ME
                 disp(ME.message)
@@ -332,7 +333,7 @@ classdef CarriageApp < handle
     end
 
     methods 
-    function [xp,yp,rp,thetap,L,start_x,start_y,start_s,pathtag] = prepare_pathtracking_data(app)
+        function [xp,yp,rp,thetap,L,start_x,start_y,start_s,pathtag] = prepare_pathtracking_data(app)
             % Build PathData from selected file in ModePanel (must be single file)
             try
                 [pd, fullpath] = app.ModePanel.createPathDataFromSelection();
@@ -365,7 +366,76 @@ classdef CarriageApp < handle
             start_x = xp(start_s);
             start_y = yp(start_s);
         
-        % return the precomputed tangent interpolant so controllers can use it
+            % return the precomputed tangent interpolant so controllers can use it
+        end
+        
+        function runPathTracking(app,xp,yp,rp,thetap,Ltot,start_s)
+            % Initialize path tracking and start timer-driven ticks.
+            % xp,yp,rp - interpolants mapping arc length (mm) -> x,y, curvature radius
+            % thetap - angle interpolant mapping arc length (mm) -> tangent angle (radians)
+            % Ltot - total arc length (mm)
+            % start_s - starting arc length (mm)
+
+            app.Car.init_pathtracking_variables(xp,yp,rp,Ltot,start_s,thetap);
+            % start the timer (init_pathtracking_variables ensures pathTimer exists)
+            try
+                flush(app.Car.s);
+            catch
+            end
+
+            period = app.Car.path_CMD_INTERVAL/1000; % seconds
+            t0 = tic;
+            n = 0;
+            app.hArrow.Visible = 'on';
+            % Main loop: build src/event and call pathTrackingTick(app,src,event)
+            while true
+                t1 = tic;
+                n = n + 1;
+
+                % synthetic src/event objects to mimic timer callback
+                src = struct();
+                src.TasksExecuted = n;
+                ev = struct();
+                ev.Data.time = datetime('now');
+
+                % call tick; it returns true when done
+                try
+                    is_done = app.Car.pathTrackingTick(src, ev);
+                catch ME
+                    warning('pathTrackingTick:error','Error in pathTrackingTick: %s', ME.message);
+                    is_done = true;
+                end
+
+                if is_done
+                    break;
+                end
+                if mod(n,round(50/app.Car.path_CMD_INTERVAL))==0
+                    app.update_view(); % keep UI responsive every 50 ms
+                end
+
+                % schedule next tick using tic/toc to reduce drift
+                next_time = n * period;
+                elapsed = toc(t0);
+
+                fprintf('Tick %d: elapsed total=%.3f s, frame=%.1f ms, avg FPS=%d\n', n, elapsed, toc(t1)*1000, round(n/elapsed));
+                sleep_time = next_time - elapsed;
+                if sleep_time > 0.005
+                    % sleep most of the remaining time
+                    pause(sleep_time - 0.002);
+                end
+                
+                % busy-wait the final few ms to reduce jitter
+                while toc(t0) < next_time
+                    pause(0); % yield briefly to keep UI responsive
+                end
+            end
+
+            % ensure any requested stop is applied and notify listeners
+            try
+                app.Car.stopPathTracking();
+            catch
+            end
+            app.hArrow.Visible = 'off';
         end
     end
 
@@ -376,6 +446,10 @@ classdef CarriageApp < handle
                 y = app.Car.real_loc(2);
                 app.CarView.set_xy(x,y);
                 app.CarView.redraw();
+
+                app.hArrow.XData = [x, app.Car.path_target_loc(1)];
+                app.hArrow.YData = [y, app.Car.path_target_loc(2)];
+
                 drawnow limitrate
             catch ME
                 disp(ME.identifier)

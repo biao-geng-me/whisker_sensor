@@ -520,7 +520,7 @@ classdef CarriageControl < handle
             end
         end
 
-    function is_done =pathTrackingTick(obj, src, event)
+        function is_done = pathTrackingTick(obj, src, event)
             % follow prescribed path
             % Minimal path tracking tick: read controller position, compute
             % target along interpolants, send velocity commands. This
@@ -691,26 +691,7 @@ classdef CarriageControl < handle
             set(obj.hInputText, 'Text', sprintf('Path tracking %6d call time %5.2f ms',obj.path_npoll,toc(tStart)*1000));
         end
 
-        function startPathTracking(obj,xp,yp,rp,thetap,Ltot,start_s)
-            % Initialize path tracking and start timer-driven ticks.
-            % xp,yp,rp - interpolants mapping arc length (mm) -> x,y, curvature radius
-            % thetap - angle interpolant mapping arc length (mm) -> tangent angle (radians)
-            % Ltot - total arc length (mm)
-            % start_s - starting arc length (mm)
-
-            obj.init_pathtracking_variables(xp,yp,rp,Ltot,start_s,thetap);
-            % start the timer (init_pathtracking_variables ensures pathTimer exists)
-            try
-                flush(obj.s);
-            catch
-            end
-
-            if ~isempty(obj.pathTimer) && isvalid(obj.pathTimer)
-                start(obj.pathTimer);
-            end
-        end
-
-    function init_pathtracking_variables(obj,xp,yp,rp,Ltot,start_s,thetap)
+        function init_pathtracking_variables(obj,xp,yp,rp,Ltot,start_s,thetap)
             % Initialize internal path tracking state and
             % create (but do not start) the path timer. Accepts the same
 
