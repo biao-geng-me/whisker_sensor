@@ -204,15 +204,25 @@ classdef wavi < handle
                 % SerialPortApp may not implement SerialDisconnected; ignore if absent
             end
             
-            obj.button_gl = uigridlayout(obj.gl,[5,1],'ColumnWidth',{'1x','1x','1x','1x','1x'},'RowHeight',{'1x'},'Padding',[0 0 0 0]);
+            obj.button_gl = uigridlayout(obj.gl,[5,1],'ColumnWidth',{'1x','1x','1x','1x',40},'RowHeight',{'1x'},'Padding',[0 0 0 0]);
             obj.button_gl.Layout.Row = 2;
             obj.button_gl.Layout.Column = 1;
             FigureToggler(obj.fft_fig.fh, obj.button_gl, 'FFT', [0 0 20 20]);
             FigureToggler(obj.line_fig.fh, obj.button_gl, 'Line', [0 0 20 40]);
             FigureToggler(obj.spec_fig.fh, obj.button_gl, 'Spec', [0 0 20 40]);
+            % Reset data buffers button at the end of the toggle row
+            try
+                resetBtn = uibutton(obj.button_gl,'push');
+                resetBtn.Layout.Row = 1;
+                resetBtn.Layout.Column = 5;
+                resetBtn.Text = 'Reset';
+                resetBtn.Tooltip = 'Reset data buffers (clear signal/spectrogram buffers)';
+                resetBtn.ButtonPushedFcn = @(src,evt) obj.reset();
+            catch
+            end
 
             % Tag field and Record button
-            obj.record_gl = uigridlayout(obj.gl,[1, 3],'ColumnWidth',{'1x','4x','2x'},'RowHeight',{'1x'},'Padding',[0 0 0 0]);
+            obj.record_gl = uigridlayout(obj.gl,[1, 3],'ColumnWidth',{25,'4x',50},'RowHeight',{'1x'},'Padding',[0 0 0 0]);
             obj.record_gl.Layout.Row = 3;
             obj.record_gl.Layout.Column = 1;
             tagLabel = uilabel(obj.record_gl);
@@ -633,6 +643,27 @@ classdef wavi < handle
             obj.sig = nan(obj.ns_tot,obj.nch);
             obj.darr = linspace(datetime('now')-seconds(obj.t_buffer),datetime('now'),obj.ns_tot);
             obj.spec_data = zeros(obj.nfreq*obj.nch,obj.t_spec*ceil(obj.Fs/obj.ns_spec));
+        end
+
+        function reset(obj)
+            try
+                stop(obj.readTimer);
+            catch me
+                warning('wavi:reset','Error stopping timer: %s', me.message);
+                return
+            end
+
+            for i=1:2 % somehow need to do this multiple times to get a good offset
+                obj.average_signal_as_offset(round(obj.Fs/4));
+            end
+
+            % reset data buffers
+            obj.reset_data_buffers();
+            try
+                start(obj.readTimer);
+            catch me
+                warning('wavi:reset','Error restarting timer: %s', me.message);
+            end
         end
     end
 
