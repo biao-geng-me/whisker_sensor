@@ -44,6 +44,8 @@ classdef wavi < handle
         t_spec = 20; % spectrogram duration
         n_update = 1; % visualization update frequency, multiple of ns_read, i.e. update every n_update read
         ns_fill % number of samples, window size for filtering outliers
+        n_fill % number of read iterations to perform filtering, window can span old samples but only new samples are changed
+        nbytes_per_sample
     end
 
     properties % sensing data
@@ -66,7 +68,7 @@ classdef wavi < handle
                 is_standalone (1,1) logical = true
                 options.A_fft (1,1) double {mustBeNonnegative} = 0
                 options.Fs (1,1) double {mustBePositive} = 80
-                options.ns_read (1,1) double {mustBeInteger,mustBePositive} = 4 % number of samples to read in each loop
+                options.ns_read (1,1) double {mustBeInteger,mustBePositive} = 4 % number of samples to read at one time
                 options.tag = '';
                 options.tmax = 3600*10; % maximum run time
                 options.outpath = [];
@@ -80,8 +82,11 @@ classdef wavi < handle
                 options.scale = 1;
                 options.ch_map = [];
                 options.ns_spec = [];
-                options.n_update = 1; % visualization update frequency, multiple of ns_read, i.e. update every n_update read
-                options.ns_fill = 6;
+                options.n_update = 1; % visualization update frequency, multiple of n_fill, i.e. update every n_fill*n_update read
+                options.ns_fill = 8;
+                options.n_fill = 2;
+                % notes on outlier removal:
+                % it should be done on >=6 new samples, otherwise the data will eventually become constants
                 options.baudrate = 2000000;
             end
 
@@ -125,9 +130,13 @@ classdef wavi < handle
             obj.n_update         = options.n_update;
             obj.ns_fill          = options.ns_fill;
 
+            obj.n_fill         = min(floor(options.ns_fill/obj.ns_read),options.n_fill);
+            obj.n_fill         = max(1, obj.n_fill);
+
             obj.baudrate = options.baudrate;
             
             obj.nch = obj.nsensor*2;
+            obj.nbytes_per_sample = obj.nch * 4 + 4 + 1; % nch float32 + 1 float32 marker + 1 char ('\n')
 
             if isempty(options.ch_map)
                 obj.ch_map = 1:obj.nch;
@@ -261,6 +270,12 @@ classdef wavi < handle
             end
 
             try
+                stop(obj.readTimer);
+                delete(obj.readTimer);
+            catch
+            end
+
+            try
                 if ~isempty(obj.fout) && obj.fout ~= -1
                     fclose(obj.fout);
                     obj.fout = [];
@@ -276,10 +291,16 @@ classdef wavi < handle
 
         function run(obj)
             % Start fixed-rate timer to read serial data in chunks of ns_read
-            obj.align_data_read;
-            obj.average_signal_as_offset(round(obj.Fs))
+            obj.align_data_read();
+            for i=1:2 % somehow need to do this multiple times to get a good offset
+                obj.average_signal_as_offset(round(obj.Fs/4));
+            end
 
-            period = floor(obj.ns_read / obj.Fs*1000)/1000; % seconds between timer callbacks
+            % reset data buffers
+            obj.reset_data_buffers();
+
+            % period = floor(obj.ns_read / obj.Fs*1000)/1000/3; % seconds between timer callbacks
+            period = 0.005; % use a fast rate since it's non-blocking
             if ~isempty(obj.readTimer) && isvalid(obj.readTimer)
                 stop(obj.readTimer);
                 delete(obj.readTimer);
@@ -291,7 +312,7 @@ classdef wavi < handle
                 'Period', period, ...
                 'StartDelay', 0, ...
                 'TasksToExecute', Inf, ...
-                'BusyMode','queue', ...
+                'BusyMode','drop', ...
                 'TimerFcn', @(src,evt) obj.read_update_tick(src,evt) ...
             );
             obj.init_datalog_file();
@@ -301,20 +322,31 @@ classdef wavi < handle
         function read_update_tick(obj, src, ~)
             % Timer callback: read serial data and update visuals/printing
             try
+                if(obj.s.NumBytesAvailable < obj.nbytes_per_sample * obj.ns_read)
+                    % not enough data available yet
+                    return
+                end
+                
                 obj.readCount = obj.readCount + 1;
-                obj.read_serial_data(obj.ns_read, obj.ns_fill);
+                obj.read_serial_data(obj.ns_read);
 
-                if mod(obj.readCount, obj.n_update) == 0
+                if mod(obj.readCount, obj.n_fill) == 0
+                    obj.remove_outliers(obj.ns_fill);
+                end
+
+                if mod(obj.readCount, obj.n_update*obj.n_fill) == 0
                     obj.update_visuals();
+                    nnew = obj.ns_read*obj.n_fill*obj.n_update; % total new samples since last write
+                    obj.write_data_samples(nnew);
                 end
 
                 if mod(obj.readCount, round(obj.Fs / obj.ns_read)) == 0
                     obj.print_sig_vals();
                 end
-                obj.write_data_samples();
+
             catch me
                 % Stop timer on error to avoid silent failure loop
-                warning('wavi:read_update_tick','Timer callback error: %s', me.message);
+                warning('wavi:read_update_tick','error: %s', me.message);
                 if ~isempty(src) && isvalid(src)
                     stop(src);
                     delete(src);
@@ -331,7 +363,7 @@ classdef wavi < handle
             flush(obj.s);
 
             tmpv =0;
-            fprintf('searching frame start\n');
+            fprintf('Searching frame start\n');
             ncount = 0;
             while(tmpv~=2024)
                 fprintf('.')
@@ -344,28 +376,27 @@ classdef wavi < handle
             end
 
             % clear old frames from serial buffer
-            fprintf('clearing buffer\n');
-            while(obj.s.NumBytesAvailable>(obj.nch+1)*4)
-                read(obj.s,(obj.nch+1)*4+1,'char');
+            fprintf('Clearing buffer\n');
+            while(obj.s.NumBytesAvailable>=obj.nbytes_per_sample)
+                read(obj.s,obj.nbytes_per_sample,'char');
             end
             fprintf('%g seconds to find sample start\n',toc);
         end
 
         function average_signal_as_offset(obj,nsamples)
             % read nsamples and take the average as the offset voltage
-            obj.V0 = zeros(1,obj.nch);
+            buffer = zeros(nsamples,obj.nch);
             for j=1:nsamples
-                obj.V0 = obj.V0 + read(obj.s,obj.nch,'single'); % sensor data
+                buffer(j,:) = read(obj.s,obj.nch,'single'); % sensor data
                 readline(obj.s); % \n
                 read(obj.s,1,'single'); % 2024
-                
-            end 
-            obj.V0 = obj.V0(obj.ch_map)/nsamples;
+            end
+            obj.V0 = mean(filloutliers(buffer(:,obj.ch_map),'linear'),1);
             fprintf('Sensor voltage offset:\n')
-            fprintf(['\n' repmat(' %8.3f',1,obj.nch) '\n\n'],obj.V0);
+            fprintf([repmat('%7.3f',1,obj.nch) '\n\n'],obj.V0);
         end
 
-        function read_serial_data(obj,ns_read, n_fill)
+        function read_serial_data(obj,ns_read)
             % read ns_read samples from serial
 
             % shift buffer
@@ -384,13 +415,16 @@ classdef wavi < handle
             
             % put new data in
             obj.sig(end-ns_read+1:end,:) = buff(:,obj.ch_map);
-
-            % replace outliers in near the end
-            tmp = obj.sig(end-n_fill+1:end,:);
-            obj.sig(end-n_fill+1:end,:) = filloutliers(tmp,'linear');
-
             obj.darr(end-ns_read+1:end) = linspace(obj.darr(end-ns_read)+seconds(1/obj.Fs),...
                                             obj.darr(end-ns_read)+seconds(ns_read/obj.Fs),ns_read);
+        end
+
+        function remove_outliers(obj, ns_fill)
+            % replace outliers in new samples
+            tmp = obj.sig(end-ns_fill+1:end,:);
+            tmp = filloutliers(tmp,'linear'); % operates on each column separately.
+            nnew = obj.ns_read*obj.n_fill;
+            obj.sig(end-nnew+1:end,:) = tmp(end-nnew+1:end,:);
         end
         
         function do_fft(obj)
@@ -442,18 +476,25 @@ classdef wavi < handle
             end
         end
 
-        function write_data_samples(obj)
-            for j=1:obj.ns_read
-                currentTime = obj.darr(end-obj.ns_read+j);
+        function write_data_samples(obj, nnew)
+            for j=1:nnew
+                currentTime = obj.darr(end-nnew+j);
                 dtstr = sprintf('%04d-%02d-%02d %02d:%02d:%06.3f',currentTime.Year,...
                                                                 currentTime.Month,...
                                                                 currentTime.Day,...
                                                                 currentTime.Hour,...
                                                                 currentTime.Minute,...
                                                                 currentTime.Second);
-            
-                fprintf(obj.fout,['%s' repmat(' %12.6f',1,obj.nch) '\n'],dtstr,obj.sig(end-obj.ns_read+j,:));
+
+                fprintf(obj.fout,['%s' repmat(' %12.6f',1,obj.nch) '\n'],dtstr,obj.sig(end-nnew+j,:));
             end
+        end
+
+        function reset_data_buffers(obj)
+            % reset data buffers
+            obj.sig = nan(obj.ns_tot,obj.nch);
+            obj.darr = linspace(datetime('now')-seconds(obj.t_buffer),datetime('now'),obj.ns_tot);
+            obj.spec_data = zeros(obj.nfreq*obj.nch,obj.t_spec*ceil(obj.Fs/obj.ns_spec));
         end
     end
 
