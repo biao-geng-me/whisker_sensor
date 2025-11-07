@@ -32,7 +32,7 @@ classdef CarriageControl < handle
         poll_keyboard
         joystick_side
         step2mm = 0.0499; % clearpath motor steps to mm conversion, measured from installation
-        polling_interval = 25 % ms
+        polling_interval = 10 % ms
         aoa_motor_type = 'ClearPath' % 'Stepper' or 'ClearPath'
         control_aoa = true % whether to control AOA automatically (keep 0 aoa)
 
@@ -71,7 +71,7 @@ classdef CarriageControl < handle
         origin_mm = [0,0] 
 
         % path tracking state
-        pathTimer = []            % timer used for path tracking ticks
+        pathTimer = []           % timer used for path tracking ticks
         path_xp                  % griddedInterpolant for x(arc)
         path_yp                  % griddedInterpolant for y(arc)
         path_rp                  % griddedInterpolant for radius(arc)
@@ -81,7 +81,7 @@ classdef CarriageControl < handle
         path_d_trav = 0          % cumulative travelled distance (mm)
         path_xy_old = [0 0]      % previous position steps
         path_npoll = 0           % poll counter
-        path_CMD_INTERVAL =  10  % ms (default)
+        path_CMD_INTERVAL =  5   % ms (default)
         path_stopRequested = 0   % flag to request stop from outside
         path_dx_max = 3600       % max x movement range (mm)
         path_target_loc = [0,0]  % target location for path tracking (mm)
@@ -828,7 +828,7 @@ classdef CarriageControl < handle
                         warning('moveToPosition:Timeout','Timeout waiting for position. dx=%d dy=%d',round(dx),round(dy));
                         break
                     end
-                    pause(0.2);
+                    pause(0.05);
                     try write(obj.s,command,'char'); catch, end
                 end
 

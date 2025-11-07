@@ -247,6 +247,14 @@ classdef wavi < handle
         end
 
         function cleanup(obj)
+            
+            try
+                stop(obj.readTimer);
+                delete(obj.readTimer);
+            catch
+            end
+            obj.close_datafile();
+
             % Close serial port and data file (if open)
             try
                 if ~isempty(obj.s)
@@ -269,19 +277,17 @@ classdef wavi < handle
                 warning('wavi:cleanup','Error closing serial: %s', me.message);
             end
 
-            try
-                stop(obj.readTimer);
-                delete(obj.readTimer);
-            catch
-            end
+        end
 
+        function close_datafile(obj)
+            % Close data file if open
             try
                 if ~isempty(obj.fout) && obj.fout ~= -1
                     fclose(obj.fout);
                     obj.fout = [];
                 end
             catch me
-                % warning('wavi:cleanup','Error closing file: %s', me.message);
+                warning('wavi:close_file','Error closing file: %s', me.message);
             end
         end
 
@@ -346,7 +352,7 @@ classdef wavi < handle
 
             catch me
                 % Stop timer on error to avoid silent failure loop
-                warning('wavi:read_update_tick','error: %s', me.message);
+                warning('wavi:read_update_tick','error: %s','Serial port disconnected.');
                 if ~isempty(src) && isvalid(src)
                     stop(src);
                     delete(src);

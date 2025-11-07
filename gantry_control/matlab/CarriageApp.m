@@ -368,7 +368,7 @@ classdef CarriageApp < handle
         
             % return the precomputed tangent interpolant so controllers can use it
         end
-        
+
         function runPathTracking(app,xp,yp,rp,thetap,Ltot,start_s)
             % Initialize path tracking and start timer-driven ticks.
             % xp,yp,rp - interpolants mapping arc length (mm) -> x,y, curvature radius
@@ -418,15 +418,10 @@ classdef CarriageApp < handle
                 elapsed = toc(t0);
 
                 fprintf('Tick %d: elapsed total=%.3f s, frame=%.1f ms, avg FPS=%d\n', n, elapsed, toc(t1)*1000, round(n/elapsed));
-                sleep_time = next_time - elapsed;
-                if sleep_time > 0.005
-                    % sleep most of the remaining time
-                    pause(sleep_time - 0.002);
-                end
                 
                 % busy-wait the final few ms to reduce jitter
                 while toc(t0) < next_time
-                    pause(0); % yield briefly to keep UI responsive
+                    pause(0.0005); % yield briefly to keep UI responsive, NOTE pause <=1ms triggers higher resolution OS timer.
                 end
             end
 
