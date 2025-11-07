@@ -14,7 +14,7 @@ classdef Jakiro < handle
         run_start_time = [] % time when experiment started
         cc1_done = false; % flag indicating carriage 1 finished path tracking
         cc2_done = false; % flag indicating carriage 2 finished path tracking
-        pathpath_tick_period_ms = 5; % period of path tracking timer in ms
+        pathpath_tick_period_ms = 10; % period of path tracking timer in ms
         pathpath_redraw_interval = 20; % update interval for path tracking
         outpath % output path for wavi data
     end
@@ -41,7 +41,7 @@ classdef Jakiro < handle
             cc1_panel.Layout.Column = 1;
             cc1_panel.Layout.Row = [1 2];
             app.CC1 = CarriageApp(cc1_panel,ax);
-            app.CC1.Car.origin = [4008, 0]; % parking position for carriage 1 (steps, 200 mm offset)
+            app.CC1.Car.origin = [5010, 0]; % parking position for carriage 1 (steps, 250 mm offset)
             app.CC1.Car.origin_mm = app.CC1.Car.origin * app.CC1.Car.step2mm;
             app.CC1.Car.path_dx_max = 3800; % max x movement range (mm)
             app.CC1.Car.motor_settings.ACC = 10000;
@@ -195,6 +195,8 @@ classdef Jakiro < handle
                 start(app.CC2.redrawTimer);
             catch
             end
+            app.CC2.Car.sendCommand('NUL,NUL,ABS0>');
+            pause(0.2);
             app.CC2.Car.moveToPositionMM(start_x-app.CC2.Car.origin_mm(1), start_y-app.CC2.Car.origin_mm(2), 20, 1, false); 
             app.CC2.Car.init_pathtracking_variables(xp,yp,rp,L,start_s,thetap2);
             stop(app.CC2.redrawTimer);
@@ -224,6 +226,7 @@ classdef Jakiro < handle
             try
                 if ~isempty(app.WA.s)
                     app.WA.tag = sprintf('%s_%s-v1=%.2f_%s-v2=%.2f_delay=%.1f',run_tag,pathtag1,v1,pathtag2,v2,delay_s);
+                    app.WA.is_recording = true;
                     app.WA.init_datalog_file();
                     app.WA.align_data_read();
                     app.WA.average_signal_as_offset(round(app.WA.Fs));
@@ -285,6 +288,7 @@ classdef Jakiro < handle
             end
             app.CC1.hArrow.Visible = 'off';
             app.CC2.hArrow.Visible = 'off';
+            app.WA.is_recording = false;
             app.WA.close_datafile();
         end
 

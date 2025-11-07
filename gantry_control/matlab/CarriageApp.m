@@ -214,6 +214,10 @@ classdef CarriageApp < handle
                     if strcmp(app.redrawTimer.Running,'off')
                         start(app.redrawTimer);
                     end
+                    if app.Car.control_aoa
+                        app.Car.sendCommand('NUL,NUL,ABS0>');
+                    end
+                    pause(0.2);
                     app.Car.moveToPosition(0,0,20);
                 end
             catch ME

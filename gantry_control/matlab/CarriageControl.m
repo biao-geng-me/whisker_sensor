@@ -662,7 +662,7 @@ classdef CarriageControl < handle
                 aoa = 0.5*obj.aoa_old + 0.5*aoa_tmp; % smooth AOA changes
                 obj.aoa_old = aoa;
 
-                fprintf('%s path tangent angle: %.1f %.1f\n',dt_str, aoa/pi*180,obj.path_arc_len);
+                % fprintf('%s path tangent angle: %.1f %.1f\n',dt_str, aoa/pi*180,obj.path_arc_len);
                 spr = obj.motor_settings.STEPS_PER_REV;
                 aoa = max(min(pi/2,aoa),-pi/2); % limit AOA (hardware limitation, to avoid cable issues)
 
@@ -680,9 +680,9 @@ classdef CarriageControl < handle
             command = sprintf('%s,%s,%s%c',cmd_x,cmd_y,cmd_a,obj.END_MARKER);
             try
                 write(obj.s,command,'char');
-                fprintf('%s path tick: %.1f %.1f %.1f\n',dt_str, obj.path_arc_len, ...
-                                        obj.path_d_trav, look_ahead_dist);
-                fprintf('PathTick: Sent command: %s\n',command);
+                % fprintf('%s path tick: %.1f %.1f %.1f\n',dt_str, obj.path_arc_len, ...
+                %                         obj.path_d_trav, look_ahead_dist);
+                % fprintf('PathTick: Sent command: %s\n',command);
             catch me
                 warning(me.identifier, '%s', me.message);
             end
@@ -1008,7 +1008,8 @@ classdef CarriageControl < handle
                     end
                 end
                 % pause(0.005); % busy wait 
-                if toc(tStart)>5
+                if toc(tStart)>1
+                    fprintf('NumBytesAvailable from controller: %d\n',obj.s.NumBytesAvailable);
                     error('Controller communication timed out while getting motor positions.');
                 end
             end
