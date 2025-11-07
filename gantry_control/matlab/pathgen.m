@@ -9,9 +9,15 @@ H = 800;
 % ----------------------------------
 interp_method = 'linear';
 nm = 4;
-% xm = linspace(0,L,4);
-xm = [0.0 0.1 0.3 0.5 0.7 1.0]*L;
-ym = [0.1 0.1 0.9 0.9 0.1 0.1]*H;
+xm = linspace(0,L,1000);
+% xm = [0.0 0.1 0.3 0.5 0.7 1.0]*L;
+% ym = [0.1 0.1 0.9 0.9 0.1 0.1]*H;
+
+% ym = -xm.*(xm-L)/L^2*2*H;
+% ym = ym + 0.3*H*sin(2*pi*xm/750).*ym/max(ym)+100;
+
+ym = 0.3*H*sin(2*pi*xm/900)+400;
+
 fy = griddedInterpolant(xm,ym,interp_method,'spline');
 
 x = 0:10:L;
@@ -41,11 +47,11 @@ s = cumsum(vecnorm([dx; dy], 2, 1));
 
 % plot(x,s);
 xp = griddedInterpolant(s,x,'spline','nearest');
-yp = griddedInterpolant(s,y,'spline','nearest');
-plot(xp(1:10:s(end)),yp(1:10:s(end)),'r');
+ym = griddedInterpolant(s,y,'spline','nearest');
+plot(xp(1:10:s(end)),ym(1:10:s(end)),'r');
 
 %% save 
 
-fid = fopen(fullfile('paths','xy_path6.dat'),'w');
+fid = fopen(fullfile('paths','xy_path12.dat'),'w');
 fprintf(fid,'%12.5f, %12.5f\n',[x;y]);
 fclose(fid);
