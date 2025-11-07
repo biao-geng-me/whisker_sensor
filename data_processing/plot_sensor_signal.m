@@ -29,6 +29,8 @@ function [fh,axs] =plot_sensor_signal(datalog,isensor,opt)
 
     % load data
     [dat,dt_str,tag] = load_datalog(datalog);
+    idx = isnan(dat{:,end});
+    dat = dat(~idx,:);
 
     if isempty(opt.title)
         tag = sprintf('%s Sensor %d',tag,isensor);

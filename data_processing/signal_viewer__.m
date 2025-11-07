@@ -4,12 +4,14 @@ clear;clc;close all
 
 
 % assemble data log
+% example data
 % path = 'sensor_data_samples';
-% name = 'st_2025-04-09_1115_27.00_400RPM_20x40bar_test_edge_two_motor';    
+% name = 'st_2025-04-09_1115_27.00_400RPM_20x40bar_test_edge_two_motor';
 
-path = fullfile(getenv('USERPROFILE'),'OneDrive - rit.edu','work','wavi_data');
-name = 'st_2025-10-31_1529_40.91_water-D6cm-17cm_path2-v1=0.30_path3-v2=0.20_delay=3.0';
-isensor = 5;
+data_path = fullfile(getenv('USERPROFILE'),'wavi_data');
+name = 'st_2025-11-06_1044_31.17_test_path0-v1=0.30_path3-v2=0.30_delay=5.0.dat';
+
+isensor = 9;
 
 % settings
 f_range = [0 40];   % for spectrogram, 
@@ -17,7 +19,7 @@ ol = 0.75;          % spectrogram overlap
 t_fft = 2;
 
 % plot
-file = fullfile(path,name);
+file = fullfile(data_path,name);
 fh1 = plot_sensor_signal(file,isensor,...
                          title=[],...
                          t_fft=t_fft,...
