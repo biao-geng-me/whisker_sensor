@@ -1,4 +1,4 @@
-function fh=plot_sensor_signal(datalog,isensor,opt)
+function [fh,axs] =plot_sensor_signal(datalog,isensor,opt)
     % ------------------------------------------------------
     % plot a sensor signal hitory and spectrum for 1 sensor
     % ------------------------------------------------------
@@ -15,6 +15,7 @@ function fh=plot_sensor_signal(datalog,isensor,opt)
         opt.fontsize = 12;
         opt.title = [];
         opt.clickable = false;
+        opt.line_tags = {'Ch1','Ch2'};
     end
     % settings
     log_scale = opt.log_scale;
@@ -22,7 +23,8 @@ function fh=plot_sensor_signal(datalog,isensor,opt)
     ol        = opt.overlap;
     t_fft     = opt.t_fft;
     fontsize  = opt.fontsize;
-
+    line_tags = opt.line_tags;
+    amp_max = 0;
     % --------- end of user input ---------------
 
     % load data
@@ -83,7 +85,7 @@ function fh=plot_sensor_signal(datalog,isensor,opt)
     if log_scale
         clim([-6 max(ss(:))])
     end
-    title('Ch1')
+    title(line_tags{1})
     set(gca, 'FontName', 'Times', 'FontSize', fontsize);
     
     % -------------
@@ -106,7 +108,7 @@ function fh=plot_sensor_signal(datalog,isensor,opt)
         clim([-6 max(ss(:))])
     end
     ylabel('Frequency (Hz)')
-    title('Ch2')
+    title(line_tags{2})
     set(gca, 'FontName', 'Times', 'FontSize', fontsize);
     
     linkaxes([ax1,ax2,ax3],'x')
@@ -124,7 +126,8 @@ function fh=plot_sensor_signal(datalog,isensor,opt)
         amp_line_IDs = [];
         linkaxes([axx1,axx2],'x')
     end
-
+    axs = [ax1,ax2,ax3];
+    
     function plot_history(ax)
         axes(ax)
         hold on;box on;grid on
@@ -134,7 +137,7 @@ function fh=plot_sensor_signal(datalog,isensor,opt)
     
         xlim(t([1 end]))
         ylabel('Signal (mV)')
-        legend('Ch1','Ch2')
+        legend(line_tags)
         title(tag)
     end
 
@@ -160,7 +163,7 @@ function fh=plot_sensor_signal(datalog,isensor,opt)
             figure(amp_history_fh)
         end
 
-        lgd = sprintf('Ch%d %3.1fHz',ich,ff(ifreq));
+        lgd = sprintf('%s %3.1fHz',line_tags{ich},ff(ifreq));
 
         if ich==1
             s = ss1;
@@ -179,8 +182,13 @@ function fh=plot_sensor_signal(datalog,isensor,opt)
 
         subplot(2,1,2);hold on;box on;grid on
         set(gca, 'FontName', 'Times', 'FontSize', fontsize);
-        plot(tt,mean(s(ifreq-1:ifreq+1,:)),LineWidth=2)
+        yy = mean(s(ifreq-1:ifreq+1,:));
+        plot(tt,yy,LineWidth=2)
+        if max(yy) > amp_max
+            amp_max = max(yy);
+        end
         xlim(t([1 end]))
+        ylim([0 amp_max])
         xlabel('Time (s)')
         ylabel('Amp (mV)');
         legend(amp_line_legends);

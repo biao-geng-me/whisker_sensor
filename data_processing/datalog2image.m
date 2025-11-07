@@ -1,10 +1,11 @@
 function [fh_line, fh_fft, pp_max] = datalog2image(path,name,opt)
-    % plot and save sensor signal and fft
+    % plot and save sensor (array) signal and fft
     arguments
         path
         name
         opt.show_plots = false
         opt.t_avg = 5
+        opt.save_plots = true
     end
 
     if opt.show_plots
@@ -26,7 +27,7 @@ function [fh_line, fh_fft, pp_max] = datalog2image(path,name,opt)
     [nrow,ncol] = square_layout(nsensor);
     
     % line history figure
-    fh_line = figure(Position=[0 0 1920 1080],Visible=visible);
+    fh_line = figure(Position=[1 41 1920 960],Visible=visible);
     tiledlayout(fh_line,nrow,ncol,TileSpacing="tight");
 
     for irow=1:nrow
@@ -62,7 +63,7 @@ function [fh_line, fh_fft, pp_max] = datalog2image(path,name,opt)
     end
 
     % fft figure
-    fh_fft = figure(Position=[0 0 1920 1080], Visible=visible);
+    fh_fft = figure(Position=[1 1 1920 960], Visible=visible);
     tiledlayout(fh_fft,nrow,ncol,TileSpacing="tight");
     
     pp_max = 0;
@@ -105,9 +106,10 @@ function [fh_line, fh_fft, pp_max] = datalog2image(path,name,opt)
     if strcmp(name(end-3:end),'.dat')
         name = name(1:end-4);
     end
-
-    saveas(fh_fft,fullfile(path,['fft_' name '.png']));
-    saveas(fh_line,fullfile(path,['his_' name '.png']));
     
+    if opt.save_plots
+        saveas(fh_fft,fullfile(path,['fft_' name '.png']));
+        saveas(fh_line,fullfile(path,['his_' name '.png']));
+    end
     
     
