@@ -118,9 +118,9 @@ classdef SerialPortApp < handle
         function createComponents(app,parent)
             % Use a grid layout for a clean, responsive design.
             gl = uigridlayout(parent, [3 1]);
-            gl.RowHeight = {'1x', '1x', '1x'};
+            gl.RowHeight = {'2x', '2x', '1x'};
             gl.ColumnWidth = {'1x'};
-            gl.Padding = 15;
+            gl.Padding = 5;
             
             % Create the dropdown label.
             % uilabel(gl, 'Text', 'Select Port:', 'HorizontalAlignment', 'center');

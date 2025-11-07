@@ -8,6 +8,7 @@ classdef wavi < handle
         ui_parent
         gl
         button_gl
+        record_gl
         SerialPanel
         SerialApp
 
@@ -19,6 +20,10 @@ classdef wavi < handle
         readTimer % matlab timer object used for fixed-rate reading
         readCount = 0 % number of timer ticks / read iterations performed
         fout % file handle for data logging
+        TagField   % uieditfield for experiment tag
+        RecordBtn  % button to start/stop recording
+        is_recording = false % whether data is currently being logged
+        FilePathField % non-editable field to show current recording filepath/status
     end
     
     properties % sampling settings
@@ -97,13 +102,21 @@ classdef wavi < handle
             % end
             obj.s = [];
             obj.is_standalone = is_standalone;
-
             if isempty(ui_parent)
-                obj.UIFigure = uifigure('Name','Wavi','Position',[100 100 200 300]);
+                obj.UIFigure = uifigure('Name','Wavi','Position',[600 400 350  250]);
                 obj.ui_parent = obj.UIFigure;
             else
                 obj.ui_parent = ui_parent;
                 obj.UIFigure = ancestor(ui_parent,'matlab.ui.Figure','toplevel');
+            end
+
+            if obj.is_standalone
+                % ensure closing the figure triggers cleanup and then delete the figure
+                % use delete(src) to avoid re-triggering CloseRequestFcn callbacks
+                try
+                    obj.UIFigure.CloseRequestFcn = @(src,evt) obj.onAppClose();
+                catch
+                end
             end
            
             % populate properties
@@ -162,13 +175,21 @@ classdef wavi < handle
             obj.fft_fig = fft_view(obj.nch,obj.nfreq,obj.t_fft);
             obj.spec_fig = spectrogram_view(obj.spec_data,obj.Fs,obj.ns_spec);
             obj.line_fig = line_view(obj.nsensor,obj.darr,obj.sig);
-            
+
+            % Set window titles (Name) and hide numeric figure label (NumberTitle)
+            try
+                set(obj.fft_fig.fh, 'Name', 'Wavi - FFT contour', 'NumberTitle', 'off');
+                set(obj.line_fig.fh, 'Name', 'Wavi - Line', 'NumberTitle', 'off');
+                set(obj.spec_fig.fh, 'Name', 'Wavi - Spectrogram', 'NumberTitle', 'off');
+            catch
+            end
+
             set(obj.fft_fig.fh,'Visible','off');
             set(obj.spec_fig.fh,'Visible','off');
             set(obj.line_fig.fh,'Visible','off');
 
-            % create ui
-            obj.gl = uigridlayout(obj.ui_parent,[3,1],'RowHeight',{'3x','1x','1x'},'Padding',[10 10 10 10]);
+            % create ui: 4 rows (Serial, buttons, record/tag, filepath status)
+            obj.gl = uigridlayout(obj.ui_parent,[4,1],'RowHeight',{'7x','1.5x','1.5x','1x'},'Padding',[10 10 10 10]);
                 % Serial panel
             obj.SerialPanel = uipanel(obj.gl,'Title','Sensor array');
             obj.SerialPanel.Layout.Row = 1;
@@ -184,9 +205,51 @@ classdef wavi < handle
             end
             
             obj.button_gl = uigridlayout(obj.gl,[5,1],'ColumnWidth',{'1x','1x','1x','1x','1x'},'RowHeight',{'1x'},'Padding',[0 0 0 0]);
-            fft_btn = FigureToggler(obj.fft_fig.fh, obj.button_gl, 'FFT', [0 0 20 20]);
-            line_btn = FigureToggler(obj.line_fig.fh, obj.button_gl, 'Line', [0 0 20 40]);
-            spec_btn = FigureToggler(obj.spec_fig.fh, obj.button_gl, 'Spec', [0 0 20 40]);
+            obj.button_gl.Layout.Row = 2;
+            obj.button_gl.Layout.Column = 1;
+            FigureToggler(obj.fft_fig.fh, obj.button_gl, 'FFT', [0 0 20 20]);
+            FigureToggler(obj.line_fig.fh, obj.button_gl, 'Line', [0 0 20 40]);
+            FigureToggler(obj.spec_fig.fh, obj.button_gl, 'Spec', [0 0 20 40]);
+
+            % Tag field and Record button
+            obj.record_gl = uigridlayout(obj.gl,[1, 3],'ColumnWidth',{'1x','4x','2x'},'RowHeight',{'1x'},'Padding',[0 0 0 0]);
+            obj.record_gl.Layout.Row = 3;
+            obj.record_gl.Layout.Column = 1;
+            tagLabel = uilabel(obj.record_gl);
+            tagLabel.Text = 'Tag:';
+            tagLabel.Layout.Row = 1;
+            tagLabel.Layout.Column = 1;
+
+            obj.TagField = uieditfield(obj.record_gl,'text');
+            obj.TagField.Layout.Row = 1;
+            obj.TagField.Layout.Column = 2;
+            obj.TagField.Value = obj.tag;
+
+            obj.RecordBtn = uibutton(obj.record_gl,'push');
+            obj.RecordBtn.Layout.Row = 1;
+            obj.RecordBtn.Layout.Column = 3;
+            obj.RecordBtn.Text = '● Rec';
+            obj.RecordBtn.FontColor = [1 0 0];
+            obj.RecordBtn.ButtonPushedFcn = @(src,evt) obj.toggle_record(src,evt);
+
+            % Filepath/status field (non-editable so user can select & copy)
+            obj.FilePathField = uieditfield(obj.gl,'text');
+            obj.FilePathField.Layout.Row = 4;
+            obj.FilePathField.Layout.Column = 1;
+            % make non-editable but selectable; style to appear borderless
+            try
+                obj.FilePathField.Editable = 'off';
+            catch
+                % older MATLAB versions use Enable = 'inactive'
+                try obj.FilePathField.Enable = 'inactive'; catch, end
+            end
+            % attempt to remove border and match parent background for borderless look
+            try
+                obj.FilePathField.BackgroundColor = obj.UIFigure.Color;
+            catch
+            end
+
+            obj.FilePathField.Value = 'Not recording';
 
             drawnow
 
@@ -210,9 +273,17 @@ classdef wavi < handle
     end
 
     methods % event handlers
-        function onSerialConnected(obj,src,evt)
-
-            obj.s = obj.SerialApp.s;
+        function onSerialConnected(obj,~,~)
+            % Called when SerialPortApp emits SerialConnected. Use SerialApp's s.
+            try
+                if isprop(obj.SerialApp,'s') && ~isempty(obj.SerialApp.s)
+                    obj.s = obj.SerialApp.s;
+                else
+                    obj.s = [];
+                end
+            catch
+                obj.s = [];
+            end
             if ~obj.is_standalone
                 return
             end
@@ -224,7 +295,7 @@ classdef wavi < handle
             end
         end
 
-        function onSerialDisconnected(obj, src, ~)
+        function onSerialDisconnected(obj, ~, ~)
             % Called when SerialPortApp emits SerialDisconnected (if available)
             try
                 obj.cleanup();
@@ -236,23 +307,36 @@ classdef wavi < handle
         function onAppClose(obj)
             % Called by parent app when closing
             obj.cleanup();
+
+            % close figures
+            try
+                close(obj.fft_fig.fh);
+                close(obj.line_fig.fh);
+                close(obj.spec_fig.fh);
+            catch me
+                warning('wavi:cleanup','Error closing figures: %s', me.message);
+            end
+
+            if obj.is_standalone
+                delete(obj.UIFigure);
+            end
+        end
+
+        function cleanup(obj) % cleanup non-persistent resources
+            % Called to cleanup resources on app close or serial disconnect
             % stop and delete timer if running
             try
                 if ~isempty(obj.readTimer) && isvalid(obj.readTimer)
                     stop(obj.readTimer);
+                    fprintf('Read timer %s\n',obj.readTimer.running)
                     delete(obj.readTimer);
+                    pause(0.1); % allow timer to fully stop
                 end
-            catch
+            catch me
+                warning('wavi:onAppClose','Error stopping timer: %s', me.message);
             end
-        end
 
-        function cleanup(obj)
-            
-            try
-                stop(obj.readTimer);
-                delete(obj.readTimer);
-            catch
-            end
+            obj.is_recording = false;
             obj.close_datafile();
 
             % Close serial port and data file (if open)
@@ -277,6 +361,44 @@ classdef wavi < handle
                 warning('wavi:cleanup','Error closing serial: %s', me.message);
             end
 
+        end
+
+        function toggle_record(obj,~,~)
+            % Toggle recording state: open/close datalog file
+            try
+                if isempty(obj.s) || ~isvalid(obj.s)
+                    uialert(obj.UIFigure,'Serial port not connected. Cannot start/stop recording.','wavi:toggle_record');
+                    return
+                end
+
+                if ~obj.is_recording
+                    % start recording
+                    rawtag = strtrim(obj.TagField.Value);
+                    obj.tag = obj.sanitize_tag(rawtag);
+
+                    obj.init_datalog_file();
+                    obj.is_recording = true;
+                    % update button appearance
+                    obj.RecordBtn.Text = '■ Stop';
+                    obj.RecordBtn.FontColor = [1 1 1];
+                    obj.RecordBtn.BackgroundColor = [1 0 0];
+                else
+                    % stop recording
+                    obj.is_recording = false;
+                    obj.close_datafile();
+                    obj.RecordBtn.Text = '● Rec';
+                    obj.RecordBtn.FontColor = [1 0 0];
+                    obj.RecordBtn.BackgroundColor = [1 1 1]*0.95;
+                    try
+                        if isprop(obj,'FilePathField') && ~isempty(obj.FilePathField)
+                            obj.FilePathField.Value = 'Not recording';
+                        end
+                    catch
+                    end
+                end
+            catch ME
+                warning('wavi:toggle_record','Record toggle failed: %s', ME.message);
+            end
         end
 
         function close_datafile(obj)
@@ -321,7 +443,6 @@ classdef wavi < handle
                 'BusyMode','drop', ...
                 'TimerFcn', @(src,evt) obj.read_update_tick(src,evt) ...
             );
-            obj.init_datalog_file();
             start(obj.readTimer);
         end
 
@@ -343,7 +464,10 @@ classdef wavi < handle
                 if mod(obj.readCount, obj.n_update*obj.n_fill) == 0
                     obj.update_visuals();
                     nnew = obj.ns_read*obj.n_fill*obj.n_update; % total new samples since last write
-                    obj.write_data_samples(nnew);
+                    % write to file only when recording is active and file open
+                    if obj.is_recording && ~isempty(obj.fout) && obj.fout ~= -1
+                        obj.write_data_samples(nnew);
+                    end
                 end
 
                 if mod(obj.readCount, round(obj.Fs / obj.ns_read)) == 0
@@ -352,7 +476,7 @@ classdef wavi < handle
 
             catch me
                 % Stop timer on error to avoid silent failure loop
-                warning('wavi:read_update_tick','error: %s','Serial port disconnected.');
+                warning('wavi:read_update_tick','error: %s',me.message);
                 if ~isempty(src) && isvalid(src)
                     stop(src);
                     delete(src);
@@ -474,11 +598,19 @@ classdef wavi < handle
                                                                         currentTime.Minute,...
                                                                         currentTime.Second,...
                                                                         obj.tag);
-            obj.fout = fopen(fullfile(obj.outpath, fileName), 'w');
+            fullpath = fullfile(obj.outpath, fileName);
+            obj.fout = fopen(fullpath, 'w');
             if obj.fout == -1
-                error('wavi:init_datalog_file','Failed to open file for writing: %s', fullfile(obj.outpath, fileName));
+                error('wavi:init_datalog_file','Failed to open file for writing: %s', fullpath);
             else
-                fprintf('Logging data to file: %s\n', fullfile(obj.outpath, fileName));
+                fprintf('Logging data to file: %s\n', fullpath);
+                % update status/filepath field if present
+                try
+                    if isprop(obj,'FilePathField') && ~isempty(obj.FilePathField)
+                        obj.FilePathField.Value = fullpath;
+                    end
+                catch
+                end
             end
         end
 
@@ -501,6 +633,35 @@ classdef wavi < handle
             obj.sig = nan(obj.ns_tot,obj.nch);
             obj.darr = linspace(datetime('now')-seconds(obj.t_buffer),datetime('now'),obj.ns_tot);
             obj.spec_data = zeros(obj.nfreq*obj.nch,obj.t_spec*ceil(obj.Fs/obj.ns_spec));
+        end
+    end
+
+    methods (Access = private)
+        function s = sanitize_tag(~, tag)
+            % Replace characters that are unsafe for filenames with underscore
+            try
+                if isempty(tag)
+                    s = '';
+                    return
+                end
+                s = char(tag);
+                % replace any character not in A-Za-z0-9._- with _
+                s = regexprep(s, '[^A-Za-z0-9._-]', '_');
+                % collapse repeated underscores
+                s = regexprep(s, '_+', '_');
+                % trim leading/trailing underscores
+                s = regexprep(s, '^_+|_+$', '');
+                % limit length
+                maxlen = 128;
+                if strlength(s) > maxlen
+                    s = char(s(1:maxlen));
+                end
+                if isempty(s)
+                    s = '';
+                end
+            catch
+                s = '';
+            end
         end
     end
 
