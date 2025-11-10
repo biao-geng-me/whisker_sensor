@@ -6,6 +6,7 @@ function [dat_table,dt_str,tag] = load_datalog(pathname)
     dat_table = readtable(pathname, "FileType","fixedwidth");
 
     % extract meta data from datalog filename
+    % convention is st_date_time_tag_fields
     [filepath,name,ext] = fileparts(pathname);
 
     parts=split(name,'_');
