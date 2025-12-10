@@ -8,8 +8,16 @@ end
 clear; clc; fclose all; close all
 
 fprintf('Setting up arduino\n')
-s=serialport("COM18",2000000); % change COM number accordingly
-% fopen(s);
+nsensor = 3;
+s=serialport("COM13",2000000); % change COM number accordingly
+pause(1.5) % wait for Arduino reset
+% send sensor count to Arduino before starting acquisition
+try
+    cmd = sprintf('N=%d', nsensor);
+    writeline(s, cmd);
+    pause(0.1);
+catch
+end
 
 
 %% loop measurement
@@ -24,7 +32,7 @@ tag = 'test';
 Fs = 80;
 Afft = 0;
 nread = 6;
-nsensor = 9;
+
 % ch_map = load('channel_map.txt');
 ch_map = 1:nsensor*2;
 

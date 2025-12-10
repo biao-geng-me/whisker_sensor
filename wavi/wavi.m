@@ -19,13 +19,14 @@ classdef wavi < handle
         % runtime helpers
         readTimer % matlab timer object used for fixed-rate reading
         readCount = 0 % number of timer ticks / read iterations performed
+        runStartTic % tic handle used to measure observed sampling rate
         fout % file handle for data logging
         TagField   % uieditfield for experiment tag
         RecordBtn  % button to start/stop recording
         is_recording = false % whether data is currently being logged
         FilePathField % non-editable field to show current recording filepath/status
     end
-    
+
     properties % sampling settings
         s 
         baudrate = 2000000
@@ -294,6 +295,29 @@ classdef wavi < handle
             catch
                 obj.s = [];
             end
+            % send number of sensors to device so it can configure pins
+            try
+                if ~isempty(obj.s) && isvalid(obj.s)
+                    pause(1.5); % Arduino resets when port opens; wait for it to be ready
+                    cmd = sprintf('N=%d', obj.nsensor);
+                    writeline(obj.s, cmd);
+                    fprintf('Sent sensor count N=%d to device\n', obj.nsensor);
+                    % % wait briefly for an ACK line from device
+                    % ack = '';
+                    % t0 = tic;
+                    % while isempty(ack) && toc(t0) < 2
+                    %     try
+                    %         if obj.s.NumBytesAvailable > 0
+                    %             ack = readline(obj.s);
+                    %         end
+                    %     catch
+                    %     end
+                    %     pause(0.01);
+                    % end
+                end
+            catch
+            end
+
             if ~obj.is_standalone
                 return
             end
@@ -338,9 +362,11 @@ classdef wavi < handle
             try
                 if ~isempty(obj.readTimer) && isvalid(obj.readTimer)
                     stop(obj.readTimer);
+                    pause(0.5); % allow timer to fully stop
                     fprintf('Read timer %s\n',obj.readTimer.running)
                     delete(obj.readTimer);
-                    pause(0.1); % allow timer to fully stop
+                    % clear run start tic used for sampling rate measurement
+                    try obj.runStartTic = []; catch, end
                 end
             catch me
                 warning('wavi:onAppClose','Error stopping timer: %s', me.message);
@@ -388,6 +414,14 @@ classdef wavi < handle
 
                     obj.init_datalog_file();
                     obj.is_recording = true;
+                    % signal external device (Arduino) that recording started
+                    try
+                        if ~isempty(obj.s) && isvalid(obj.s)
+                            % send single byte 'S'
+                            write(obj.s, uint8('S'), 'uint8');
+                        end
+                    catch
+                    end
                     % update button appearance
                     obj.RecordBtn.Text = '■ Stop';
                     obj.RecordBtn.FontColor = [1 1 1];
@@ -396,6 +430,14 @@ classdef wavi < handle
                     % stop recording
                     obj.is_recording = false;
                     obj.close_datafile();
+                    % signal external device (Arduino) that recording ended
+                    try
+                        if ~isempty(obj.s) && isvalid(obj.s)
+                            write(obj.s, uint8('E'), 'uint8');
+                        end
+                    catch
+                    end
+
                     obj.RecordBtn.Text = '● Rec';
                     obj.RecordBtn.FontColor = [1 0 0];
                     obj.RecordBtn.BackgroundColor = [1 1 1]*0.95;
@@ -454,6 +496,8 @@ classdef wavi < handle
                 'TimerFcn', @(src,evt) obj.read_update_tick(src,evt) ...
             );
             start(obj.readTimer);
+            % record start time for observed sampling rate measurement
+            obj.runStartTic = tic;
         end
 
         function read_update_tick(obj, src, ~)
@@ -582,7 +626,22 @@ classdef wavi < handle
         end
 
         function print_sig_vals(obj)
-            fprintf([repmat('%7.3f',1,obj.nch) '\n'],obj.sig(end,:));
+            % total samples read so far
+            totalSamples = double(obj.readCount) * double(obj.ns_read);
+            % compute and print observed sampling rate for standalone apps
+            try
+                if obj.is_standalone && ~isempty(obj.runStartTic)
+                    elapsed = toc(obj.runStartTic);
+                    if elapsed > 0
+                        measuredFs = totalSamples / elapsed;
+                        fprintf('Measured sampling rate: %.1f Hz (Input %.1f Hz)\n', measuredFs, obj.Fs);
+                    end
+                end
+            catch
+                % suppress any errors in rate printing
+            end
+            % print last sample values
+            fprintf(['%8d' repmat('%7.3f',1,obj.nch) '\n'],totalSamples, obj.sig(end,:));
         end
 
         function update_visuals(obj)
