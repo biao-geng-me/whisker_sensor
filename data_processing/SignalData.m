@@ -42,7 +42,7 @@ classdef SignalData
                     try
                         [dat,dt_str,tag] = load_datalog(filepath);
                     catch
-                        error('SignalData:ReadFailed','Failed to read table from %s', filepath);
+                        error('SignalData:ReadFailed','Failed to load data from %s', filepath);
                     end
                     
                     % obj.dtime  = datetime([datestr(dat{:,1}) datestr(dat{:,2},' HH:MM:SS.FFF')]);
