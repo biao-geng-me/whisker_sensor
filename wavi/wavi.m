@@ -21,6 +21,7 @@ classdef wavi < handle
         readCount = 0 % number of timer ticks / read iterations performed
         runStartTic % tic handle used to measure observed sampling rate
         fout % file handle for data logging
+        recordStartTic % tic handle used to measure recording duration
         TagField   % uieditfield for experiment tag
         RecordBtn  % button to start/stop recording
         is_recording = false % whether data is currently being logged
@@ -52,6 +53,7 @@ classdef wavi < handle
         ns_fill % number of samples, window size for filtering outliers
         n_fill % number of read iterations to perform filtering, window can span old samples but only new samples are changed
         nbytes_per_sample
+        auto_stop = 0 % automatic stop time in seconds (0 => disabled). Should be >= 10s to enable.
     end
 
     properties % sensing data
@@ -63,6 +65,10 @@ classdef wavi < handle
         spec_data % spectrogram data (fft history)
         fft_map % latest fft results nfreq*nch
         nfreq
+    end
+
+    properties (Constant)
+        MIN_REC_LEN = 5; % minimum allowed automatic recording length (seconds)
     end
     
     methods
@@ -91,6 +97,7 @@ classdef wavi < handle
                 options.n_update = 1; % visualization update frequency, multiple of n_fill, i.e. update every n_fill*n_update read
                 options.ns_fill = 8;
                 options.n_fill = 2;
+                options.auto_stop = 0;
                 % notes on outlier removal:
                 % it should be done on >=6 new samples, otherwise the data will eventually become constants
                 options.baudrate = 2000000;
@@ -143,6 +150,17 @@ classdef wavi < handle
             obj.scale            = options.scale;
             obj.n_update         = options.n_update;
             obj.ns_fill          = options.ns_fill;
+
+            % auto_stop can be set to automatically stop recording after N seconds
+            obj.auto_stop = options.auto_stop;
+            % enforce minimum record length
+            try
+                if obj.auto_stop > 0 && obj.auto_stop < obj.MIN_REC_LEN
+                    warning('wavi:auto_stop','auto_stop set below MIN_REC_LEN (%d s). Using MIN_REC_LEN.', obj.MIN_REC_LEN);
+                    obj.auto_stop = obj.MIN_REC_LEN;
+                end
+            catch
+            end
 
             obj.n_fill         = min(floor(options.ns_fill/obj.ns_read),options.n_fill);
             obj.n_fill         = max(1, obj.n_fill);
@@ -413,6 +431,12 @@ classdef wavi < handle
                     obj.tag = obj.sanitize_tag(rawtag);
 
                     obj.init_datalog_file();
+                    % record start time for auto-stop
+                    try
+                        obj.recordStartTic = tic;
+                    catch
+                        obj.recordStartTic = [];
+                    end
                     obj.is_recording = true;
                     % signal external device (Arduino) that recording started
                     try
@@ -429,6 +453,8 @@ classdef wavi < handle
                 else
                     % stop recording
                     obj.is_recording = false;
+                    % clear record start tic
+                    try obj.recordStartTic = []; catch, end
                     obj.close_datafile();
                     % signal external device (Arduino) that recording ended
                     try
@@ -526,6 +552,19 @@ classdef wavi < handle
 
                 if mod(obj.readCount, round(obj.Fs / obj.ns_read)) == 0
                     obj.print_sig_vals();
+                end
+
+                % automatic stop: if auto_stop is set (>=10s) and recording
+                try
+                    if obj.is_recording && obj.auto_stop >= 10 && ~isempty(obj.recordStartTic)
+                        if toc(obj.recordStartTic) >= double(obj.auto_stop)
+                            fprintf('Auto-stop: reached %g seconds, stopping recording\n', double(obj.auto_stop));
+                            % call toggle_record with dummy src/evt
+                            obj.toggle_record([],[]);
+                        end
+                    end
+                catch
+                    % ignore errors in auto-stop handling
                 end
 
             catch me
