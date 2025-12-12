@@ -462,7 +462,11 @@ classdef wavi < handle
                     stop(obj.readTimer);
                     pause(0.5); % allow timer to fully stop
                     fprintf('Read timer %s\n',obj.readTimer.running)
-                    delete(obj.readTimer);
+                    try
+                        delete(obj.readTimer);
+                    catch
+                    end
+                    obj.readTimer = [];
                     % clear run start tic used for sampling rate measurement
                     try obj.runStartTic = []; catch, end
                 end
@@ -629,7 +633,12 @@ classdef wavi < handle
         function read_update_tick(obj, src, ~)
             % Timer callback: read serial data and update visuals/printing
             try
-                if(obj.s.NumBytesAvailable < obj.nbytes_per_sample * obj.ns_read)
+                % Guard: if serial port is not connected/valid, bail out quickly.
+                if isempty(obj.s) || ~isvalid(obj.s)
+                    return
+                end
+
+                if obj.s.NumBytesAvailable < obj.nbytes_per_sample * obj.ns_read
                     % not enough data available yet
                     return
                 end
