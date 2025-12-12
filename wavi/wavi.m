@@ -25,7 +25,15 @@ classdef wavi < handle
         TagField   % uieditfield for experiment tag
         RecordBtn  % button to start/stop recording
         is_recording = false % whether data is currently being logged
-        FilePathField % non-editable field to show current recording filepath/status
+        % progress UI (replaces FilePathField)
+        ProgressPanel   % container panel for progress + label
+        ProgressBar     % colored uilabel used as resizeable bar
+        PathLabel       % read-only label that shows the filepath/status
+        CopyBtn         % button to copy path to clipboard
+    end
+
+    properties % UI parameters
+        PROGRESSBAR_H = 25; % height of progress bar in pixels
     end
 
     properties % sampling settings
@@ -111,7 +119,7 @@ classdef wavi < handle
             obj.s = [];
             obj.is_standalone = is_standalone;
             if isempty(ui_parent)
-                obj.UIFigure = uifigure('Name','Wavi','Position',[600 400 350  250]);
+                obj.UIFigure = uifigure('Name','Wavi','Position',[600 400 350  250],'Resize','off');
                 obj.ui_parent = obj.UIFigure;
             else
                 obj.ui_parent = ui_parent;
@@ -208,8 +216,9 @@ classdef wavi < handle
             set(obj.line_fig.fh,'Visible','off');
 
             % create ui: 4 rows (Serial, buttons, record/tag, filepath status)
-            obj.gl = uigridlayout(obj.ui_parent,[4,1],'RowHeight',{'7x','1.5x','1.5x','1x'},'Padding',[10 10 10 10]);
-                % Serial panel
+            obj.gl = uigridlayout(obj.ui_parent,[4,1],'RowHeight',{'6x','1.5x','1.5x','1.5x'},'Padding',[10 10 10 10]);
+
+            % Serial panel
             obj.SerialPanel = uipanel(obj.gl,'Title','Sensor array');
             obj.SerialPanel.Layout.Row = 1;
             obj.SerialPanel.Layout.Column = 1;
@@ -261,27 +270,48 @@ classdef wavi < handle
             obj.RecordBtn.FontColor = [1 0 0];
             obj.RecordBtn.ButtonPushedFcn = @(src,evt) obj.toggle_record(src,evt);
 
-            % Filepath/status field (non-editable so user can select & copy)
-            obj.FilePathField = uieditfield(obj.gl,'text');
-            obj.FilePathField.Layout.Row = 4;
-            obj.FilePathField.Layout.Column = 1;
-            % make non-editable but selectable; style to appear borderless
+            % Progress/status panel (replaces FilePathField)
             try
-                obj.FilePathField.Editable = 'off';
+                obj.ProgressPanel = uipanel(obj.gl);
+                obj.ProgressPanel.Layout.Row = 4;
+                obj.ProgressPanel.Layout.Column = 1;
+
+                % ensure we can position internal elements in pixels and react to layout changes
+                try obj.ProgressPanel.Units = 'pixels'; catch, end
+
+                % Progress bar: a colored label whose width represents remaining time
+                obj.ProgressBar = uilabel(obj.ProgressPanel);
+                try obj.ProgressBar.Units = 'pixels'; catch, end
+                obj.ProgressBar.Position = [2,1, 0, obj.PROGRESSBAR_H]; % width will be set by resize handler
+                obj.ProgressBar.Text = '';
+
+                % Path label (read-only) shows current filepath or status
+                obj.PathLabel = uilabel(obj.ProgressPanel);
+                obj.PathLabel.HorizontalAlignment = 'left';
+                % obj.PathLabel.FontAngle = 'italic';
+                try obj.PathLabel.Units = 'pixels'; catch, end
+                obj.PathLabel.Position = [2, 2, 320, obj.PROGRESSBAR_H]; % width adjusted by resize handler
+                obj.PathLabel.Text = obj.outpath;
+
+                % Copy button to copy the path to clipboard
+                obj.CopyBtn = uibutton(obj.ProgressPanel,'push');
+                obj.CopyBtn.Text = 'Copy';
+                try obj.CopyBtn.Units = 'pixels'; catch, end
+                obj.CopyBtn.Position = [290,2,38,24]; % final pos set by resize handler
+                obj.CopyBtn.ButtonPushedFcn = @(~,~) obj.copy_path_callback();
+
             catch
-                % older MATLAB versions use Enable = 'inactive'
-                try obj.FilePathField.Enable = 'inactive'; catch, end
+                % if uipanel or uibutton not available, fallback to simple editfield
+                try
+                    obj.PathLabel = uilabel(obj.gl);
+                    obj.PathLabel.Layout.Row = 4;
+                    obj.PathLabel.Layout.Column = 1;
+                    obj.PathLabel.Text = obj.outpath;
+                catch
+                end
             end
-            % attempt to remove border and match parent background for borderless look
-            try
-                obj.FilePathField.BackgroundColor = obj.UIFigure.Color;
-            catch
-            end
 
-            obj.FilePathField.Value = 'Not recording';
-
-            drawnow
-
+            drawnow;   % let initial layout start
         end
 
         function outpath =set_outpath(obj)
@@ -468,8 +498,17 @@ classdef wavi < handle
                     obj.RecordBtn.FontColor = [1 0 0];
                     obj.RecordBtn.BackgroundColor = [1 1 1]*0.95;
                     try
-                        if isprop(obj,'FilePathField') && ~isempty(obj.FilePathField)
-                            obj.FilePathField.Value = 'Not recording';
+                        if isprop(obj,'PathLabel') && ~isempty(obj.PathLabel)
+                            obj.PathLabel.Text = obj.outpath;
+                        end
+                        if isprop(obj,'ProgressBar') && ~isempty(obj.ProgressBar) && isprop(obj,'ProgressPanel') && ~isempty(obj.ProgressPanel)
+                            % reset progress bar to full width and neutral color
+                            try
+                                pw = obj.ProgressPanel.Position(3);
+                                obj.ProgressBar.Position = [2,1,pw-4, obj.PROGRESSBAR_H];
+                                obj.ProgressBar.BackgroundColor = obj.UIFigure.Color;
+                            catch
+                            end
                         end
                     catch
                     end
@@ -681,6 +720,27 @@ classdef wavi < handle
             end
             % print last sample values
             fprintf(['%8d' repmat('%7.3f',1,obj.nch) '\n'],totalSamples, obj.sig(end,:));
+
+            % update progress bar (if present) to reflect auto_stop remaining time
+            try
+                if obj.is_recording && obj.auto_stop >= 10 && ~isempty(obj.recordStartTic) && isprop(obj,'ProgressBar') && isprop(obj,'ProgressPanel')
+                    elapsed = toc(obj.recordStartTic);
+                    frac = max(0, 1 - double(elapsed)/double(obj.auto_stop));
+                    pw = obj.ProgressPanel.Position(3);
+                    newW = round((pw-4) * frac);
+                    obj.ProgressBar.Position = [2,1,newW,obj.PROGRESSBAR_H];
+                    % % color: green -> yellow -> red
+                    % if frac > 0.5
+                    %     obj.ProgressBar.BackgroundColor = [0.6 0.9 0.6];
+                    % elseif frac > 0.2
+                    %     obj.ProgressBar.BackgroundColor = [1 0.9 0.4];
+                    % else
+                    %     obj.ProgressBar.BackgroundColor = [1 0.5 0.5];
+                    % end
+                    obj.ProgressBar.BackgroundColor = [1 0.5 0.5];
+                end
+            catch
+            end
         end
 
         function update_visuals(obj)
@@ -712,10 +772,18 @@ classdef wavi < handle
                 error('wavi:init_datalog_file','Failed to open file for writing: %s', fullpath);
             else
                 fprintf('Logging data to file: %s\n', fullpath);
-                % update status/filepath field if present
+                % update status/filepath label if present
                 try
-                    if isprop(obj,'FilePathField') && ~isempty(obj.FilePathField)
-                        obj.FilePathField.Value = fullpath;
+                    if isprop(obj,'PathLabel') && ~isempty(obj.PathLabel)
+                        obj.PathLabel.Text = fullpath;
+                    end
+                    if isprop(obj,'ProgressBar') && ~isempty(obj.ProgressBar) && isprop(obj,'ProgressPanel') && ~isempty(obj.ProgressPanel)
+                        try
+                            pw = obj.ProgressPanel.Position(3);
+                            obj.ProgressBar.Position = [2,1,pw, obj.PROGRESSBAR_H];
+                            obj.ProgressBar.BackgroundColor = [1.0 0.5 0.5];
+                        catch
+                        end
                     end
                 catch
                 end
@@ -792,7 +860,19 @@ classdef wavi < handle
                 s = '';
             end
         end
-    end
 
+        function copy_path_callback(obj)
+            % Copy displayed path to clipboard (if any)
+            try
+                if isprop(obj,'PathLabel') && ~isempty(obj.PathLabel)
+                    clipboard('copy', obj.PathLabel.Text);
+                    fprintf('Copied path to clipboard: %s\n', obj.PathLabel.Text);
+                else
+                    fprintf('Nothing to copy\n');
+                end
+            catch
+            end
+        end
+    end
 end
 
