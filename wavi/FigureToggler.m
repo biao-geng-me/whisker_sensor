@@ -9,6 +9,8 @@ classdef FigureToggler < handle
     properties (Access = private)
         FigureHandle % Handle to the figure being controlled
         ButtonHandle % Handle to the UI button itself
+        OnColor % color when toggled on
+        OffColor % color when toggled off (matches UIFigure background)
     end
 
     methods
@@ -26,16 +28,35 @@ classdef FigureToggler < handle
             % Store the figure handle
             obj.FigureHandle = fig;
 
-            % Define common button properties
-            button_props = {'FontName', 'Arial', 'FontSize', 9, 'BackgroundColor', [0.5 0.8 0.5], 'FontWeight', 'bold'};
+            % Define common button properties (avoid setting BackgroundColor here; we'll set it based on state)
+            button_props = {'FontName', 'Arial', 'FontSize', 9, 'FontWeight', 'bold'};
 
             % Create the button in the specified container
             obj.ButtonHandle = uibutton(container,'state', ...
                 button_props{:}, ...
                 'Text', buttonText, ...
-                'Value', false, ...                    % Set initial state to OFF (figure starts hidden)
+                'Value', false, ...                    % will set proper initial state below
                 'Position', position, ...
-                'ValueChangedFcn', @obj.toggleVisibility); % CHANGED: Use ValueChangedFcn for state buttons
+                'ValueChangedFcn', @obj.toggleVisibility);
+
+            % determine colors: on=green, off=container/figure background
+            try
+                obj.OffColor = [1 1 1]*0.75;
+                obj.OnColor = [0.4 0.8 0.4];
+            catch
+            end
+
+            % initialize button state to reflect the target figure visibility
+            try
+                isVisible = isprop(fig,'Visible') && strcmpi(fig.Visible,'on');
+                obj.ButtonHandle.Value = logical(isVisible);
+                if obj.ButtonHandle.Value
+                    obj.ButtonHandle.BackgroundColor = obj.OnColor;
+                else
+                    obj.ButtonHandle.BackgroundColor = obj.OffColor;
+                end
+            catch
+            end
         end
 
         function toggleVisibility(obj, ~, ~)
@@ -54,9 +75,11 @@ classdef FigureToggler < handle
                     % disp(['Figure "', hFig.Name, '" is now VISIBLE (Button State: ON).']);
                     % Bring the plot window to the front
                     % figure(hFig);
+                    try obj.ButtonHandle.BackgroundColor = obj.OnColor; catch, end
                 else
                     hFig.Visible = 'off';
                     % disp(['Figure "', hFig.Name, '" is now HIDDEN (Button State: OFF).']);
+                    try obj.ButtonHandle.BackgroundColor = obj.OffColor; catch, end
                 end
             else
                 warning('FigureToggler:ClosedFigure', 'The controlled figure was closed manually. Button will no longer function.');
