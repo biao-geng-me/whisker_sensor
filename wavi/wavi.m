@@ -24,13 +24,15 @@ classdef wavi < handle
         recordStartTic % tic handle used to measure recording duration
         TagField   % uieditfield for experiment tag
         RecordBtn  % button to start/stop recording
-    AutoStopField % numeric field to set automatic recording length (seconds)
+        AutoStopField % numeric field to set automatic recording length (seconds)
         is_recording = false % whether data is currently being logged
+        is_paused = false % whether figure updates are paused (data read continues)
         % progress UI (replaces FilePathField)
         ProgressPanel   % container panel for progress + label
         ProgressBar     % colored uilabel used as resizeable bar
         PathLabel       % read-only label that shows the filepath/status
         CopyBtn         % button to copy path to clipboard
+        PauseBtn        % button to pause/resume figure updates
     end
 
     properties % UI parameters
@@ -120,7 +122,7 @@ classdef wavi < handle
             obj.s = [];
             obj.is_standalone = is_standalone;
             if isempty(ui_parent)
-                obj.UIFigure = uifigure('Name','Wavi','Position',[600 400 350  250],'Resize','off');
+                obj.UIFigure = uifigure('Name','Wavi','Position',[600 400 350  250],'Resize','off','WindowStyle','modal');
                 obj.ui_parent = obj.UIFigure;
             else
                 obj.ui_parent = ui_parent;
@@ -233,17 +235,34 @@ classdef wavi < handle
                 % SerialPortApp may not implement SerialDisconnected; ignore if absent
             end
             
-            obj.button_gl = uigridlayout(obj.gl,[5,1],'ColumnWidth',{'1x','1x','1x','1x',40},'RowHeight',{'1x'},'Padding',[0 0 0 0]);
+            % expand button grid to include Pause and Reset in fixed-width columns
+            obj.button_gl = uigridlayout(obj.gl,[6,1],'ColumnWidth',{'1x','1x','1x','1x',40,40},'RowHeight',{'1x'},'Padding',[0 0 0 0]);
             obj.button_gl.Layout.Row = 2;
             obj.button_gl.Layout.Column = 1;
             FigureToggler(obj.fft_fig.fh, obj.button_gl, 'FFT', [0 0 20 20]);
             FigureToggler(obj.line_fig.fh, obj.button_gl, 'Line', [0 0 20 40]);
             FigureToggler(obj.spec_fig.fh, obj.button_gl, 'Spec', [0 0 20 40]);
+
+            % Pause/Play button in the button grid (fixed size column)
+            try
+                % use a push button that toggles pause state on each press (more reliable across MATLAB versions)
+                obj.PauseBtn = uibutton(obj.button_gl,'push');
+                obj.PauseBtn.Layout.Row = 1;
+                obj.PauseBtn.Layout.Column = 5;
+                obj.PauseBtn.Text = '⏸';
+                obj.PauseBtn.FontSize = 18;
+                obj.PauseBtn.FontColor = [0 0 0];
+                obj.PauseBtn.Enable = 'off'; % enabled when serial connected and visuals running
+                obj.PauseBtn.Tooltip = 'Pause/Resume figure updates';
+                obj.PauseBtn.ButtonPushedFcn = @(src,evt) obj.onPauseButtonPressed(src,evt);
+            catch
+            end
+
             % Reset data buffers button at the end of the toggle row
             try
                 resetBtn = uibutton(obj.button_gl,'push');
                 resetBtn.Layout.Row = 1;
-                resetBtn.Layout.Column = 5;
+                resetBtn.Layout.Column = 6;
                 resetBtn.Text = 'Reset';
                 resetBtn.Tooltip = 'Reset data buffers (clear signal/spectrogram buffers)';
                 resetBtn.ButtonPushedFcn = @(src,evt) obj.reset();
@@ -393,6 +412,16 @@ classdef wavi < handle
 
             try
                 obj.run();
+                % enable pause button once serial is connected and run() started
+                try
+                    if isprop(obj,'PauseBtn') && ~isempty(obj.PauseBtn)
+                        obj.PauseBtn.Enable = 'on';
+                        obj.PauseBtn.Value = false;
+                        obj.PauseBtn.Text = '⏸';
+                        obj.is_paused = false;
+                    end
+                catch
+                end
             catch me
                 disp(me);
             end
@@ -443,6 +472,17 @@ classdef wavi < handle
 
             obj.is_recording = false;
             obj.close_datafile();
+
+            % disable pause button when serial disconnected/cleanup
+            try
+                if isprop(obj,'PauseBtn') && ~isempty(obj.PauseBtn)
+                    obj.PauseBtn.Enable = 'off';
+                    obj.PauseBtn.Value = false;
+                    obj.PauseBtn.Text = '⏸';
+                    obj.is_paused = false;
+                end
+            catch
+            end
 
             % Close serial port and data file (if open)
             try
@@ -602,7 +642,10 @@ classdef wavi < handle
                 end
 
                 if mod(obj.readCount, obj.n_update*obj.n_fill) == 0
-                    obj.update_visuals();
+                    % update visuals only when not paused; data read continues
+                    if ~obj.is_paused
+                        obj.update_visuals();
+                    end
                     nnew = obj.ns_read*obj.n_fill*obj.n_update; % total new samples since last write
                     % write to file only when recording is active and file open
                     if obj.is_recording && ~isempty(obj.fout) && obj.fout ~= -1
@@ -894,6 +937,27 @@ classdef wavi < handle
             catch
             end
         end
+
+        function onPauseButtonPressed(obj, src, ~)
+            % Toggle pause/play of figure updates. Data read continues.
+            try
+                if isempty(src)
+                    return
+                end
+                % flip pause state
+                obj.is_paused = ~obj.is_paused;
+                if obj.is_paused
+                    % when paused, show play symbol on the button
+                    try src.Text = '▶'; catch, end
+                else
+                    % when running, show pause symbol
+                    try src.Text = '⏸'; catch, end
+                    % immediately refresh visuals once when resuming
+                    try obj.update_visuals(); catch, end
+                end
+            catch
+            end
+        end
         function onAutoStopChanged(obj, src, ~)
             % Handle changes to the AutoStopField numeric input
             try
@@ -921,7 +985,7 @@ classdef wavi < handle
                 end
                 % update tooltip to reflect current value
                 try
-                    src.Tooltip = sprintf('Automatic recording length in seconds (0 = disabled). Minimum %d s if set. Current: %g s', obj.MIN_REC_LEN, obj.auto_stop);
+                    src.Tooltip = sprintf('Recording length in seconds.\n0 = disabled. Minimum %d s if set.\nCurrent: %g s', obj.MIN_REC_LEN, obj.auto_stop);
                 catch
                 end
             catch
