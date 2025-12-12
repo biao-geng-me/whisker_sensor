@@ -24,6 +24,7 @@ classdef wavi < handle
         recordStartTic % tic handle used to measure recording duration
         TagField   % uieditfield for experiment tag
         RecordBtn  % button to start/stop recording
+    AutoStopField % numeric field to set automatic recording length (seconds)
         is_recording = false % whether data is currently being logged
         % progress UI (replaces FilePathField)
         ProgressPanel   % container panel for progress + label
@@ -249,8 +250,9 @@ classdef wavi < handle
             catch
             end
 
-            % Tag field and Record button
-            obj.record_gl = uigridlayout(obj.gl,[1, 3],'ColumnWidth',{25,'4x',50},'RowHeight',{'1x'},'Padding',[0 0 0 0]);
+            % Tag field, Auto-stop numeric field, and Record button
+            % layout columns: [label, tag edit, auto-stop numeric, record button]
+            obj.record_gl = uigridlayout(obj.gl,[1, 4],'ColumnWidth',{25,'3x',80,50},'RowHeight',{'1x'},'Padding',[0 0 0 0]);
             obj.record_gl.Layout.Row = 3;
             obj.record_gl.Layout.Column = 1;
             tagLabel = uilabel(obj.record_gl);
@@ -263,9 +265,28 @@ classdef wavi < handle
             obj.TagField.Layout.Column = 2;
             obj.TagField.Value = obj.tag;
 
+            % Numeric field to input automatic recording length in seconds (0 disables)
+            try
+                obj.AutoStopField = uieditfield(obj.record_gl,'numeric');
+                obj.AutoStopField.Layout.Row = 1;
+                obj.AutoStopField.Layout.Column = 3;
+                % show helpful placeholder and tooltip; Value mirrors current obj.auto_stop
+                try obj.AutoStopField.Placeholder = 'auto_stop (s)'; catch, end
+                obj.AutoStopField.Tooltip = sprintf('Automatic recording length in seconds (0 = disabled). Minimum %d s if set.', obj.MIN_REC_LEN);
+                obj.AutoStopField.Value = double(obj.auto_stop);
+                obj.AutoStopField.ValueChangedFcn = @(src,evt) obj.onAutoStopChanged(src,evt);
+            catch
+                % older Matlab versions may not support numeric edit field; fall back to text
+                obj.AutoStopField = uieditfield(obj.record_gl,'text');
+                obj.AutoStopField.Layout.Row = 1;
+                obj.AutoStopField.Layout.Column = 3;
+                obj.AutoStopField.Value = num2str(double(obj.auto_stop));
+                obj.AutoStopField.Tooltip = sprintf('Automatic recording length in seconds (0 = disabled). Minimum %d s if set.', obj.MIN_REC_LEN);
+            end
+
             obj.RecordBtn = uibutton(obj.record_gl,'push');
             obj.RecordBtn.Layout.Row = 1;
-            obj.RecordBtn.Layout.Column = 3;
+            obj.RecordBtn.Layout.Column = 4;
             obj.RecordBtn.Text = '● Rec';
             obj.RecordBtn.FontColor = [1 0 0];
             obj.RecordBtn.ButtonPushedFcn = @(src,evt) obj.toggle_record(src,evt);
@@ -869,6 +890,39 @@ classdef wavi < handle
                     fprintf('Copied path to clipboard: %s\n', obj.PathLabel.Text);
                 else
                     fprintf('Nothing to copy\n');
+                end
+            catch
+            end
+        end
+        function onAutoStopChanged(obj, src, ~)
+            % Handle changes to the AutoStopField numeric input
+            try
+                if isempty(src)
+                    return
+                end
+                % support both numeric and text fallback fields
+                val = src.Value;
+                if ischar(val) || isstring(val)
+                    v = str2double(val);
+                else
+                    v = double(val);
+                end
+                if isnan(v) || v <= 0
+                    % treat non-positive as disabled (0)
+                    obj.auto_stop = 0;
+                    try src.Value = 0; catch, end
+                else
+                    if v > 0 && v < obj.MIN_REC_LEN
+                        warning('wavi:auto_stop','auto_stop set below MIN_REC_LEN (%d s). Using MIN_REC_LEN.', obj.MIN_REC_LEN);
+                        v = obj.MIN_REC_LEN;
+                    end
+                    obj.auto_stop = v;
+                    try src.Value = double(v); catch, end
+                end
+                % update tooltip to reflect current value
+                try
+                    src.Tooltip = sprintf('Automatic recording length in seconds (0 = disabled). Minimum %d s if set. Current: %g s', obj.MIN_REC_LEN, obj.auto_stop);
+                catch
                 end
             catch
             end
