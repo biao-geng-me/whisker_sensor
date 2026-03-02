@@ -92,8 +92,11 @@ classdef Jakiro < handle
             exp_panel_parent.Layout.Column = 3;
             exp_panel_parent.Layout.Row = 2;
             app.ExpPanel = ExpControlPanel(exp_panel_parent);
-            % listen for start events
-            addlistener(app.ExpPanel,'StartExperiment',@(src,evt) app.onStartExperiment(src,evt));
+            % listen for path-mode events
+            addlistener(app.ExpPanel,'PathPath',@(src,evt) app.onPathPath(src,evt));
+            addlistener(app.ExpPanel,'PathHuman',@(src,evt) app.onPathHuman(src,evt));
+            addlistener(app.ExpPanel,'PathAgentPre',@(src,evt) app.onPathAgentPre(src,evt));
+            addlistener(app.ExpPanel,'PathAgentLive',@(src,evt) app.onPathAgentLive(src,evt));
         end
     end
 
@@ -176,8 +179,8 @@ classdef Jakiro < handle
             end
         end
 
-        function onStartExperiment(app, ~, ~)
-            % coordinate the two carriages using parameters from ExpPanel
+        function onPathPath(app, ~, ~)
+            % coordinate the two carriages using parameters from ExpPanel (formerly StartExperiment)
             try
                 [v1,v2,delay_s,run_tag] = app.ExpPanel.getParameters();
             catch
@@ -290,6 +293,19 @@ classdef Jakiro < handle
             app.CC2.hArrow.Visible = 'off';
             app.WA.is_recording = false;
             app.WA.close_datafile();
+        end
+
+        % additional mode handlers (placeholders)
+        function onPathHuman(app, ~, ~)
+            disp('PathHuman triggered (placeholder)');
+        end
+
+        function onPathAgentPre(app, ~, ~)
+            disp('PathAgentPre triggered (placeholder)');
+        end
+
+        function onPathAgentLive(app, ~, ~)
+            disp('PathAgentLive triggered (placeholder)');
         end
 
     end
