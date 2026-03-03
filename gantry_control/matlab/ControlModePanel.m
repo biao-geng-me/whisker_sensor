@@ -118,8 +118,9 @@ classdef ControlModePanel < handle
             app.SelectedFiles = {};
 
             % default folder can be set externally before constructing or
-            % defaults to a subfolder called 'Paths' if present
-            app.DefaultPathFolder = fullfile(pwd,'Paths');
+            % defaults to a subfolder called 'Paths' located next to this file
+            codeFolder = fileparts(mfilename('fullpath'));
+            app.DefaultPathFolder = fullfile(codeFolder,'Paths');
             % attempt to load files from default folder
             try
                 app.loadFilesFromDefaultFolder();
