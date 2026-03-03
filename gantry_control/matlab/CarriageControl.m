@@ -69,6 +69,8 @@ classdef CarriageControl < handle
         % gantry origin in the tank coordinate system
         origin = [0,0]
         origin_mm = [0,0] 
+        
+        cmd_npoll = 0            % command poll counter (used by both path and interactive ticks)
 
         % path tracking state
         pathTimer = []           % timer used for path tracking ticks
@@ -80,7 +82,7 @@ classdef CarriageControl < handle
         path_arc_len = 0         % current arc length travelled (mm)
         path_d_trav = 0          % cumulative travelled distance (mm)
         path_xy_old = [0 0]      % previous position steps
-        path_npoll = 0           % poll counter
+        % path_npoll = 0           % poll counter
         path_CMD_INTERVAL =  5   % ms (default)
         path_stopRequested = 0   % flag to request stop from outside
         path_dx_max = 3600       % max x movement range (mm)
@@ -207,6 +209,7 @@ classdef CarriageControl < handle
                 uialert(obj.UIFigure,'Gantry controller not connected.','Error');
                 return
             end
+            obj.cmd_npoll = 0; % reset counter for a fresh session
             flush(obj.s);
             fprintf('Starting timer ..\n');
             start(obj.iTimer);
@@ -235,8 +238,14 @@ classdef CarriageControl < handle
             % obj - CarriageControl class object
             % src - timer object
             % event i timer event
+            
+            % increment command poll counter
+            obj.cmd_npoll = obj.cmd_npoll + 1;
             try
                 tStart = tic;
+                if obj.cmd_npoll == 1 % first call, flush serial buffer (microcontroller sends data non stop)
+                    flush(obj.s);
+                end
                 obj.update_status_from_controller();
 
                 % get user inputs    
@@ -548,7 +557,7 @@ classdef CarriageControl < handle
             
             % read data from serial port
             try
-                if(obj.path_npoll==0) % first call, flush serial buffer (microcontroller sends data non stop)
+                if(obj.cmd_npoll==0) % first call, flush serial buffer (microcontroller sends data non stop)
                     flush(obj.s);
                 end
                 obj.update_status_from_controller();
@@ -561,7 +570,7 @@ classdef CarriageControl < handle
             end
 
             % update internal counters
-            obj.path_npoll = obj.path_npoll + 1;
+            obj.cmd_npoll = obj.cmd_npoll + 1;
 
             % compute traveled distance in steps and mm
             prev = obj.path_xy_old;
@@ -573,7 +582,7 @@ classdef CarriageControl < handle
             
 
             % convert to mm
-            if obj.path_npoll == 1
+            if obj.cmd_npoll == 1
                 look_ahead_dist = obj.vel_max * obj.path_CMD_INTERVAL/1000 * obj.step2mm*2.0;
             else
                 % the previous distance travelled is a good estimate of lookahead distance
@@ -620,7 +629,7 @@ classdef CarriageControl < handle
             xvec = target_x - curr(1);
             yvec = target_y - curr(2);
             aoa = atan2(double(yvec), double(xvec));
-            vel_amp = obj.vel_max*obj.path_npoll/20; % ramp up speed over first calls
+            vel_amp = obj.vel_max*obj.cmd_npoll/20; % ramp up speed over first calls
 
             vel_amp = min([vel_amp, curve_speed_limit, obj.vel_max]);
             vx_amp = abs(round(vel_amp*cos(aoa)));
@@ -688,7 +697,7 @@ classdef CarriageControl < handle
             end
 
             % update input display
-            set(obj.hInputText, 'Text', sprintf('Path tracking %6d call time %5.2f ms',obj.path_npoll,toc(tStart)*1000));
+            set(obj.hInputText, 'Text', sprintf('Cmd tick %6d call time %5.2f ms',obj.cmd_npoll,toc(tStart)*1000));
         end
 
         function init_pathtracking_variables(obj,xp,yp,rp,Ltot,start_s,thetap)
@@ -705,7 +714,7 @@ classdef CarriageControl < handle
             % initialize arc-length counters
             obj.path_arc_len = 0;
             obj.path_xy_old = obj.current_pos(1:2)+obj.origin;
-            obj.path_npoll = 0;
+            obj.cmd_npoll = 0;
             obj.path_stopRequested = 0;
 
             % create or reconfigure the path timer (but do not start it)

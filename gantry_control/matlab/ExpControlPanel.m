@@ -12,6 +12,7 @@ classdef ExpControlPanel < handle
         UIFigure
         Vel1Field
         Vel2Field
+        EpisodeTimeField
         DelayField
         TagField
         % buttons for various path modes
@@ -26,7 +27,7 @@ classdef ExpControlPanel < handle
                 parent = []
             end
             if isempty(parent)
-                obj.UIFigure = uifigure('Name','Experiment Control','Position',[200 200 360 220]);
+                obj.UIFigure = uifigure('Name','Experiment Control','Position',[200 200 360 260]);
                 obj.Parent = obj.UIFigure;
                 parent = obj.UIFigure;
             else
@@ -34,50 +35,59 @@ classdef ExpControlPanel < handle
             end
 
             % Use a grid layout to arrange controls
-            obj.Grid = uigridlayout(parent,[6,2]);
+            obj.Grid = uigridlayout(parent,[6,3]);
             obj.Grid.RowHeight = {'1x','1x','1x','1x','1x','1x'};
-            obj.Grid.ColumnWidth = {'2x','1x'};
+            obj.Grid.ColumnWidth = {'1x','1x','1x'};
 
             % Velocity fields (row 1)
-            lbl1 = uilabel(obj.Grid,'Text','Velocity Carriage 1 (m/s):');
+            lbl1 = uilabel(obj.Grid,'Text','Carriage Velocities (m/s):');
             lbl1.Layout.Row = 1; lbl1.Layout.Column = 1;
             obj.Vel1Field = uieditfield(obj.Grid,'numeric','Value',0.3);
             obj.Vel1Field.Layout.Row = 1; obj.Vel1Field.Layout.Column = 2;
-
-            % Velocity fields (row 2)
-            lbl2 = uilabel(obj.Grid,'Text','Velocity Carriage 2 (m/s):');
-            lbl2.Layout.Row = 2; lbl2.Layout.Column = 1;
+            
+            % lbl2 = uilabel(obj.Grid,'Text','Velocity Carriage 2 (m/s):');
+            % lbl2.Layout.Row = 2; lbl2.Layout.Column = 1;
             obj.Vel2Field = uieditfield(obj.Grid,'numeric','Value',0.3);
-            obj.Vel2Field.Layout.Row = 2; obj.Vel2Field.Layout.Column = 2;
+            obj.Vel2Field.Layout.Row = 1; obj.Vel2Field.Layout.Column = 3;
 
-            % Delay (row 3)
-            lbl3 = uilabel(obj.Grid,'Text','Delay start (s):');
-            lbl3.Layout.Row = 3; lbl3.Layout.Column = 1;
+            % Row 2: Episode time
+            lbl3 = uilabel(obj.Grid,'Text','Episode Time (s):');
+            lbl3.Layout.Row = 2; lbl3.Layout.Column = 1;
+            % Col 2 (row 2) left empty for spacing
+            obj.EpisodeTimeField = uieditfield(obj.Grid,'numeric','Value',60.0);
+            obj.EpisodeTimeField.Layout.Row = 2; obj.EpisodeTimeField.Layout.Column = 3;
+
+            % Row 3: Delay start
+            lbl4 = uilabel(obj.Grid,'Text','Delay start (s):');
+            lbl4.Layout.Row = 3; lbl4.Layout.Column = 1;
+            % Col 2 (row 3) left empty for spacing
             obj.DelayField = uieditfield(obj.Grid,'numeric','Value',1.0);
-            obj.DelayField.Layout.Row = 3; obj.DelayField.Layout.Column = 2;
+            obj.DelayField.Layout.Row = 3; obj.DelayField.Layout.Column = 3;
 
-            % Tag (row 4)
-            lbl4 = uilabel(obj.Grid,'Text','Run tag:');
-            lbl4.Layout.Row = 4; lbl4.Layout.Column = 1;
+            % Row 4: Run tag
+            lbl5 = uilabel(obj.Grid,'Text','Run tag:');
+            lbl5.Layout.Row = 4; lbl5.Layout.Column = 1;
+            % Col 2 (row 4) left empty for spacing
             obj.TagField = uieditfield(obj.Grid,'text','Value','test');
-            obj.TagField.Layout.Row = 4; obj.TagField.Layout.Column = 2;
+            obj.TagField.Layout.Row = 4; obj.TagField.Layout.Column = [2 3];
 
-            % buttons for path modes (rows 5 & 6)
+            % Row 5: buttons for path modes
             obj.PathPathBtn = uibutton(obj.Grid,'push','Text','Path Path',...
                 'ButtonPushedFcn',@(btn,evt) obj.onPathPathPressed());
-            obj.PathPathBtn.Layout.Row = 5; obj.PathPathBtn.Layout.Column = 1;
+            obj.PathPathBtn.Layout.Row = 5; obj.PathPathBtn.Layout.Column = 2;
 
             obj.PathHumanBtn = uibutton(obj.Grid,'push','Text','Path Human',...
                 'ButtonPushedFcn',@(btn,evt) obj.onPathHumanPressed());
-            obj.PathHumanBtn.Layout.Row = 5; obj.PathHumanBtn.Layout.Column = 2;
+            obj.PathHumanBtn.Layout.Row = 5; obj.PathHumanBtn.Layout.Column = 3;
 
+            % Additional buttons - may need to adjust layout or add more rows if needed
             obj.PathAgentPreBtn = uibutton(obj.Grid,'push','Text','Path Agent Pre',...
                 'ButtonPushedFcn',@(btn,evt) obj.onPathAgentPrePressed());
-            obj.PathAgentPreBtn.Layout.Row = 6; obj.PathAgentPreBtn.Layout.Column = 1;
+            obj.PathAgentPreBtn.Layout.Row = 6; obj.PathAgentPreBtn.Layout.Column = 2;
 
             obj.PathAgentLiveBtn = uibutton(obj.Grid,'push','Text','Path Agent Live',...
                 'ButtonPushedFcn',@(btn,evt) obj.onPathAgentLivePressed());
-            obj.PathAgentLiveBtn.Layout.Row = 6; obj.PathAgentLiveBtn.Layout.Column = 2;
+            obj.PathAgentLiveBtn.Layout.Row = 6; obj.PathAgentLiveBtn.Layout.Column = 3;
         end
 
         function onPathPathPressed(obj)
@@ -109,12 +119,13 @@ classdef ExpControlPanel < handle
             end
         end
 
-        function [v1,v2,delay_s,tag] = getParameters(obj)
+        function [v1,v2,delay_s,tag,episode_time_s] = getParameters(obj)
             % Return configured parameters
             v1 = obj.Vel1Field.Value;
             v2 = obj.Vel2Field.Value;
             delay_s = obj.DelayField.Value;
             tag = obj.getTag();
+            episode_time_s = obj.EpisodeTimeField.Value;
         end
 
         function tag = getTag(obj)
