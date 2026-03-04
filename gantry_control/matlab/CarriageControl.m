@@ -22,6 +22,7 @@ classdef CarriageControl < handle
         hVelText % for velocity information
         hStatusText % for controller feedback info
         hInputText
+        editBtn % edit attributes button
     end
 
     properties % motor and control parameters
@@ -133,13 +134,13 @@ classdef CarriageControl < handle
                 obj.UIFigure = ancestor(parent,'matlab.ui.Figure','toplevel');
             end
 
-            obj.gl = uigridlayout(obj.Parent,[3,2]);
+            obj.gl = uigridlayout(obj.Parent,[3,3]);
             obj.gl.RowHeight = {'1x','2x','1x'};
-            obj.gl.ColumnWidth = {'6x','1x'};
+            obj.gl.ColumnWidth = {'4x','1x','1x'};
 
             hInputText = uilabel(obj.gl);
             hInputText.Layout.Row = 1;
-            hInputText.Layout.Column = [1 2];
+            hInputText.Layout.Column = [1 3];
             hInputText.Text = sprintf('Start polling to update input');
             hInputText.FontSize = 12;
             hInputText.HorizontalAlignment = 'left';
@@ -147,7 +148,7 @@ classdef CarriageControl < handle
 
             hVelText = uilabel(obj.gl);
             hVelText.Layout.Row = 2;
-            hVelText.Layout.Column = [1 2];
+            hVelText.Layout.Column = [1 3];
             hVelText.Text = sprintf('Start polling to update velocity');
             hVelText.FontSize = 12;
             hVelText.HorizontalAlignment = 'left';
@@ -161,10 +162,19 @@ classdef CarriageControl < handle
             hStatusText.HorizontalAlignment = 'left';
             obj.hStatusText = hStatusText;
 
+            % Edit button for attributes
+            editBtn = uibutton(obj.gl, 'push');
+            editBtn.Layout.Row = 3;
+            editBtn.Layout.Column = 2;
+            editBtn.Text = 'Edit';
+            editBtn.Tooltip = 'Edit class attributes';
+            editBtn.ButtonPushedFcn = @(src,evt) obj.openAttributesForm();
+            obj.editBtn = editBtn;
+
             % Inspect button to open Property Inspector for this object
             inspectBtn = uibutton(obj.gl, 'push');
             inspectBtn.Layout.Row = 3;
-            inspectBtn.Layout.Column = 2;
+            inspectBtn.Layout.Column = 3;
             inspectBtn.Text = 'Inspect';
             inspectBtn.Tooltip = 'Open Property Inspector for this CarriageControl object';
             inspectBtn.ButtonPushedFcn = @(src,evt) inspect(obj);
@@ -242,7 +252,6 @@ classdef CarriageControl < handle
             % increment command poll counter
             obj.cmd_npoll = obj.cmd_npoll + 1;
             try
-                tStart = tic;
                 if obj.cmd_npoll == 1 % first call, flush serial buffer (microcontroller sends data non stop)
                     flush(obj.s);
                 end
@@ -1062,6 +1071,142 @@ classdef CarriageControl < handle
                          obj.real_loc, frame_time_ms));
             catch
                 % ignore UI update errors
+            end
+
+        end
+
+        function openAttributesForm(obj)
+            % openAttributesForm Create and show a form for editing class attributes
+            
+            formFig = uifigure('Name', 'Edit CarriageControl Attributes', ...
+                'Position', [400 300 500 680]);
+            formLayout = uigridlayout(formFig, [15, 2]);
+            formLayout.RowHeight = repmat({'1x'}, 1, 15);
+            formLayout.ColumnWidth = {'1.2x', '1x'};
+            formLayout.Padding = 15;
+            formLayout.RowSpacing = 10;
+            
+            % Title
+            titleLabel = uilabel(formLayout, 'Text', 'Edit Attributes', 'FontSize', 14, 'FontWeight', 'bold');
+            titleLabel.Layout.Row = 1;
+            titleLabel.Layout.Column = [1 2];
+            
+            % Define attributes to edit with current values and labels
+            attrs = {
+                'vel_max', obj.vel_max, 'Velocity max (steps/sec)';
+                'vx_max', obj.vx_max, 'X velocity max (steps/sec)';
+                'vy_max', obj.vy_max, 'Y velocity max (steps/sec)';
+                'path_dx_max', obj.path_dx_max, 'Path max X range (mm)';
+                'x_min_mm', obj.x_min_mm, 'X min boundary (mm)';
+                'x_max_mm', obj.x_max_mm, 'X max boundary (mm)';
+                'y_min_mm', obj.y_min_mm, 'Y min boundary (mm)';
+                'y_max_mm', obj.y_max_mm, 'Y max boundary (mm)';
+                'boundary_margin_mm', obj.boundary_margin_mm, 'Boundary margin (mm)';
+            };
+
+            nvar = size(attrs, 1);
+            
+            fields = struct();
+            
+            % Create input fields for each attribute
+            for j = 1:nvar
+                row = j + 1; % offset by 1 for title
+                attrName = attrs{j, 1};
+                attrValue = attrs{j, 2};
+                attrLabel = attrs{j, 3};
+                
+                % Label
+                lbl = uilabel(formLayout, 'Text', attrLabel);
+                lbl.Layout.Row = row;
+                lbl.Layout.Column = 1;
+                lbl.HorizontalAlignment = 'left';
+                
+                % Input field based on whether value is finite
+                if isfinite(attrValue)
+                    % numeric edit field
+                    field = uieditfield(formLayout,'numeric','Value',attrValue);
+                else
+                    % For Inf/-Inf, use text field so user can type "Inf" or "-Inf"
+                    field = uieditfield(formLayout,'text','Value',string(attrValue));
+                end
+                field.Layout.Row = row;
+                field.Layout.Column = 2;
+                fields.(attrName) = field;
+            end
+            
+            % origin_mm field (vector [x, y])
+            row = nvar + 2;
+            lbl = uilabel(formLayout, 'Text', 'Origin (mm) [x, y]');
+            lbl.Layout.Row = row;
+            lbl.Layout.Column = 1;
+            lbl.HorizontalAlignment = 'left';
+            
+            originStr = sprintf('[%.2f, %.2f]', obj.origin_mm(1), obj.origin_mm(2));
+            originField = uieditfield(formLayout,'text','Value', originStr); % single line text
+            originField.Layout.Row = row;
+            originField.Layout.Column = 2;
+            fields.origin_mm = originField;
+            
+            % OK and Cancel buttons
+            okBtn = uibutton(formLayout, 'push', 'Text', 'OK', 'BackgroundColor', [0 0.5 0]);
+            okBtn.Layout.Row = row + 2;
+            okBtn.Layout.Column = 1;
+            okBtn.FontColor = 'white';
+            okBtn.ButtonPushedFcn = @onOKClicked;
+            
+            cancelBtn = uibutton(formLayout, 'push', 'Text', 'Cancel');
+            cancelBtn.Layout.Row = row + 2;
+            cancelBtn.Layout.Column = 2;
+            cancelBtn.ButtonPushedFcn = @(~, ~) delete(formFig);
+            
+            % Nested function to handle OK button
+            function onOKClicked(~, ~)
+                try
+                    % Update numeric attributes
+                    for i = 1:nvar
+                        attrName = attrs{i, 1};
+                        val = fields.(attrName).Value;
+                        
+                        % Handle string values (for Inf/-Inf cases)
+                        if isstring(val) || ischar(val)
+                            valStr = convertStringsToChars(val);
+                            if strcmpi(valStr, 'Inf')
+                                val = Inf;
+                            elseif strcmpi(valStr, '-Inf')
+                                val = -Inf;
+                            else
+                                val = str2double(valStr);
+                                if isnan(val)
+                                    error('Invalid numeric value for %s', attrName);
+                                end
+                            end
+                        end
+                        obj.(attrName) = val;
+                    end
+                    
+                    % Handle origin_mm (vector [x, y])
+                    originStr = fields.origin_mm.Value;
+                    % Parse the vector string
+                    originStr = strrep(originStr, '[', '');
+                    originStr = strrep(originStr, ']', '');
+                    parts = strsplit(originStr, ',');
+                    if numel(parts) ~= 2
+                        error('Origin must be in format "[x, y]"');
+                    end
+                    x_val = str2double(strtrim(parts{1}));
+                    y_val = str2double(strtrim(parts{2}));
+                    if isnan(x_val) || isnan(y_val)
+                        error('Invalid numeric values in origin');
+                    end
+                    obj.origin_mm = [x_val, y_val];
+                    
+                    % Close the form
+                    delete(formFig);
+                    
+                catch ME
+                    uialert(formFig, sprintf('Error updating attributes:\n%s', ME.message), ...
+                        'Input Error', 'Icon', 'error');
+                end
             end
 
         end
