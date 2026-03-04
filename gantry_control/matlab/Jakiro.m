@@ -61,6 +61,12 @@ classdef Jakiro < handle
             app.CC2.Car.name = 'Back Carriage';
             app.CC2.Car.control_aoa = true;
             app.CC2.Car.path_CMD_INTERVAL = app.pathpath_tick_period_ms;
+            app.CC2.Car.x_min_mm = 0;
+            app.CC2.Car.x_max_mm = 3500;
+            app.CC2.Car.y_min_mm = 0;
+            app.CC2.Car.y_max_mm = 900;
+            app.CC2.Car.boundary_margin_mm = 50;
+
             app.CC2.hArrow.Visible = 'on';
             app.CC2.CarView.mark.DisplayName = 'Back Carriage';
             app.CC2.CarView.mark.Marker = 's';

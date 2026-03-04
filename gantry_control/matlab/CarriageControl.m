@@ -184,11 +184,14 @@ classdef CarriageControl < handle
             obj.s = s;
             obj.name = opt.name;
 
-            motor_settings.MAX_SPEED = 20000; % max speed steps/sec
-            motor_settings.INC_SPEED = 200; % to do: base this on FPS
-            motor_settings.X_SIGN = opt.X_Sign;
-            motor_settings.Y_SIGN = opt.Y_Sign;
-            motor_settings.ACC = 20000; % acceleration steps/sec^2
+            % The velocity and acceleration settings here should match those in gantry_control\clearcore\clearcore.ino
+            % to do: change these settings on the fly from MATLAB and update the controller settings accordingly
+            motor_settings.ACC = 8000; % acceleration steps/sec^2
+            motor_settings.MAX_SPEED = 10000; % max speed steps/sec
+            motor_settings.INC_SPEED = 200; % speed increment setps/sec when ramping velocity. to do: base this on FPS
+            motor_settings.X_SIGN = opt.X_Sign; % rotation direction of the motor for x axis, determined by installation
+            motor_settings.Y_SIGN = opt.Y_Sign; % rotation direction of the motor for y axis, determined by installation
+
             % motor_settings.STEPS_PER_REV = 6400; % for generic stepper
             motor_settings.STEPS_PER_REV = 800*20; % for ClearPath with 20:1 gearbox
             obj.motor_settings = motor_settings;
@@ -408,8 +411,10 @@ classdef CarriageControl < handle
                 % calculate velocity components
                 obj.vx_cruise = obj.vx_max*xdir*obj.motor_settings.X_SIGN;
                 obj.vy_cruise = obj.vy_max*ydir*obj.motor_settings.Y_SIGN;
-                aoa = atan2(obj.vy_cruise,obj.vx_cruise);
-                aoa_d = round(aoa/pi*180);
+                
+                % aoa of commanded velocity
+                aoa = atan(obj.vy_cruise/obj.vx_cruise);
+                % aoa_d = round(aoa/pi*180);
             
                 % fprintf('\n');
                 if xdir ~= 0
@@ -429,6 +434,9 @@ classdef CarriageControl < handle
                         obj.vy_current = sign(obj.vy_current)*obj.vy_max;
                     end
                 end
+                % aoa before boundary velocity enforcement
+                % will be kept for AOA control even when velocity is reduced by boundary enforcement
+                aoa = atan(obj.vy_current/obj.vx_current);
 
                 % enforce movement boundaries (zero velocity component if at/near boundary)
                 [obj.vx_current, obj.vy_current] = obj.limit_velocity_by_bounds(obj.vx_current, obj.vy_current);
@@ -462,7 +470,7 @@ classdef CarriageControl < handle
                 % AOA
                 % -------------
                 if obj.control_aoa && (xdir ~= 0 || ydir~=0)
-                    aoa = atan(obj.vy_current/obj.vx_current);
+                    % aoa = atan(obj.vy_current/obj.vx_current);
                     spr = obj.motor_settings.STEPS_PER_REV;
                     tgt_aoa_pos = round(aoa/(2*pi)*spr);
                     if strcmpi(obj.aoa_motor_type,'Stepper')
@@ -946,6 +954,7 @@ classdef CarriageControl < handle
         function [vx_out, vy_out] = limit_velocity_by_bounds(obj, vx_in, vy_in)
             % limit_velocity_by_bounds Zeroes velocity components if movement would
             % drive the carriage beyond configured x/y bounds (within margin).
+            % Uses brake distance calculation to prevent overshoot based on motor acceleration.
             % vx_in, vy_in are in steps/sec. Returns possibly modified velocities.
 
             vx_out = vx_in;
@@ -959,20 +968,51 @@ classdef CarriageControl < handle
             pos = obj.real_loc; % [x y]
             margin = obj.boundary_margin_mm;
 
-            % X axis
-            if isfinite(obj.x_max_mm) && (pos(1) >= obj.x_max_mm - margin) && (vx_mm > 0)
-                vx_out = 0;
+            % acceleration in mm/sec^2 (convert from steps/sec^2)
+            acc_mm = obj.motor_settings.ACC * obj.step2mm;
+
+            % Calculate brake distances based on current velocity and acceleration
+            % Brake distance: d = v^2 / (2*a)
+            if vx_mm ~= 0
+                brake_dist_x = abs(vx_mm)^2 / (2 * acc_mm);
+            else
+                brake_dist_x = 0;
             end
-            if isfinite(obj.x_min_mm) && (pos(1) <= obj.x_min_mm + margin) && (vx_mm < 0)
-                vx_out = 0;
+            
+            if vy_mm ~= 0
+                brake_dist_y = abs(vy_mm)^2 / (2 * acc_mm);
+            else
+                brake_dist_y = 0;
             end
 
-            % Y axis
-            if isfinite(obj.y_max_mm) && (pos(2) >= obj.y_max_mm - margin) && (vy_mm > 0)
+            % X axis: check if brake distance exceeds remaining distance to bounds
+            if isfinite(obj.x_max_mm)
+                dist_to_max = obj.x_max_mm - pos(1) - margin;
+                if (vx_mm > 0) && (brake_dist_x > dist_to_max)
+                vx_out = 0;
+            end
+            end
+            
+            if isfinite(obj.x_min_mm)
+                dist_to_min = pos(1) - obj.x_min_mm - margin;
+                if (vx_mm < 0) && (brake_dist_x > dist_to_min)
+                vx_out = 0;
+            end
+            end
+
+            % Y axis: check if brake distance exceeds remaining distance to bounds
+            if isfinite(obj.y_max_mm)
+                dist_to_max = obj.y_max_mm - pos(2) - margin;
+                if (vy_mm > 0) && (brake_dist_y > dist_to_max)
                 vy_out = 0;
             end
-            if isfinite(obj.y_min_mm) && (pos(2) <= obj.y_min_mm + margin) && (vy_mm < 0)
+            end
+            
+            if isfinite(obj.y_min_mm)
+                dist_to_min = pos(2) - obj.y_min_mm - margin;
+                if (vy_mm < 0) && (brake_dist_y > dist_to_min)
                 vy_out = 0;
+                end
             end
 
             % If velocities were zeroed, also update cruise/current values to keep UI consistent
