@@ -57,7 +57,7 @@ classdef wavi < handle
         nch = 1;
         t_fft = 1;
         scale = 1;
-        ch_map = [];
+        ch_map = []; % mapping from raw channels to visualized channels (length should be nch); if empty, defaults to 1:nch
         t_buffer = 30; % time length for signal buffer, seconds
         t_spec = 20; % spectrogram duration
         n_update = 1; % visualization update frequency, multiple of ns_read, i.e. update every n_update read
@@ -65,6 +65,7 @@ classdef wavi < handle
         n_fill % number of read iterations to perform filtering, window can span old samples but only new samples are changed
         nbytes_per_sample
         auto_stop = 0 % automatic stop time in seconds (0 => disabled). Should be >= 10s to enable.
+        iblank = []; % indices of channels to blank (set to 0) for visualization (e.g. to hide noisy channels)
     end
 
     properties % sensing data
@@ -749,7 +750,11 @@ classdef wavi < handle
             % t_read = toc;
             
             % put new data in
-            obj.sig(end-ns_read+1:end,:) = buff(:,obj.ch_map);
+            buff = buff(:,obj.ch_map);
+            if ~isempty(obj.iblank)
+                buff(:,obj.iblank) = 0;
+            end
+            obj.sig(end-ns_read+1:end,:) = buff;
             obj.darr(end-ns_read+1:end) = linspace(obj.darr(end-ns_read)+seconds(1/obj.Fs),...
                                             obj.darr(end-ns_read)+seconds(ns_read/obj.Fs),ns_read);
         end
