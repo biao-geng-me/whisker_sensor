@@ -76,6 +76,7 @@ classdef wavi < handle
         ns_spec % number of samples to do spec
         spec_data % spectrogram data (fft history)
         fft_map % latest fft results nfreq*nch
+        fft_map_3d % all fft results nfreq*nch*ntime
         nfreq
     end
 
@@ -113,6 +114,7 @@ classdef wavi < handle
                 % notes on outlier removal:
                 % it should be done on >=6 new samples, otherwise the data will eventually become constants
                 options.baudrate = 2000000;
+                options.fft_avg_window = 5; % seconds for moving average in bar plot
             end
 
             % if isempty(s)
@@ -195,15 +197,17 @@ classdef wavi < handle
             obj.darr = linspace(datetime('now')-seconds(obj.t_buffer),datetime('now'),obj.ns_tot);
             obj.darr.Format = 'dd-MMM-uuuu HH:mm:ss.SSS';  
 
-            obj.ns_spec = obj.ns_read*obj.n_update;
+            obj.ns_spec = obj.ns_read*obj.n_update*obj.n_fill; % number of samples to accumulate before spectrogram update
     
             obj.t_fft = round(obj.Fs*obj.t_fft)/obj.Fs; % adjust to integer number of samples
             obj.nfreq = (round(obj.Fs/2*obj.t_fft)) + 1; % maximum frequency / resolution + 1
-            obj.spec_data = zeros(obj.nfreq*obj.nch,obj.t_spec*ceil(obj.Fs/obj.ns_spec));
+            obj.spec_data = zeros(obj.nfreq*obj.nch, obj.t_spec*ceil(obj.Fs/obj.ns_spec));
             obj.fft_map = reshape(obj.spec_data(:,end),obj.nfreq,obj.nch);
+            obj.fft_map_3d = reshape(obj.spec_data,obj.nfreq,obj.nch,[]);
 
             % init graphics
             obj.fft_fig = fft_view(obj.nch,obj.nfreq,obj.t_fft);
+            obj.fft_fig.n_avg = round(options.fft_avg_window / (obj.ns_spec / obj.Fs)); % convert avg window from seconds to number of spectrogram frames
             obj.spec_fig = spectrogram_view(obj.spec_data,obj.Fs,obj.ns_spec);
             obj.line_fig = line_view(obj.nsensor,obj.darr,obj.sig);
 
@@ -778,6 +782,7 @@ classdef wavi < handle
                 ind = (1:n) + (i-1)*obj.nfreq;
                 obj.spec_data(ind,end) = pp;
             end
+            obj.fft_map_3d = reshape(obj.spec_data,obj.nfreq,obj.nch,[]);
             obj.fft_map = reshape(obj.spec_data(:,end),obj.nfreq,obj.nch);
         end
 
@@ -826,7 +831,7 @@ classdef wavi < handle
             obj.line_fig.update(obj.darr,obj.sig,obj.V0,obj.scale)
 
             obj.do_fft();
-            obj.fft_fig.update(obj.fft_map);
+            obj.fft_fig.update(obj.fft_map_3d);
             obj.spec_fig.update(obj.spec_data);
 
             % drawnow limitrate

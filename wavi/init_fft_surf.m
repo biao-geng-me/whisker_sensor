@@ -1,7 +1,7 @@
-function [fh,sh,bh,ah,ah2] = init_fft_surf(nch,nfreq,t_fft)
+function [fh,sh,bh,ah,ah2,avg_line] = init_fft_surf(nch,nfreq,t_fft)
     % plot fft as a surface
     % return figure and contour map handles
-    
+
     monp = get(groot,'MonitorPositions');
     if size(monp,1)>1 % show on second monitor,
         monp = monp(2,:);
@@ -47,6 +47,10 @@ function [fh,sh,bh,ah,ah2] = init_fft_surf(nch,nfreq,t_fft)
     ah2 = axes(fh,"Position",pos);
     bh = bar(rand(1,nch),'FaceColor','flat');
     bh.CData(1:2:end,:) = repmat([1 0 0],nch/2,1);
+
+    hold(ah2,'on');
+    avg_line = plot(ah2, 1:nch, zeros(1,nch)*1e-4, '_', 'Color', [0 0 0], 'LineWidth', 3, 'DisplayName', 'avg');
+    hold(ah2,'off');
 
     xlim([0 nch+1])
     
