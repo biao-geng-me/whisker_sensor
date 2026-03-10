@@ -913,6 +913,9 @@ classdef wavi < handle
             catch me
                 warning('wavi:reset','Error restarting timer: %s', me.message);
             end
+            % reset sampling rate measurement state to avoid drop after reset
+            obj.readCount = 0;
+            obj.runStartTic = tic;
         end
     end
 
