@@ -627,7 +627,13 @@ classdef CarriageControl < handle
                 is_done = true;
                 return
             end
-
+            if abs(curr(1)*obj.step2mm) >= obj.x_max_mm - obj.boundary_margin_mm
+                % reached boundary within margin
+                fprintf('%s Carriage reached tank boundary.\n',obj.name);
+                obj.stopPathTracking();
+                is_done = true;
+                return
+            end
             % don't decrease arc length (no going backwards, this is to avoid AOA oscillations)
             if new_path_arc_len > obj.path_arc_len
                 obj.path_arc_len = new_path_arc_len;
@@ -967,7 +973,7 @@ classdef CarriageControl < handle
             % current position in mm
             pos = obj.real_loc; % [x y]
             margin = obj.boundary_margin_mm;
-
+            
             % acceleration in mm/sec^2 (convert from steps/sec^2)
             acc_mm = obj.motor_settings.ACC * obj.step2mm;
 
@@ -989,29 +995,29 @@ classdef CarriageControl < handle
             if isfinite(obj.x_max_mm)
                 dist_to_max = obj.x_max_mm - pos(1) - margin;
                 if (vx_mm > 0) && (brake_dist_x > dist_to_max)
-                vx_out = 0;
-            end
+                    vx_out = 0;
+                end
             end
             
             if isfinite(obj.x_min_mm)
                 dist_to_min = pos(1) - obj.x_min_mm - margin;
                 if (vx_mm < 0) && (brake_dist_x > dist_to_min)
-                vx_out = 0;
-            end
+                    vx_out = 0;
+                end
             end
 
             % Y axis: check if brake distance exceeds remaining distance to bounds
             if isfinite(obj.y_max_mm)
                 dist_to_max = obj.y_max_mm - pos(2) - margin;
                 if (vy_mm > 0) && (brake_dist_y > dist_to_max)
-                vy_out = 0;
-            end
+                    vy_out = 0;
+                end
             end
             
             if isfinite(obj.y_min_mm)
                 dist_to_min = pos(2) - obj.y_min_mm - margin;
                 if (vy_mm < 0) && (brake_dist_y > dist_to_min)
-                vy_out = 0;
+                    vy_out = 0;
                 end
             end
 
