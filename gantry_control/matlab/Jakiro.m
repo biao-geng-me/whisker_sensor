@@ -8,6 +8,7 @@ classdef Jakiro < handle
         GridLayout
         ExpPanel
         pathpathTimer = [] % timer for path tracking both carriages
+        net % agent server connection
     end
 
     properties
@@ -18,6 +19,10 @@ classdef Jakiro < handle
         pathpath_redraw_interval = 20; % update interval for path tracking
         outpath % output path for wavi data
         n_rl_interval = 4; % number of samples between RL agent action updates (for rl agent control modes)
+        n_ch_total = 23; % total number of channels in the state sent to the agent (for rl agent control modes)
+        agent_server_address = '127.0.0.1'; % address of the agent server (for rl agent control modes)
+        agent_server_port = 65432; % port of the agent server (for rl agent control modes)
+        currentState = []; % current state for RL agent control
     end
     methods
         function app = Jakiro()
@@ -104,6 +109,37 @@ classdef Jakiro < handle
             addlistener(app.ExpPanel,'PathHuman',@(src,evt) app.onPathHuman(src,evt));
             addlistener(app.ExpPanel,'PathAgentPre',@(src,evt) app.onPathAgentPre(src,evt));
             addlistener(app.ExpPanel,'PathAgentLive',@(src,evt) app.onPathAgentLive(src,evt));
+            app.connect_agent_server(); % connect to agent server at startup (for RL agent control modes)
+        end
+    
+        function connect_agent_server(app)
+
+            STATE_DIM = app.n_rl_interval*app.n_ch_total;
+            ACTION_DIM = 2;
+            MAX_EPISODES = 1;
+            SAMPLE_RATE = 80;
+
+            config.mode = 'infer';
+            config.hpc_port = 5555;
+            config.n_rl_interval = app.n_rl_interval;
+            config.n_ch_total = app.n_ch_total;
+            config.state_dim = STATE_DIM;
+            config.action_dim = ACTION_DIM;
+            config.max_episodes = MAX_EPISODES;
+            config.sample_rate = SAMPLE_RATE;
+            config.dt = 1/SAMPLE_RATE;
+            % connect_agent_server Connect to the agent server at the specified address and port
+            try
+                app.net = NetworkClient(app.agent_server_address, app.agent_server_port,STATE_DIM, ACTION_DIM);
+                % Phase 1: Handshake
+                app.net.sendConfig(config);
+                fprintf('Connected to agent server at %s:%d\n', app.agent_server_address, app.agent_server_port);
+            catch ME
+                warning('AgentConnectionError');
+                fprintf('Failed to connect to agent server at %s:%d: \n%s', app.agent_server_address, app.agent_server_port, ME.message);
+                app.net = [];
+            end
+            app.currentState = zeros(app.n_ch_total,app.n_rl_interval); % hardware state buffer
         end
     end
 
@@ -447,7 +483,7 @@ classdef Jakiro < handle
             % set velocity limits for both carriages
             app.CC1.Car.vel_max = round(v1*1000/app.CC1.Car.step2mm);
             app.CC2.Car.vel_max = round(v2*1000/app.CC2.Car.step2mm);
-
+            cc2_state_buffer = zeros(5, app.n_rl_interval); % back carriage state buffer for constructing state to send to agent
             % prepare daq
             try
                 if ~isempty(app.WA.s)
@@ -481,8 +517,7 @@ classdef Jakiro < handle
             app.CC2.Car.poll_gamepad = 0;
             app.CC2.Car.poll_keyboard = 1; % for interupting the agent control
 
-            app.run_start_time = datetime('now');
-
+            
             % blocking path+ agent control loop
             period = 12.5/1000; % seconds, hardcoded control loop period for agent control (80 Hz)
             t0 = tic;
@@ -490,8 +525,12 @@ classdef Jakiro < handle
             app.CC1.hArrow.Visible = 'on';
             app.CC2.hArrow.Visible = 'on';
             app.CC2.Car.cmd_npoll = 0; % reset poll counter
-
+            
             is_done_cc1 = false; % track when CC1 finishes path tracking
+            is_done = 0; % track when episode is done for agent (currently only time-based truncation, no early termination condition)
+            truncated = 0;
+            action = app.net.startEpisode(app.currentState(:)'); % get initial action from agent
+            app.run_start_time = datetime('now');
             while true
                 t1 = tic;
                 n = n + 1;
@@ -516,29 +555,41 @@ classdef Jakiro < handle
 
                 % stop condition: episode time exceeded
                 if elapsed_time_sec > episode_time_s
-                    break;
+                    truncated = 1;
                 end
                 
                 % CC2: agent control
                 if elapsed_time_sec > delay_s
-                    vx_in = round(app.CC2.Car.vel_max * cosd(15));
-                    vy_in = round(app.CC2.Car.vel_max * sind(15));
+                    cc2_state_buffer = circshift(cc2_state_buffer, [0 -1]);
+                    cc2_state_buffer(1,end) = (elapsed_time_sec - delay_s) * 1000; % timestamp in ms relative to agent control start
+                    cc2_state_buffer(2:3,end) = app.CC2.Car.real_loc; % current position of back carriage
+                    cc2_state_buffer(4:5,end) = app.CC2.Car.real_vel; % current velocity of back carriage
+                    vx_in = round(action(1)*1000/app.CC2.Car.step2mm);
+                    vy_in = round(action(2)*1000/app.CC2.Car.step2mm);
                     try
                         app.CC2.Car.agentControlStep(ev, vx_in, vy_in);
                     catch ME
                         warning(ME.identifier, '%s', ME.message);
                     end
+                    reward = 0; % placeholder reward
                 end
 
                 % data acquisition
                 try
                     if ~isempty(app.WA.s)
-                        app.WA.rl_read_update_tick();
+                        new_samples = app.WA.rl_read_update_tick();
                     end
                 catch ME
                     % error('DataAcquisitionError', 'Error during data acquisition: %s', ME.message);
                 end
-                
+
+                if elapsed_time_sec > delay_s && ~isempty(new_samples)
+                    % construct state for agent
+                    app.currentState = [cc2_state_buffer; new_samples']; % 5 rows of carriage state + 18 rows of daq data, each with n_rl_interval columns
+                    % send state to agent and receive action
+                    action = app.net.stepRL(app.currentState(:)', reward, is_done, truncated); % flatten state to 1D array for sending to agent
+                end
+
                 % update visuals periodically
                 if mod(n, app.pathpath_redraw_interval) == 0
                     app.CC1.update_view();
@@ -556,6 +607,11 @@ classdef Jakiro < handle
                 % busy-wait with sleep to reduce jitter
                 while toc(t0) < next_time
                     pause(0.0005);
+                end
+
+                if truncated
+                    fprintf('Episode truncated after %.2f seconds\n', elapsed_time_sec);
+                    break;
                 end
             end
 

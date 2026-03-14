@@ -694,9 +694,9 @@ classdef wavi < handle
             end
         end
 
-        function buffer_filled = rl_read_update_tick(obj)
+        function new_samples = rl_read_update_tick(obj)
             % tick for use in rl agent control: read serial data and update visuals/printing
-            buffer_filled = false;
+            new_samples = [];
             try
                 % Guard: if serial port is not connected/valid, bail out quickly.
                 if isempty(obj.s) || ~isvalid(obj.s)
@@ -712,10 +712,9 @@ classdef wavi < handle
                 tic
                 obj.read_serial_data(obj.ns_read);
                 fprintf('Read %d frames serial data took %f seconds\n', obj.ns_read, toc);
-                buffer_filled = true;
 
                 if mod(obj.readCount, obj.n_fill) == 0
-                    obj.remove_outliers(obj.ns_fill);
+                    new_samples =obj.remove_outliers(obj.ns_fill);
                 end
                 % rl_filtering could be added here in the future if needed
 
@@ -823,12 +822,13 @@ classdef wavi < handle
                                             obj.darr(end-ns_read)+seconds(ns_read/obj.Fs),ns_read);
         end
 
-        function remove_outliers(obj, ns_fill)
+        function new_samples = remove_outliers(obj, ns_fill)
             % replace outliers in new samples
             tmp = obj.sig(end-ns_fill+1:end,:);
             tmp = filloutliers(tmp,'linear'); % operates on each column separately.
             nnew = obj.ns_read*obj.n_fill;
-            obj.sig(end-nnew+1:end,:) = tmp(end-nnew+1:end,:);
+            new_samples = tmp(end-nnew+1:end,:);
+            obj.sig(end-nnew+1:end,:) = new_samples;
         end
         
         function rl_filtering(obj)

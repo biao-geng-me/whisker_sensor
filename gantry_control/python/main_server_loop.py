@@ -53,6 +53,7 @@ def main():
     # PHASE 2 & 3: The State Machine Loop
     running = True
     while running:
+        net.set_timeout(10*60)  # timeout for receiving header
         header = net.receive_header()
         
         if header is None:
@@ -75,6 +76,7 @@ def main():
             net.send_doubles(action)
             
         elif header == CMD_STEP:
+            net.set_timeout(1)
             # 0x02: Fast Control Loop Step
             step_start = time.perf_counter()
             
