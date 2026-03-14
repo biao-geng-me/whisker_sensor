@@ -60,7 +60,7 @@ classdef wavi < handle
         ch_map = []; % mapping from raw channels to visualized channels (length should be nch); if empty, defaults to 1:nch
         t_buffer = 30; % time length for signal buffer, seconds
         t_spec = 20; % spectrogram duration
-        n_update = 1; % visualization update frequency, multiple of ns_read, i.e. update every n_update read
+        n_update = 1; % visualization update frequency, multiple of ns_read*n_fill, i.e. update every n_update read
         ns_fill % number of samples, window size for filtering outliers
         n_fill % number of read iterations to perform filtering, window can span old samples but only new samples are changed
         nbytes_per_sample
@@ -108,13 +108,13 @@ classdef wavi < handle
                 options.ch_map = [];
                 options.ns_spec = [];
                 options.n_update = 1; % visualization update frequency, multiple of n_fill, i.e. update every n_fill*n_update read
-                options.ns_fill = 8;
-                options.n_fill = 2;
+                options.ns_fill = 6; % looks like 6 is the magic number to filter out random spikes without turning the signal into a DC
+                options.n_fill = 1;
                 options.auto_stop = 0;
                 % notes on outlier removal:
                 % it should be done on >=6 new samples, otherwise the data will eventually become constants
                 options.baudrate = 2000000;
-                options.fft_avg_window = 5; % seconds for moving average in bar plot
+                options.fft_avg_window = 5; % seconds for moving average in fft amplitude bar plot
             end
 
             % if isempty(s)
@@ -694,6 +694,66 @@ classdef wavi < handle
             end
         end
 
+        function buffer_filled = rl_read_update_tick(obj)
+            % tick for use in rl agent control: read serial data and update visuals/printing
+            buffer_filled = false;
+            try
+                % Guard: if serial port is not connected/valid, bail out quickly.
+                if isempty(obj.s) || ~isvalid(obj.s)
+                    error('Serial port not connected');
+                end
+
+                if obj.s.NumBytesAvailable < obj.nbytes_per_sample * obj.ns_read
+                    % not enough data available yet
+                    return
+                end
+                
+                obj.readCount = obj.readCount + 1;
+                tic
+                obj.read_serial_data(obj.ns_read);
+                fprintf('Read %d frames serial data took %f seconds\n', obj.ns_read, toc);
+                buffer_filled = true;
+
+                if mod(obj.readCount, obj.n_fill) == 0
+                    obj.remove_outliers(obj.ns_fill);
+                end
+                % rl_filtering could be added here in the future if needed
+
+                % if mod(obj.readCount, obj.n_update*obj.n_fill) == 0
+                if 1==0
+                    % update visuals only when not paused; data read continues
+                    if ~obj.is_paused
+                        obj.update_visuals();
+                    end
+                    nnew = obj.ns_read*obj.n_fill*obj.n_update; % total new samples since last write
+                    % write to file only when recording is active and file open
+                    if obj.is_recording && ~isempty(obj.fout) && obj.fout ~= -1
+                        obj.write_data_samples(nnew);
+                    end
+                end
+
+                % if mod(obj.readCount, round(obj.Fs / obj.ns_read)) == 0
+                %     obj.print_sig_vals();
+                % end
+
+                % automatic stop: if auto_stop is set (>=10s) and recording
+                try
+                    if obj.is_recording && obj.auto_stop >= 10 && ~isempty(obj.recordStartTic)
+                        if toc(obj.recordStartTic) >= double(obj.auto_stop)
+                            fprintf('Auto-stop: reached %g seconds, stopping recording\n', double(obj.auto_stop));
+                            % call toggle_record with dummy src/evt
+                            obj.toggle_record([],[]);
+                        end
+                    end
+                catch
+                    % ignore errors in auto-stop handling
+                end
+
+            catch me
+                error('wavi:rl_read_update_tick','error: %s',me.message);
+            end
+        end
+
         function align_data_read(obj)
             % align data read
             % the value 2024 is a marker to indicate the start of a data frame (see HX711_array Arduino code)
@@ -771,6 +831,15 @@ classdef wavi < handle
             obj.sig(end-nnew+1:end,:) = tmp(end-nnew+1:end,:);
         end
         
+        function rl_filtering(obj)
+            % placeholder for future real-time filtering of obj.sig
+            % since this filtering is real-time, it can only change the most recent samples, e.g. obj.sig(end-obj.ns_read+1:end,:)
+            % however, earlier samples can be used for calculation.
+            buff = obj.sig(end-obj.ns_read:end,:);
+            % todo
+            obj.sig(end-obj.ns_read+1:end,:) = buff(2:end,:); % replace with filtered version of buff
+        end
+
         function do_fft(obj)
 
             % shift spectrogram

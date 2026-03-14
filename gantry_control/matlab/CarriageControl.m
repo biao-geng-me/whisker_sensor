@@ -545,6 +545,162 @@ classdef CarriageControl < handle
                 error('Timer callback function error');
             end
         end
+        function status = agentControlStep(obj, event, vx_in, vy_in)
+            % control use velocity commands (from an agent)
+
+            % obj - CarriageControl class object
+            % increment command poll counter
+            status = 0;
+            
+            obj.cmd_npoll = obj.cmd_npoll + 1;
+            try
+                % get user inputs    
+                kb_state = read(obj.kb); %
+                if kb_state.keys('q') % using ascii indexing
+                    status = 'STOPPED_BY_USER';
+                    fprintf('Control stopped by user.\n');
+                    return
+                end
+                    
+                if obj.cmd_npoll == 1 % first call, flush serial buffer (microcontroller sends data non stop)
+                    flush(obj.s);
+                end
+                obj.update_status_from_controller();
+
+                poll_time = datetime(event.Data.time);
+                poll_time.Format = 'dd-MMM-uuuu HH:mm:ss.SSS';
+                input_str = sprintf('%10d %s Inputs: ',obj.cmd_npoll, poll_time);
+            
+                INC_SPEED = obj.motor_settings.INC_SPEED;
+                MAX_SPEED = obj.motor_settings.MAX_SPEED;
+            
+                % check for interactive inputs
+                % interactive movement
+                xdir = 0;
+                ydir = 0;
+            
+                if vx_in > 0
+                    fprintf('← ');
+                    input_str = [input_str '← '];
+                    xdir = 1;
+                elseif vx_in < 0
+                    fprintf('→ ');
+                    input_str = [input_str '→ '];
+                    xdir = -1;
+                end
+            
+                if vy_in < 0
+                    fprintf('↑ ');
+                    input_str = [input_str '↑ '];
+                    ydir = -1;
+                elseif vy_in > 0
+                    fprintf('↓ ');
+                    input_str = [input_str '↓ '];
+                    ydir = 1;
+                end
+                
+                % vmag = sqrt(vx_in^2 + vy_in^2);
+                obj.vx_max = obj.clamp(abs(vx_in),MAX_SPEED); % commanded velocity amplitude constrained by MAX_SPEED
+                obj.vy_max = obj.clamp(abs(vy_in),MAX_SPEED);
+                % obj.vel_max = obj.clamp(obj.vel_max,MAX_SPEED);
+                
+                % calculate velocity components
+                obj.vx_cruise = obj.vx_max*xdir*obj.motor_settings.X_SIGN;
+                obj.vy_cruise = obj.vy_max*ydir*obj.motor_settings.Y_SIGN;
+                aoa = atan2(obj.vy_cruise,obj.vx_cruise);
+
+                % fprintf('\n');
+                if xdir ~= 0
+                    % ramp
+                    obj.vx_current = obj.vx_current ...
+                        + sign(obj.vx_cruise - obj.vx_current)*round(INC_SPEED*abs(cos(aoa)));
+                    if abs(obj.vx_current)>obj.vx_max
+                        obj.vx_current = sign(obj.vx_current)*obj.vx_max;
+                    end
+                end
+            
+                if ydir ~= 0
+                    % ramp
+                    obj.vy_current = obj.vy_current + ...
+                        sign(obj.vy_cruise - obj.vy_current)*round(INC_SPEED*abs(sin(aoa)));
+                    if abs(obj.vy_current)>obj.vy_max
+                        obj.vy_current = sign(obj.vy_current)*obj.vy_max;
+                    end
+                end
+
+                % enforce movement boundaries (zero velocity component if at/near boundary)
+                [obj.vx_current, obj.vy_current] = obj.limit_velocity_by_bounds(obj.vx_current, obj.vy_current);
+                
+                % compose commands
+                if xdir ~= 0
+                    cmd_x = sprintf('VEL%d',obj.vx_current);
+                    obj.wait_prev = 0; % previous cmd interrupted
+                elseif obj.vx_current ~=0
+                    obj.vx_current = round(obj.vx_current*0.49); % smooth deceleration when zero velocity commanded
+                    cmd_x = sprintf('VEL%d',obj.vx_current);
+                else
+                    cmd_x = 'NUL'; % NULL command (stop). The command string can't be empty!!!
+                end
+            
+                if ydir ~= 0
+                    cmd_y = sprintf('VEL%d',obj.vy_current);
+                    obj.wait_prev = 0;
+                elseif obj.vy_current ~=0
+                    obj.vy_current = round(obj.vy_current*0.49);
+                    cmd_y = sprintf('VEL%d',obj.vy_current);
+                else
+                    cmd_y = 'NUL';
+                end
+                
+                % -------------
+                % AOA
+                % -------------
+                if obj.control_aoa && (xdir ~= 0 || ydir~=0)
+                    aoa = atan(obj.vy_current/obj.vx_current);
+                    if isnan(aoa)
+                        aoa = 0;
+                    end
+                    spr = obj.motor_settings.STEPS_PER_REV;
+                    tgt_aoa_pos = round(aoa/(2*pi)*spr);
+                    if strcmpi(obj.aoa_motor_type,'Stepper')
+                        % dist = round(tgt_aoa_pos - obj.current_pos(3)*(-1));
+                        % limit range due to buggy control
+                        % dist = min(dist,spr/2);
+                        % dist = max(-spr/2,dist);
+                        % if dist ~= 0
+                            % cmd_a = sprintf('REL%d',-dist);
+                        cmd_a = sprintf('ABS%d',tgt_aoa_pos*(-1));
+    
+                        % else
+                        %     cmd_a = 'NUL';
+                        % end
+    
+                    elseif strcmpi(obj.aoa_motor_type,'ClearPath')
+                        cmd_a = sprintf('ABS%d',tgt_aoa_pos);
+                    end
+                elseif obj.wait_prev
+                    cmd_a = 'PRE';
+                else
+                    cmd_a = 'NUL';
+                end
+                        
+                if ~strcmp(cmd_x,'NUL') || ~strcmp(cmd_y,'NUL') || ~strcmp(cmd_a,'NUL')
+                    command = sprintf('%s,%s,%s%c',cmd_x,cmd_y,cmd_a,obj.END_MARKER);
+                    % fprintf(s, command); % this somehow doesn't work
+                    write(obj.s,command,"char");
+                    fprintf('%s\t%9d\tSent command: %s\n',poll_time, obj.controller_time2,command);
+                end
+            
+                input_str = [input_str '🤖'];
+                set(obj.hInputText, 'Text', input_str);
+            
+                % drawnow limitrate
+            catch me
+                disp(me.message);
+                fprintf('%s %s line%d\n',me.stack(1).file, me.stack(1).name, me.stack(1).line);
+                error('Timer callback function error');
+            end
+        end
 
         function is_done = pathTrackingTick(obj, src, event)
             % follow prescribed path

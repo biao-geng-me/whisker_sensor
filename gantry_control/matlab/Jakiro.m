@@ -17,6 +17,7 @@ classdef Jakiro < handle
         pathpath_tick_period_ms = 10; % period of path tracking timer in ms
         pathpath_redraw_interval = 20; % update interval for path tracking
         outpath % output path for wavi data
+        n_rl_interval = 4; % number of samples between RL agent action updates (for rl agent control modes)
     end
     methods
         function app = Jakiro()
@@ -433,7 +434,142 @@ classdef Jakiro < handle
         end
 
         function onPathAgentPre(app, ~, ~)
-            disp('PathAgentPre triggered (placeholder)');
+            % PathAgentPre: CC1 follows a prescribed path, CC2 is agent-controlled
+            % Both run in the same blocking loop to avoid timer jitter
+            
+            try
+                [v1,v2,delay_s,run_tag,episode_time_s] = app.ExpPanel.getParameters();
+            catch
+                warning('Failed to read experiment parameters.');
+                return
+            end
+
+            % set velocity limits for both carriages
+            app.CC1.Car.vel_max = round(v1*1000/app.CC1.Car.step2mm);
+            app.CC2.Car.vel_max = round(v2*1000/app.CC2.Car.step2mm);
+
+            % prepare daq
+            try
+                if ~isempty(app.WA.s)
+                    app.WA.ns_read = app.n_rl_interval; % set number of samples to read per tick to match agent action update interval
+                    app.WA.n_update = 2;
+                    app.WA.n_fill = 1;
+                    app.WA.tag = sprintf('%s_PathAgentPre-v1=%.2f_v2max=%.2f_delay=%.1f',run_tag,v1,v2,delay_s);
+                    app.WA.is_recording = true;
+                    app.WA.init_datalog_file();
+                    app.WA.align_data_read();
+                    app.WA.average_signal_as_offset(round(app.WA.Fs));
+                    app.WA.reset_data_buffers();
+                end
+            catch
+                % error('DataAcquisitionError', 'Error during data acquisition setup: %s', e.message);
+            end
+
+            % connect to agent server
+
+            % prepare CC1 for path tracking
+            [xp,yp,rp,thetap1,L,start_x,start_y,start_s,~] = app.CC1.prepare_pathtracking_data();
+            try
+                start(app.CC1.redrawTimer);
+            catch
+            end
+            app.CC1.Car.moveToPositionMM(start_x-app.CC1.Car.origin_mm(1), start_y-app.CC1.Car.origin_mm(2), 20, 1, false);
+            app.CC1.Car.init_pathtracking_variables(xp,yp,rp,L,start_s,thetap1);
+            stop(app.CC1.redrawTimer);
+
+            % prepare CC2 for interactive control (human)
+            app.CC2.Car.poll_gamepad = 0;
+            app.CC2.Car.poll_keyboard = 1; % for interupting the agent control
+
+            app.run_start_time = datetime('now');
+
+            % blocking path+ agent control loop
+            period = 12.5/1000; % seconds, hardcoded control loop period for agent control (80 Hz)
+            t0 = tic;
+            n = 0;
+            app.CC1.hArrow.Visible = 'on';
+            app.CC2.hArrow.Visible = 'on';
+            app.CC2.Car.cmd_npoll = 0; % reset poll counter
+
+            is_done_cc1 = false; % track when CC1 finishes path tracking
+            while true
+                t1 = tic;
+                n = n + 1;
+
+                % synthetic src/event objects to mimic timer callback
+                src = struct();
+                src.TasksExecuted = n;
+                ev = struct();
+                ev.Data.time = datetime('now');
+
+                % CC1: path tracking
+                if ~is_done_cc1
+                    try
+                        is_done_cc1 = app.CC1.Car.pathTrackingTick(src, ev);
+                    catch ME
+                        warning(ME.identifier, '%s', ME.message);
+                        is_done_cc1 = true;
+                    end
+                end
+                now_dt = datetime('now');
+                elapsed_time_sec = seconds(now_dt - app.run_start_time);
+
+                % stop condition: episode time exceeded
+                if elapsed_time_sec > episode_time_s
+                    break;
+                end
+                
+                % CC2: agent control
+                if elapsed_time_sec > delay_s
+                    vx_in = round(app.CC2.Car.vel_max * cosd(15));
+                    vy_in = round(app.CC2.Car.vel_max * sind(15));
+                    try
+                        app.CC2.Car.agentControlStep(ev, vx_in, vy_in);
+                    catch ME
+                        warning(ME.identifier, '%s', ME.message);
+                    end
+                end
+
+                % data acquisition
+                try
+                    if ~isempty(app.WA.s)
+                        app.WA.rl_read_update_tick();
+                    end
+                catch ME
+                    % error('DataAcquisitionError', 'Error during data acquisition: %s', ME.message);
+                end
+                
+                % update visuals periodically
+                if mod(n, app.pathpath_redraw_interval) == 0
+                    app.CC1.update_view();
+                    app.CC2.update_view();
+                    % drawnow limitrate
+                end
+
+                % schedule next tick
+                next_time = n * period;
+                elapsed = toc(t0);
+
+                fprintf('PathAgentPre Tick %d: elapsed total=%.3f s, frame=%.1f ms, avg FPS=%.1f\n',...
+                    n, elapsed, toc(t1)*1000, n/elapsed);
+
+                % busy-wait with sleep to reduce jitter
+                while toc(t0) < next_time
+                    pause(0.0005);
+                end
+            end
+
+            % cleanup
+            try
+                app.CC1.Car.stopPathTracking();
+            catch
+            end
+            app.CC2.Car.poll_gamepad = 0;
+            app.CC2.Car.poll_keyboard = 0;
+            app.CC1.hArrow.Visible = 'off';
+            app.CC2.hArrow.Visible = 'off';
+            app.WA.is_recording = false;
+            app.WA.close_datafile();
         end
 
         function onPathAgentLive(app, ~, ~)
