@@ -20,6 +20,8 @@ classdef wavi < handle
         readTimer % matlab timer object used for fixed-rate reading
         readCount = 0 % number of timer ticks / read iterations performed
         runStartTic % tic handle used to measure observed sampling rate
+        rateWindowReadCount = 0 % readCount snapshot used for dynamic sampling-rate window
+        rateWindowStartTic % tic handle used for dynamic sampling-rate window
         fout % file handle for data logging
         recordStartTic % tic handle used to measure recording duration
         TagField   % uieditfield for experiment tag
@@ -474,6 +476,9 @@ classdef wavi < handle
                     obj.readTimer = [];
                     % clear run start tic used for sampling rate measurement
                     try obj.runStartTic = []; catch, end
+                    % clear dynamic-rate window state
+                    try obj.rateWindowReadCount = 0; catch, end
+                    try obj.rateWindowStartTic = []; catch, end
                 end
             catch me
                 warning('wavi:onAppClose','Error stopping timer: %s', me.message);
@@ -622,6 +627,7 @@ classdef wavi < handle
             end
 
             obj.readCount = 0;
+            obj.rateWindowReadCount = 0;
             obj.readTimer = timer( ...
                 'ExecutionMode','fixedRate', ...
                 'Period', period, ...
@@ -633,6 +639,8 @@ classdef wavi < handle
             start(obj.readTimer);
             % record start time for observed sampling rate measurement
             obj.runStartTic = tic;
+            % start dynamic-rate window timer
+            obj.rateWindowStartTic = tic;
         end
 
         function read_update_tick(obj, src, ~)
@@ -861,10 +869,29 @@ classdef wavi < handle
             % compute and print observed sampling rate for standalone apps
             try
                 if obj.is_standalone && ~isempty(obj.runStartTic)
-                    elapsed = toc(obj.runStartTic);
-                    if elapsed > 0
-                        measuredFs = totalSamples / elapsed;
-                        fprintf('Measured sampling rate: %.1f Hz (Input %.1f Hz)\n', measuredFs, obj.Fs);
+                    elapsedTotal = toc(obj.runStartTic);
+                    if elapsedTotal > 0
+                        avgFs = totalSamples / elapsedTotal;
+
+                        % dynamic rate: use a rolling count/time window so rate changes show up quickly
+                        if isempty(obj.rateWindowStartTic)
+                            obj.rateWindowStartTic = tic;
+                            obj.rateWindowReadCount = double(obj.readCount);
+                        end
+
+                        elapsedWindow = toc(obj.rateWindowStartTic);
+                        windowSamples = (double(obj.readCount) - double(obj.rateWindowReadCount)) * double(obj.ns_read);
+                        if elapsedWindow > 0 && windowSamples > 0
+                            dynamicFs = windowSamples / elapsedWindow;
+                        else
+                            dynamicFs = avgFs;
+                        end
+
+                        fprintf('Measured sampling rate: %.1f Hz (Window %.1f Hz, Input %.1f Hz)\n', avgFs, dynamicFs, obj.Fs);
+
+                        % advance window markers for next dynamic-rate estimate
+                        obj.rateWindowReadCount = double(obj.readCount);
+                        obj.rateWindowStartTic = tic;
                     end
                 end
             catch
@@ -985,6 +1012,8 @@ classdef wavi < handle
             % reset sampling rate measurement state to avoid drop after reset
             obj.readCount = 0;
             obj.runStartTic = tic;
+            obj.rateWindowReadCount = 0;
+            obj.rateWindowStartTic = tic;
         end
     end
 

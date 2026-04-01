@@ -50,6 +50,7 @@ function [fh,sh,bh,ah,ah2,avg_line] = init_fft_surf(nch,nfreq,t_fft)
 
     hold(ah2,'on');
     avg_line = plot(ah2, 1:nch, zeros(1,nch)*1e-4, '_', 'Color', [0 0 0], 'LineWidth', 3, 'DisplayName', 'avg');
+    yline(1e-4, '--', 'Color', [0 0 0], 'LineWidth', 1);
     hold(ah2,'off');
 
     xlim([0 nch+1])
