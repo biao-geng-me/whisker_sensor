@@ -722,7 +722,7 @@ classdef wavi < handle
                 fprintf('Read %d frames serial data took %f seconds\n', obj.ns_read, toc);
 
                 if mod(obj.readCount, obj.n_fill) == 0
-                    new_samples =obj.remove_outliers(obj.ns_fill);
+                    new_samples =obj.remove_outliers(obj.ns_fill) - obj.V0; % return the new samples with offset removed
                 end
                 % rl_filtering could be added here in the future if needed
 

@@ -1,4 +1,10 @@
 import numpy as np
+
+try:
+    from agents.hardware_handoff_v2.path7_object_adapter import build_policy
+except Exception:
+    build_policy = None
+
 class AgentWrapper:
     """Wraps the local DRL inference engine."""
     
@@ -8,15 +14,47 @@ class AgentWrapper:
         self.action_dim = config.get("action_dim", 2)
         self.n_rl_interval = config.get("n_rl_interval")
         self.n_ch_total = config.get("n_ch_total")
+        self.policy = None
+        self.use_object_policy = False
         
         print(f"[Agent] Initialized with config: {self.config}")
+
+        self._init_policy()
         
         # Memory for the current episode's trajectory
         self.trajectory = [] 
 
+    def _init_policy(self):
+        """Initialize deployed policy adapter when available."""
+        if build_policy is None:
+            print("[Agent] Deployed object policy unavailable; using built-in fallback.")
+            return
+
+        try:
+            package_dir = self.config.get(
+                "policy_package_dir",
+                "agents/hardware_handoff_v2",
+            )
+            device = self.config.get("policy_device", "cpu")
+            signal_shape = tuple(self.config.get("signal_shape", (3, 3, 2)))
+            self.policy = build_policy(
+                package_dir=package_dir,
+                device=device,
+                signal_shape=signal_shape,
+            )
+            self.use_object_policy = True
+            print(f"[Agent] Loaded deployed object policy from {package_dir} (device={device}).")
+        except Exception as ex:
+            print(f"[Agent] Failed to load deployed object policy: {ex}")
+            print("[Agent] Falling back to built-in dummy controller.")
+            self.policy = None
+            self.use_object_policy = False
+
     def reset(self, initial_state):
         """Clears trajectory memory for a new episode."""
         self.trajectory = []
+        if self.use_object_policy:
+            self.policy.reset()
         # In a real DRL, this might reset LSTM hidden states
         return self._compute_action(initial_state)
 
@@ -37,9 +75,20 @@ class AgentWrapper:
         return self._compute_action(state)
 
     def _compute_action(self, state):
-        """Dummy CPU inference function."""
-        # TODO: Load PyTorch/ONNX model and run forward pass here
-        # For now, return a dummy action based on the state to prove it works
+        """Compute control action from deployed policy or fallback agent."""
+        if self.use_object_policy:
+            obs = np.array(state, dtype=np.float32).reshape(self.n_rl_interval, self.n_ch_total)
+            action = self.policy.act(
+                observation=obs,
+                reward=0.0,
+                done=False,
+                truncated=False,
+                info={},
+            )
+            action_arr = np.asarray(action, dtype=np.float64).reshape(-1)
+            return action_arr[: self.action_dim].tolist()
+
+        # Fallback: dummy action based on state
         dummy_action = self.dumb_agent(state)
         # Ensure it matches expected dimension
         while len(dummy_action) < self.action_dim:

@@ -2,3 +2,5 @@
 *.asv
 .vscode
 *.pyc
+gantry_control/matlab/paths/env1/
+gantry_control/python/agents/

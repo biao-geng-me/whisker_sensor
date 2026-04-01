@@ -1,0 +1,1 @@
+calibration_sim_v1: multiply the sensor mV values by the coefficients to get bending moments in the simulation unit (0.25 mm\*mN). This is for agents trained with simulated signals. Polarity is used to match the sign of bending moment with the simulated signals.
