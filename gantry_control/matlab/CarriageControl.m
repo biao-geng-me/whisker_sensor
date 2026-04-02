@@ -1419,6 +1419,8 @@ classdef CarriageControl < handle
                         error('Invalid numeric values in origin');
                     end
                     obj.origin_mm = [x_val, y_val];
+                    % Sync origin (steps) from origin_mm (mm)
+                    obj.origin = round(obj.origin_mm / obj.step2mm);
                     
                     % Close the form
                     delete(formFig);
