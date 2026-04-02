@@ -18,6 +18,7 @@ classdef Jakiro < handle
         pathpath_tick_period_ms = 10; % period of path tracking timer in ms
         pathpath_redraw_interval = 20; % update interval for path tracking
         outpath % output path for wavi data
+        wa_Fs = 80; % sampling rate for wavi data acquisition (Hz)
         n_rl_interval = 4; % number of samples between RL agent action updates (for rl agent control modes)
         n_ch_total = 23; % total number of channels in the state sent to the agent (for rl agent control modes)
         agent_server_address = '127.0.0.1'; % address of the agent server (for rl agent control modes)
@@ -577,6 +578,7 @@ classdef Jakiro < handle
             truncated = 0;
             action = app.net.startEpisode(app.currentState(:)'); % get initial action from agent
             app.run_start_time = datetime('now');
+            num_agent_interactions = 0;
             while true
                 t1 = tic;
                 n = n + 1;
@@ -606,10 +608,6 @@ classdef Jakiro < handle
                 
                 % CC2: agent control
                 if elapsed_time_sec > delay_s
-                    cc2_state_buffer = circshift(cc2_state_buffer, [0 -1]);
-                    cc2_state_buffer(1,end) = (elapsed_time_sec - delay_s) * 1000; % timestamp in ms relative to agent control start
-                    cc2_state_buffer(2:3,end) = app.CC2.Car.real_loc; % current position of back carriage, mm
-                    cc2_state_buffer(4:5,end) = app.CC2.Car.real_vel; % current velocity of back carriage
                     vx_in = round(action(1)*1000/app.CC2.Car.step2mm);
                     vy_in = round(action(2)*1000/app.CC2.Car.step2mm);
                     try
@@ -618,6 +616,8 @@ classdef Jakiro < handle
                         warning(ME.identifier, '%s', ME.message);
                     end
                     reward = 0; % placeholder reward
+                else
+                    app.CC2.Car.update_status_from_controller(); % just update status
                 end
 
                 % data acquisition
@@ -630,7 +630,38 @@ classdef Jakiro < handle
                 end
 
                 if elapsed_time_sec > delay_s && ~isempty(new_samples) % only get new action when there are enough data samples
+                    num_agent_interactions = num_agent_interactions + 1;
                     % construct state for agent
+
+                    % Interpolate carriage state from built-in rolling buffer using
+                    % controller-relative time: latest sample at 0 ms, older samples negative.
+                    n_q = app.n_rl_interval;
+                    dt_q_ms = 1000 / app.wa_Fs;
+                    t_query = (-(n_q-1):0) * dt_q_ms; % ms, oldest -> newest
+
+                    sb = app.CC2.Car.state_buffer;
+                    n_valid = min(app.CC2.Car.state_buffer_count, size(sb,1));
+                    cc2_state_buffer(1,:) = t_query + num_agent_interactions * app.n_rl_interval * dt_q_ms; % controller-relative time for each sample, accounting for multiple agent interactions
+                    if n_valid <= 0
+                        cc2_state_buffer(2:5,:) = zeros(4, n_q);
+                    else
+                        sb_valid = sb(end-n_valid+1:end,:); % [time, x, y, vx, vy], oldest -> newest
+                        t_rel = sb_valid(:,1) - sb_valid(end,1); % newest is 0 ms
+
+                        % Remove duplicate timestamps to keep interp1 well-defined.
+                        [t_rel_u, iu] = unique(t_rel, 'stable');
+                        state_u = sb_valid(iu, 2:5);
+
+                        if isscalar(t_rel_u)
+                            % Single sample: nearest hold for all query points.
+                            cc2_state_buffer(2:5,:) = repmat(state_u(1,:)', 1, n_q);
+                        else
+                            % Linear interpolation inside range only (no extrapolation).
+                            state_q = interp1(t_rel_u, state_u, t_query, 'linear', 0); % n_q x 4
+                            cc2_state_buffer(2:5,:) = state_q';
+                        end
+                    end
+
                     % Convert raw sensor samples (N x C) to bending moments using
                     % per-channel coefficients: column 1 for >=0, column 2 for <0.
                     pos_coeff = app.bending_moment_coefficients(:,1)';

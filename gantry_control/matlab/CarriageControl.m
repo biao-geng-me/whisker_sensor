@@ -61,6 +61,12 @@ classdef CarriageControl < handle
         controller_time1 = 0
         controller_time2 = 0
         last_status_time = []   % datetime of last status update
+
+        % rolling state buffer [controller_time_ms, real_loc_x, real_loc_y, real_vel_x, real_vel_y]
+        state_buffer_len = 100
+        state_buffer = nan(100,5)
+        state_buffer_idx = 0
+        state_buffer_count = 0
         
         % status
         real_loc = [0, 0] % physical location
@@ -1243,6 +1249,18 @@ classdef CarriageControl < handle
             if dt ~= 0
                 obj.real_vel = (obj.current_pos(1:2) - obj.prev_pos(1:2))*obj.step2mm/dt;
             end
+
+            % update rolling state buffer (shift left, append newest at end)
+            if isempty(obj.state_buffer) || size(obj.state_buffer,1) ~= obj.state_buffer_len || size(obj.state_buffer,2) ~= 5
+                obj.state_buffer = nan(obj.state_buffer_len,5);
+                obj.state_buffer_idx = 0;
+                obj.state_buffer_count = 0;
+            end
+            new_sample = [obj.controller_time2, obj.real_loc(1), obj.real_loc(2), obj.real_vel(1), obj.real_vel(2)];
+            obj.state_buffer(1:end-1,:) = obj.state_buffer(2:end,:);
+            obj.state_buffer(end,:) = new_sample;
+            obj.state_buffer_count = min(obj.state_buffer_count + 1, obj.state_buffer_len);
+            obj.state_buffer_idx = obj.state_buffer_len;
 
             % compute frame_time using wall-clock since last status update
             now_dt = datetime('now');
