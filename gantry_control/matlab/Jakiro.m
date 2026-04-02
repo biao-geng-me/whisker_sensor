@@ -260,6 +260,15 @@ classdef Jakiro < handle
             catch
             end
 
+            % Disconnect agent server
+            try
+                if ~isempty(app.net)
+                    app.net.shutdown();
+                    app.net = [];
+                end
+            catch
+            end
+
             % close UIFigure
             try
                 if isvalid(app.UIFigure)
@@ -559,16 +568,20 @@ classdef Jakiro < handle
             app.CC1.Car.moveToPositionMM(start_x-app.CC1.Car.origin_mm(1), start_y-app.CC1.Car.origin_mm(2), 20, 1, false);
             app.CC1.Car.init_pathtracking_variables(xp,yp,rp,L,start_s,thetap1);
             stop(app.CC1.redrawTimer);
-
-            % prepare CC2 for interactive control (human)
+            
+            % prepare CC2 for agent control
             app.CC2.Car.poll_gamepad = 0;
             app.CC2.Car.poll_keyboard = 1; % for interupting the agent control
-
             
-            % blocking path+ agent control loop
-            period = 12.5/1000; % seconds, hardcoded control loop period for agent control (80 Hz)
-            t0 = tic;
-            n = 0;
+            try
+                start(app.CC2.redrawTimer);
+            catch
+            end
+            app.CC2.Car.moveToPositionMM(0, start_y-app.CC2.Car.origin_mm(2), 20, 1, false); % move to same y as CC1 but x=0 to start
+            stop(app.CC2.redrawTimer);
+            
+            % blocking path+agent control loop
+            period = 1/app.wa_Fs; % seconds, control loop period for agent control (80 Hz)
             app.CC1.hArrow.Visible = 'on';
             app.CC2.hArrow.Visible = 'on';
             app.CC2.Car.cmd_npoll = 0; % reset poll counter
@@ -577,8 +590,12 @@ classdef Jakiro < handle
             is_done = 0; % track when episode is done for agent (currently only time-based truncation, no early termination condition)
             truncated = 0;
             action = app.net.startEpisode(app.currentState(:)'); % get initial action from agent
-            app.run_start_time = datetime('now');
+            
+            n = 0;
             num_agent_interactions = 0;
+            pause(2); % allow some time for water to calm down from carriages moving to start positions.
+            app.run_start_time = datetime('now');
+            t0 = tic;
             while true
                 t1 = tic;
                 n = n + 1;
@@ -610,15 +627,17 @@ classdef Jakiro < handle
                 if elapsed_time_sec > delay_s
                     vx_in = round(action(1)*1000/app.CC2.Car.step2mm);
                     vy_in = round(action(2)*1000/app.CC2.Car.step2mm);
-                    try
-                        app.CC2.Car.agentControlStep(ev, vx_in, vy_in);
-                    catch ME
-                        warning(ME.identifier, '%s', ME.message);
-                    end
-                    reward = 0; % placeholder reward
                 else
-                    app.CC2.Car.update_status_from_controller(); % just update status
+                    vx_in = round(0.15*1000/app.CC2.Car.step2mm); % move towards the path start position during the delay period before agent control starts
+                    vy_in = 0;
                 end
+                
+                try
+                    app.CC2.Car.agentControlStep(ev, vx_in, vy_in);
+                catch ME
+                    warning(ME.identifier, '%s', ME.message);
+                end
+                reward = 0; % placeholder reward
 
                 % data acquisition
                 try
