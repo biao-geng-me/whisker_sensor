@@ -827,7 +827,7 @@ classdef wavi < handle
             end
             obj.sig(end-ns_read+1:end,:) = buff;
             obj.darr(end-ns_read+1:end) = linspace(obj.darr(end-ns_read)+seconds(1/obj.Fs),...
-                                            obj.darr(end-ns_read)+seconds(ns_read/obj.Fs),ns_read);
+            obj.darr(end-ns_read)+seconds(ns_read/obj.Fs),ns_read);
         end
 
         function new_samples = remove_outliers(obj, ns_fill)
@@ -936,16 +936,8 @@ classdef wavi < handle
         function init_datalog_file(obj)
             % Get current date and time
             currentTime = datetime('now');
-            
-            % Extract desired format for filename (year, month, day, hour, minute, second)
-            fileName = sprintf('st_%04d-%02d-%02d_%02d%02d_%05.2f_%s.dat',currentTime.Year,...
-                                                                        currentTime.Month,...
-                                                                        currentTime.Day,...
-                                                                        currentTime.Hour,...
-                                                                        currentTime.Minute,...
-                                                                        currentTime.Second,...
-                                                                        obj.tag);
-            fullpath = fullfile(obj.outpath, fileName);
+
+            fullpath = obj.build_datalog_filepath(currentTime, obj.tag);
             obj.fout = fopen(fullpath, 'w');
             if obj.fout == -1
                 error('wavi:init_datalog_file','Failed to open file for writing: %s', fullpath);
@@ -970,17 +962,36 @@ classdef wavi < handle
         end
 
         function write_data_samples(obj, nnew)
-            for j=1:nnew
-                currentTime = obj.darr(end-nnew+j);
-                dtstr = sprintf('%04d-%02d-%02d %02d:%02d:%06.3f',currentTime.Year,...
-                                                                currentTime.Month,...
-                                                                currentTime.Day,...
-                                                                currentTime.Hour,...
-                                                                currentTime.Minute,...
-                                                                currentTime.Second);
+            obj.write_samples_to_file(obj.fout, obj.darr(end-nnew+1:end), obj.sig(end-nnew+1:end,:));
+        end
 
-                fprintf(obj.fout,['%s' repmat(' %12.6f',1,obj.nch) '\n'],dtstr,obj.sig(end-nnew+j,:));
+        function fullpath = write_buffer_to_file(obj, startTime, endTime, tag)
+            % Write buffered samples within [startTime, endTime] to a datalog file.
+            if nargin < 4
+                tag = '';
             end
+
+            startTime = obj.coerce_datetime_input(startTime, 'startTime');
+            endTime = obj.coerce_datetime_input(endTime, 'endTime');
+            if startTime > endTime
+                error('wavi:write_buffer_to_file', 'startTime must be earlier than or equal to endTime.');
+            end
+
+            tag = obj.sanitize_tag(tag);
+            keepMask = obj.darr >= startTime & obj.darr <= endTime;
+            if ~any(keepMask)
+                error('wavi:write_buffer_to_file', 'No buffered samples found in the requested time range.');
+            end
+
+            fullpath = obj.build_datalog_filepath(startTime, tag);
+            exportFileId = fopen(fullpath, 'w');
+            if exportFileId == -1
+                error('wavi:write_buffer_to_file', 'Failed to open file for writing: %s', fullpath);
+            end
+
+            cleanupObj = onCleanup(@() fclose(exportFileId));
+            obj.write_samples_to_file(exportFileId, obj.darr(keepMask), obj.sig(keepMask,:));
+            clear cleanupObj
         end
 
         function reset_data_buffers(obj)
@@ -1018,6 +1029,55 @@ classdef wavi < handle
     end
 
     methods (Access = private)
+        function fullpath = build_datalog_filepath(obj, currentTime, tag)
+            fileName = sprintf('st_%04d-%02d-%02d_%02d%02d_%05.2f_%s.dat', currentTime.Year,...
+                                                                        currentTime.Month,...
+                                                                        currentTime.Day,...
+                                                                        currentTime.Hour,...
+                                                                        currentTime.Minute,...
+                                                                        currentTime.Second,...
+                                                                        tag);
+            fullpath = fullfile(obj.outpath, fileName);
+        end
+
+        function write_samples_to_file(obj, fout, timeBuffer, signalBuffer)
+            if isempty(timeBuffer)
+                return
+            end
+
+            for j=1:numel(timeBuffer)
+                dtstr = obj.format_sample_datetime(timeBuffer(j));
+                fprintf(fout,['%s' repmat(' %12.6f',1,obj.nch) '\n'],dtstr,signalBuffer(j,:));
+            end
+        end
+
+        function dtstr = format_sample_datetime(~, currentTime)
+            dtstr = sprintf('%04d-%02d-%02d %02d:%02d:%06.3f',currentTime.Year,...
+                                                            currentTime.Month,...
+                                                            currentTime.Day,...
+                                                            currentTime.Hour,...
+                                                            currentTime.Minute,...
+                                                            currentTime.Second);
+        end
+
+        function dt = coerce_datetime_input(~, value, name)
+            if isa(value, 'datetime')
+                dt = value;
+                return
+            end
+
+            if ischar(value) || isstring(value)
+                try
+                    dt = datetime(value);
+                    return
+                catch me
+                    error('wavi:write_buffer_to_file', 'Invalid %s value: %s', name, me.message);
+                end
+            end
+
+            error('wavi:write_buffer_to_file', '%s must be a datetime, char, or string value.', name);
+        end
+
         function s = sanitize_tag(~, tag)
             % Replace characters that are unsafe for filenames with underscore
             try
