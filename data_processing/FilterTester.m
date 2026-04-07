@@ -82,6 +82,9 @@ classdef FilterTester < handle
 		datalogTag = ''
 		datalogChannelNames = {}
 		datalogSelectedChannel = 1
+		csvData = []
+		csvChannelNames = {}
+		csvSelectedChannel = 1
 	end
 
 	methods
@@ -341,14 +344,8 @@ classdef FilterTester < handle
 
 			try
 				if strcmpi(ext, '.csv')
-					m = readmatrix(fullPath);
-					if isempty(m), error('CSV is empty.'); end
-					signal = m(:, 1);
 					app.clearDatalogState();
-					app.loadedDataType = 'csv';
-					app.loadedSourcePath = fullPath;
-					app.applyLoadedSignal(signal, [], max(1, app.efFs.Value));
-					app.setStatus(sprintf('Loaded %s  (%d samples)', fileName, numel(app.raw)));
+					app.loadCsvSource(fullPath);
 				elseif strcmpi(ext, '.mat')
 					s    = load(fullPath);
 					vars = fieldnames(s);
@@ -356,11 +353,13 @@ classdef FilterTester < handle
 					signal = s.(vars{1});
 					signal = signal(:);
 					app.clearDatalogState();
+					app.clearCsvState();
 					app.loadedDataType = 'mat';
 					app.loadedSourcePath = fullPath;
 					app.applyLoadedSignal(signal, [], max(1, app.efFs.Value));
 					app.setStatus(sprintf('Loaded %s  (%d samples)', fileName, numel(app.raw)));
 				elseif any(strcmpi(ext, {'.dat', '.txt'}))
+					app.clearCsvState();
 					app.loadDatalogSource(fullPath);
 				else
 					error('Unsupported file type: %s', ext);
@@ -552,7 +551,11 @@ classdef FilterTester < handle
 
 		function onSynthConfig(app)
 			if ~strcmp(app.ddData.Value, 'Synthetic signal')
-				app.configureDatalogChannel();
+				if strcmp(app.loadedDataType, 'csv')
+					app.configureCsvChannel();
+				else
+					app.configureDatalogChannel();
+				end
 				return;
 			end
 
@@ -923,9 +926,9 @@ classdef FilterTester < handle
 			app.btnLoad.Enable = FilterTester.onOff(useLoad);
 			if useLoad
 				app.btnSynthConfig.Text = 'Configure channel';
-				hasDatalog = strcmp(app.loadedDataType, 'datalog') && ...
-					~isempty(app.datalogChannelNames);
-				app.btnSynthConfig.Enable = FilterTester.onOff(hasDatalog);
+				hasDatalog = strcmp(app.loadedDataType, 'datalog') && ~isempty(app.datalogChannelNames);
+				hasCsv = strcmp(app.loadedDataType, 'csv') && ~isempty(app.csvChannelNames);
+				app.btnSynthConfig.Enable = FilterTester.onOff(hasDatalog || hasCsv);
 			else
 				app.btnSynthConfig.Text = 'Configure / Tune';
 				app.btnSynthConfig.Enable = 'on';
@@ -938,6 +941,12 @@ classdef FilterTester < handle
 			app.datalogTag = '';
 			app.datalogChannelNames = {};
 			app.datalogSelectedChannel = 1;
+		end
+
+		function clearCsvState(app)
+			app.csvData = [];
+			app.csvChannelNames = {};
+			app.csvSelectedChannel = 1;
 		end
 
 		function applyLoadedSignal(app, signal, t, fs)
@@ -1010,6 +1019,35 @@ classdef FilterTester < handle
 			app.applyDatalogChannel(app.datalogSelectedChannel);
 		end
 
+		function loadCsvSource(app, fullPath)
+			tbl = readtable(fullPath);
+			if isempty(tbl) || width(tbl) == 0
+				error('CSV is empty.');
+			end
+
+			nVars = width(tbl);
+			isNumericCol = false(1, nVars);
+			for idx = 1:nVars
+				col = tbl{:, idx};
+				isNumericCol(idx) = isnumeric(col) || islogical(col);
+			end
+			if ~any(isNumericCol)
+				error('CSV does not contain numeric channels.');
+			end
+
+			csvData = double(tbl{:, isNumericCol});
+			if isempty(csvData)
+				error('CSV numeric data is empty.');
+			end
+
+			app.csvData = csvData;
+			app.csvChannelNames = app.getCsvChannelNames(tbl, isNumericCol);
+			app.csvSelectedChannel = min(max(1, app.csvSelectedChannel), numel(app.csvChannelNames));
+			app.loadedDataType = 'csv';
+			app.loadedSourcePath = fullPath;
+			app.applyCsvChannel(app.csvSelectedChannel);
+		end
+
 		function configureDatalogChannel(app)
 			if ~strcmp(app.loadedDataType, 'datalog') || isempty(app.datalogChannelNames)
 				app.setStatus('Load a sensor datalog before configuring a channel');
@@ -1066,6 +1104,75 @@ classdef FilterTester < handle
 					delete(dlg);
 				end
 			end
+		end
+
+		function configureCsvChannel(app)
+			if ~strcmp(app.loadedDataType, 'csv') || isempty(app.csvChannelNames)
+				app.setStatus('Load a CSV file before configuring a channel');
+				return;
+			end
+
+			dlg = uifigure('Name', 'Select CSV Channel', ...
+				'Position', [250 250 420 120], ...
+				'WindowStyle', 'modal', ...
+				'Resize', 'off');
+
+			g = uigridlayout(dlg, [3 2], ...
+				'RowHeight', {22, 28, 32}, ...
+				'ColumnWidth', {'fit', '1x'}, ...
+				'Padding', [10 10 10 10], ...
+				'RowSpacing', 8, ...
+				'ColumnSpacing', 8);
+
+			uilabel(g, 'Text', 'Channel');
+			ddChannel = uidropdown(g, ...
+				'Items', app.csvChannelNames, ...
+				'Value', app.csvChannelNames{app.csvSelectedChannel});
+			ddChannel.Layout.Row = 1;
+			ddChannel.Layout.Column = 2;
+
+			metaLabel = uilabel(g, 'Text', app.loadedSourcePath, 'WordWrap', 'on');
+			metaLabel.Layout.Row = 2;
+			metaLabel.Layout.Column = [1 2];
+
+			btnGrid = uigridlayout(g, [1 2], ...
+				'ColumnWidth', {'1x', '1x'}, ...
+				'Padding', [0 0 0 0], ...
+				'RowSpacing', 0, ...
+				'ColumnSpacing', 8);
+			btnGrid.Layout.Row = 3;
+			btnGrid.Layout.Column = [1 2];
+
+			uibutton(btnGrid, 'Text', 'Apply', ...
+				'ButtonPushedFcn', @(~,~) applySelection());
+			uibutton(btnGrid, 'Text', 'Close', ...
+				'ButtonPushedFcn', @(~,~) delete(dlg));
+
+			function applySelection()
+				idx = find(strcmp(app.csvChannelNames, ddChannel.Value), 1);
+				if isempty(idx)
+					idx = app.csvSelectedChannel;
+				end
+				app.applyCsvChannel(idx);
+				if isvalid(dlg)
+					delete(dlg);
+				end
+			end
+		end
+
+		function applyCsvChannel(app, channelIdx)
+			if isempty(app.csvData) || size(app.csvData, 2) < channelIdx
+				error('Requested CSV channel is not available.');
+			end
+
+			signal = app.csvData(:, channelIdx);
+			app.csvSelectedChannel = channelIdx;
+			app.loadedDataType = 'csv';
+			app.applyLoadedSignal(signal, [], max(1, app.efFs.Value));
+			[~, fileName, ext] = fileparts(app.loadedSourcePath);
+			channelName = app.csvChannelNames{channelIdx};
+			app.setStatus(sprintf('Loaded %s%s  [%s]  (%d samples)', ...
+				fileName, ext, channelName, numel(app.raw)));
 		end
 
 		function applyDatalogChannel(app, channelIdx)
@@ -1136,6 +1243,25 @@ classdef FilterTester < handle
 					name = strrep(name, '_', ' ');
 				end
 				names{idx} = sprintf('Channel %d: %s', idx, name);
+			end
+		end
+
+		function names = getCsvChannelNames(app, tbl, isNumericCol)
+			idxCols = find(isNumericCol);
+			varNames = tbl.Properties.VariableNames;
+			names = cell(1, numel(idxCols));
+			for n = 1:numel(idxCols)
+				idx = idxCols(n);
+				name = '';
+				if idx <= numel(varNames)
+					name = varNames{idx};
+				end
+				if isempty(name) || startsWith(name, 'Var')
+					name = sprintf('Column %d', idx);
+				else
+					name = strrep(name, '_', ' ');
+				end
+				names{n} = sprintf('Channel %d: %s', n, name);
 			end
 		end
 
