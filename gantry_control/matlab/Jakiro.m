@@ -27,9 +27,7 @@ classdef Jakiro < handle
         currentState = []; % current state for RL agent control
         calibration_data_file = 'sensor_calibration/calibration_sim_v1.csv' % calibration data file for converting raw sensor readings to bending moments (for rl agent control modes)
         exp2sim_channel_map_file = 'sensor_calibration/ch_map_sim_v1.csv'; % mapping from hardware channels to simulated sensor channels for RL agent control modes
-        bending_moment_coefficients = [];
-        bending_moment_polarity = [];
-        exp2sim_channel_map = [];
+        signal_to_bending_moment = [];
     end
     methods
         function app = Jakiro()
@@ -128,8 +126,14 @@ classdef Jakiro < handle
             addlistener(app.ExpPanel,'PathAgentPre',@(src,evt) app.onPathAgentPre(src,evt));
             addlistener(app.ExpPanel,'PathAgentLive',@(src,evt) app.onPathAgentLive(src,evt));
             app.connect_agent_server(); % connect to agent server at startup (for RL agent control modes)
-            app.process_calibration_data();
-            app.get_exp2sim_channel_map();
+
+            try
+                app.signal_to_bending_moment = SignalToBendingMoment( ...
+                    app.calibration_data_file, app.exp2sim_channel_map_file);
+                fprintf('Bending moment conversion configured.\n');
+            catch me
+                error('SignalConversionError:InitFailed', 'Failed to initialize SignalToBendingMoment: %s', me.message);
+            end
         end
     
         function connect_agent_server(app)
@@ -163,44 +167,6 @@ classdef Jakiro < handle
             app.currentState = zeros(app.n_ch_total,app.n_rl_interval); % hardware state buffer
         end
 
-        function process_calibration_data(app)
-            % Load calibration data
-            try
-                calib_data = readtable(app.calibration_data_file);
-                % calibration data should have columns 'Sensor_ID,Drag_Pos,Drag_Neg,Lift_Pos,Lift_Neg,Drag_Polarity,Lift_Polarity'
-                % Polarity is used for sign consistency
-                % no ID mapping is performed, assuming calibration file is ordered to match installed sensor layout
-                DP = calib_data.Drag_Pos; % raw sensor readings
-                DN = calib_data.Drag_Neg;
-                LP = calib_data.Lift_Pos;
-                LN = calib_data.Lift_Neg;
-
-                coeffs = [LP DP; LN DN]';
-                app.bending_moment_coefficients = reshape(coeffs(:),[],2);
-                polarity = [calib_data.Lift_Polarity, calib_data.Drag_Polarity]';
-                app.bending_moment_polarity = polarity(:);
-                fprintf('Bending moment coefficients and polarity configured.\n');
-            catch ME
-                error('Calibration Data Error', 'Failed to calculate bending moment coefficients: %s', ME.message);
-            end
-        end
-
-        function get_exp2sim_channel_map(app)
-            % Load channel mapping from file
-            try
-                map_table = readtable(app.exp2sim_channel_map_file);
-                % Expecting columns 'ExpChannel' and 'SimChannel'
-                exp_channels = map_table.exp_ch;
-                sim_channels = map_table.sim_ch;
-                if length(unique(exp_channels)) ~= length(exp_channels) || length(unique(sim_channels)) ~= length(sim_channels)
-                    error('Channel mapping file contains duplicate channels.');
-                end
-                app.exp2sim_channel_map = exp_channels;
-                fprintf('Experiment to simulation channel mapping loaded.\n');
-            catch ME
-                error('Channel Mapping Error', 'Failed to load experiment to simulation channel mapping: %s', ME.message);
-            end
-        end
     end
 
     methods % event handlers
@@ -703,15 +669,8 @@ classdef Jakiro < handle
                         end
                     end
 
-                    % Convert raw sensor samples (N x C) to bending moments using
-                    % per-channel coefficients: column 1 for >=0, column 2 for <0.
-                    pos_coeff = app.bending_moment_coefficients(:,1)';
-                    neg_coeff = app.bending_moment_coefficients(:,2)';
-                    polarity = app.bending_moment_polarity';
-                    sample_sign_mask = new_samples >= 0;
-                    bending_moments = new_samples .* (sample_sign_mask .* pos_coeff + (~sample_sign_mask) .* neg_coeff) .* polarity;
-
-                    bending_moments = bending_moments(:,app.exp2sim_channel_map); % reorder channels to match simulation state expected by agent
+                    bending_moments = app.signal_to_bending_moment.convertSamples( ...
+                        new_samples, reorderToSimulation=true);
 
                     app.currentState = [cc2_state_buffer; bending_moments']; % 5 rows of carriage state + 18 rows of daq data, each with n_rl_interval columns
                     % send state to agent and receive action
