@@ -6,7 +6,7 @@ function [dat_table,dt_str,tag] = load_datalog(pathname)
     try
         dat_table = readtable(pathname, "FileType","fixedwidth");
     catch ME
-        error('load_datalog:readtable','Failed to readtable from %s', filepath);
+        error('load_datalog:readtable','Failed to readtable from %s: %s', pathname, ME.message);
     end
 
     % extract meta data from datalog filename
