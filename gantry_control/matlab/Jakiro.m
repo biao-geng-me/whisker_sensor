@@ -713,6 +713,7 @@ classdef Jakiro < handle
             app.CC2.hArrow.Visible = 'off';
             app.WA.is_recording = false;
             app.WA.close_datafile();
+            app.WA.write_buffer_to_file(app.run_start_time, datetime('now'), app.WA.tag);
 
             % Signal episode end to the agent server and wait for sync
             try
