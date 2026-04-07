@@ -60,6 +60,7 @@ classdef wavi < handle
         nch = 1;
         t_fft = 1;
         scale = 1;
+        filter_add_offset_back = false; % add V0 back after filtering when true
         ch_map = []; % mapping from raw channels to visualized channels (length should be nch); if empty, defaults to 1:nch
         t_buffer = 30; % time length for signal buffer, seconds
         t_spec = 20; % spectrogram duration
@@ -107,8 +108,10 @@ classdef wavi < handle
                 options.show_spectrogram = true;
                 options.show_spectrum = true;
                 options.nsensor = 9;
+                options.t_buffer = 30; % time length for signal buffer, seconds
                 options.t_fft = 1;
                 options.scale = 1;
+                options.filter_add_offset_back (1,1) logical = false;
                 options.ch_map = [];
                 options.ns_spec = [];
                 options.n_update = 1; % visualization update frequency, multiple of n_fill, i.e. update every n_fill*n_update read
@@ -152,6 +155,7 @@ classdef wavi < handle
             obj.ns_read          = options.ns_read;
             obj.tag              = options.tag;
             obj.tmax             = options.tmax;
+            obj.t_buffer          = options.t_buffer;
 
             if isempty(options.outpath)
                 obj.outpath = obj.set_outpath();
@@ -167,6 +171,7 @@ classdef wavi < handle
             obj.nsensor          = options.nsensor;
             obj.t_fft            = options.t_fft;
             obj.scale            = options.scale;
+            obj.filter_add_offset_back = options.filter_add_offset_back;
             obj.n_update         = options.n_update;
             obj.ns_fill          = options.ns_fill;
 
@@ -746,10 +751,15 @@ classdef wavi < handle
                 fprintf('Read %d frames serial data took %f seconds\n', obj.ns_read, toc);
 
                 if mod(obj.readCount, obj.n_fill) == 0
-                    new_samples =obj.remove_outliers(obj.ns_fill) - obj.V0; % return the new samples with offset removed
+                    obj.remove_outliers(obj.ns_fill);
                 end
-                obj.filter_signals();
-                % rl_filtering could be added here in the future if needed
+
+                if isempty(obj.sig_filter)
+                    new_samples = obj.sig(end-obj.ns_read+1:end,:) - obj.V0; % return the raw samples with offset removed 
+                else
+                    obj.filter_signals();
+                    new_samples = obj.sig_filtered(end-obj.ns_read+1:end,:);
+                end
 
                 % if mod(obj.readCount, obj.n_update*obj.n_fill) == 0
                 if 1==0
@@ -869,6 +879,7 @@ classdef wavi < handle
         function filter_signals(obj)
             % Apply filter to the latest ns_read raw samples using persistent
             % state in SigFilter so older history contributes for higher order filters.
+            % Remove measured sensor offset before filtering and optionally add it back.
             if isempty(obj.sig_filter)
                 return
             end
@@ -876,7 +887,15 @@ classdef wavi < handle
             i0 = size(obj.sig, 1) - obj.ns_read + 1;
             i1 = size(obj.sig, 1);
             rawBlock = obj.sig(i0:i1, :);
-            obj.sig_filtered(i0:i1, :) = obj.sig_filter.apply(rawBlock);
+            if ~isempty(obj.V0)
+                rawBlock = bsxfun(@minus, rawBlock, obj.V0);
+            end
+
+            filteredBlock = obj.sig_filter.apply(rawBlock);
+            if obj.filter_add_offset_back && ~isempty(obj.V0)
+                filteredBlock = bsxfun(@plus, filteredBlock, obj.V0);
+            end
+            obj.sig_filtered(i0:i1, :) = filteredBlock;
         end
 
         function do_fft(obj)
@@ -1022,6 +1041,7 @@ classdef wavi < handle
 
             cleanupObj = onCleanup(@() fclose(exportFileId));
             obj.write_samples_to_file(exportFileId, obj.darr(keepMask), obj.sig(keepMask,:));
+            fprintf('Exported %d samples to file: %s\n', sum(keepMask), fullpath);
             clear cleanupObj
 
             % Optionally export filtered buffer to a separate sibling file.
@@ -1033,6 +1053,7 @@ classdef wavi < handle
                 end
                 filteredCleanupObj = onCleanup(@() fclose(filteredFileId));
                 obj.write_samples_to_file(filteredFileId, obj.darr(keepMask), obj.sig_filtered(keepMask,:));
+                fprintf('Exported %d filtered samples to file: %s\n', sum(keepMask), filteredPath);
                 clear filteredCleanupObj
             end
         end
