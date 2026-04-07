@@ -44,6 +44,7 @@ classdef wavi < handle
     properties % sampling settings
         s 
         baudrate = 2000000
+        sig_filter = [] % optional SigFilter object for streaming filtering
         A_fft
         Fs
         ns_read % number of samples to read in each loop
@@ -75,6 +76,7 @@ classdef wavi < handle
         ns_tot % total number of samples in buffer
         darr  % datetime array
         sig   % signal data
+        sig_filtered % filtered signal data
         ns_spec % number of samples to do spec
         spec_data % spectrogram data (fft history)
         fft_map % latest fft results nfreq*nch
@@ -113,6 +115,7 @@ classdef wavi < handle
                 options.ns_fill = 6; % looks like 6 is the magic number to filter out random spikes without turning the signal into a DC
                 options.n_fill = 1;
                 options.auto_stop = 0;
+                options.sig_filter = [];
                 % notes on outlier removal:
                 % it should be done on >=6 new samples, otherwise the data will eventually become constants
                 options.baudrate = 2000000;
@@ -167,6 +170,20 @@ classdef wavi < handle
             obj.n_update         = options.n_update;
             obj.ns_fill          = options.ns_fill;
 
+            if isempty(options.sig_filter)
+                obj.sig_filter = [];
+            elseif isa(options.sig_filter, 'SigFilter')
+                obj.sig_filter = options.sig_filter;
+                obj.sig_filter.configure(struct('fs', obj.Fs, 'nChannels', obj.nch));
+            elseif isstruct(options.sig_filter)
+                tmpOpt = options.sig_filter;
+                tmpOpt.fs = obj.Fs;
+                tmpOpt.nChannels = obj.nch;
+                obj.sig_filter = SigFilter(tmpOpt);
+            else
+                error('wavi:InvalidSigFilter', 'options.sig_filter must be empty, a SigFilter, or a struct.');
+            end
+
             % auto_stop can be set to automatically stop recording after N seconds
             obj.auto_stop = options.auto_stop;
             % enforce minimum record length
@@ -192,10 +209,15 @@ classdef wavi < handle
                 obj.ch_map = options.ch_map;
             end
 
+            if ~isempty(obj.sig_filter)
+                obj.sig_filter.configure(struct('fs', obj.Fs, 'nChannels', obj.nch));
+            end
+
             %%% setup data buffers
             % maximum buffered length
             obj.ns_tot = round(obj.t_buffer*obj.Fs);
             obj.sig = nan(obj.ns_tot,obj.nch);
+            obj.sig_filtered = nan(obj.ns_tot,obj.nch);
             obj.darr = linspace(datetime('now')-seconds(obj.t_buffer),datetime('now'),obj.ns_tot);
             obj.darr.Format = 'dd-MMM-uuuu HH:mm:ss.SSS';  
 
@@ -663,6 +685,8 @@ classdef wavi < handle
                     obj.remove_outliers(obj.ns_fill);
                 end
 
+                obj.filter_signals();
+
                 if mod(obj.readCount, obj.n_update*obj.n_fill) == 0
                     % update visuals only when not paused; data read continues
                     if ~obj.is_paused
@@ -724,6 +748,7 @@ classdef wavi < handle
                 if mod(obj.readCount, obj.n_fill) == 0
                     new_samples =obj.remove_outliers(obj.ns_fill) - obj.V0; % return the new samples with offset removed
                 end
+                obj.filter_signals();
                 % rl_filtering could be added here in the future if needed
 
                 % if mod(obj.readCount, obj.n_update*obj.n_fill) == 0
@@ -808,6 +833,7 @@ classdef wavi < handle
 
             % shift buffer
             obj.sig(1:end-ns_read,:) = obj.sig(ns_read+1:end,:);
+            obj.sig_filtered(1:end-ns_read,:) = obj.sig_filtered(ns_read+1:end,:);
             obj.darr(1:end-ns_read) = obj.darr(ns_read+1:end);
             buff = zeros(ns_read,obj.nch);
 
@@ -826,6 +852,7 @@ classdef wavi < handle
                 buff(:,obj.iblank) = 0;
             end
             obj.sig(end-ns_read+1:end,:) = buff;
+            obj.sig_filtered(end-ns_read+1:end,:) = nan(ns_read,obj.nch);
             obj.darr(end-ns_read+1:end) = linspace(obj.darr(end-ns_read)+seconds(1/obj.Fs),...
             obj.darr(end-ns_read)+seconds(ns_read/obj.Fs),ns_read);
         end
@@ -839,13 +866,17 @@ classdef wavi < handle
             obj.sig(end-nnew+1:end,:) = new_samples;
         end
         
-        function rl_filtering(obj)
-            % placeholder for future real-time filtering of obj.sig
-            % since this filtering is real-time, it can only change the most recent samples, e.g. obj.sig(end-obj.ns_read+1:end,:)
-            % however, earlier samples can be used for calculation.
-            buff = obj.sig(end-obj.ns_read:end,:);
-            % todo
-            obj.sig(end-obj.ns_read+1:end,:) = buff(2:end,:); % replace with filtered version of buff
+        function filter_signals(obj)
+            % Apply filter to the latest ns_read raw samples using persistent
+            % state in SigFilter so older history contributes for higher order filters.
+            if isempty(obj.sig_filter)
+                return
+            end
+
+            i0 = size(obj.sig, 1) - obj.ns_read + 1;
+            i1 = size(obj.sig, 1);
+            rawBlock = obj.sig(i0:i1, :);
+            obj.sig_filtered(i0:i1, :) = obj.sig_filter.apply(rawBlock);
         end
 
         function do_fft(obj)
@@ -992,13 +1023,29 @@ classdef wavi < handle
             cleanupObj = onCleanup(@() fclose(exportFileId));
             obj.write_samples_to_file(exportFileId, obj.darr(keepMask), obj.sig(keepMask,:));
             clear cleanupObj
+
+            % Optionally export filtered buffer to a separate sibling file.
+            if ~isempty(obj.sig_filter)
+                filteredPath = obj.add_file_suffix(fullpath, '_filtered');
+                filteredFileId = fopen(filteredPath, 'w');
+                if filteredFileId == -1
+                    error('wavi:write_buffer_to_file', 'Failed to open filtered file for writing: %s', filteredPath);
+                end
+                filteredCleanupObj = onCleanup(@() fclose(filteredFileId));
+                obj.write_samples_to_file(filteredFileId, obj.darr(keepMask), obj.sig_filtered(keepMask,:));
+                clear filteredCleanupObj
+            end
         end
 
         function reset_data_buffers(obj)
             % reset data buffers
             obj.sig = nan(obj.ns_tot,obj.nch);
+            obj.sig_filtered = nan(obj.ns_tot,obj.nch);
             obj.darr = linspace(datetime('now')-seconds(obj.t_buffer),datetime('now'),obj.ns_tot);
             obj.spec_data = zeros(obj.nfreq*obj.nch,obj.t_spec*ceil(obj.Fs/obj.ns_spec));
+            if ~isempty(obj.sig_filter)
+                obj.sig_filter.configure(struct('fs', obj.Fs, 'nChannels', obj.nch));
+            end
         end
 
         function reset(obj)
@@ -1076,6 +1123,11 @@ classdef wavi < handle
             end
 
             error('wavi:write_buffer_to_file', '%s must be a datetime, char, or string value.', name);
+        end
+
+        function outpath = add_file_suffix(~, inpath, suffix)
+            [fdir, fname, ext] = fileparts(inpath);
+            outpath = fullfile(fdir, [fname suffix ext]);
         end
 
         function s = sanitize_tag(~, tag)
