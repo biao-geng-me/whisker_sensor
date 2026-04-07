@@ -19,6 +19,7 @@ classdef Jakiro < handle
         pathpath_redraw_interval = 20; % update interval for path tracking
         outpath % output path for wavi data
         wa_Fs = 80; % sampling rate for wavi data acquisition (Hz)
+        num_whiskers = 9;
         n_rl_interval = 4; % number of samples between RL agent action updates (for rl agent control modes)
         n_ch_total = 23; % total number of channels in the state sent to the agent (for rl agent control modes)
         agent_server_address = '127.0.0.1'; % address of the agent server (for rl agent control modes)
@@ -100,9 +101,11 @@ classdef Jakiro < handle
                 mkdir(outpath);
             end
             app.outpath = outpath;
-            app.WA = wavi(wa_panel,false,n_update=1,ns_read=app.n_rl_interval,ns_fill=6,...
+            app.WA = wavi(wa_panel,false,nsensor=app.num_whiskers,...
+                            n_update=1,ns_read=app.n_rl_interval,ns_fill=6,...
                             ch_map =load('channel_map.txt'),... % not standalone mode
                             outpath = outpath,...
+                            t_buffer = 120,...
                             scale = 10);
 
             % Experiment control panel in row 2, column 3
@@ -136,6 +139,7 @@ classdef Jakiro < handle
             config.max_episodes = MAX_EPISODES;
             config.sample_rate = SAMPLE_RATE;
             config.dt = 1/SAMPLE_RATE;
+            config.num_whiskers = app.num_whiskers;
             % connect_agent_server Connect to the agent server at the specified address and port
             try
                 app.net = NetworkClient(app.agent_server_address, app.agent_server_port,STATE_DIM, ACTION_DIM);
@@ -732,6 +736,15 @@ classdef Jakiro < handle
             app.CC2.hArrow.Visible = 'off';
             app.WA.is_recording = false;
             app.WA.close_datafile();
+
+            % Signal episode end to the agent server and wait for sync
+            try
+                if ~isempty(app.net)
+                    app.net.syncWithHPC();
+                end
+            catch ME
+                warning('AgentSyncError', 'Failed to sync with agent server: %s', ME.message);
+            end
         end
 
         function onPathAgentLive(app, ~, ~)

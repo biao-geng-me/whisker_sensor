@@ -2,6 +2,10 @@ from connection_manager import ConnectionManager
 from agent_wrapper import AgentWrapper
 from hpc_client import HPCClient
 import time
+import csv
+import os
+import datetime
+import numpy as np
 
 # Protocol Header Bytes
 CMD_START    = 0x01
@@ -38,10 +42,23 @@ def main():
     net.send_string("READY")
     
     # Variables derived from config
-    state_dim = config.get("state_dim", 4)
+    state_dim = config.get("state_dim")
+    action_dim = config.get("action_dim")
+    n_rl_interval = config.get("n_rl_interval")
+    n_ch_total = config.get("n_ch_total")
+    num_whiskers = config.get("num_whiskers", (n_ch_total - 5)//2)  # Assuming first 5 are t, x, y, x_vel, y_vel
+    obs_var_names = make_obs_var_names(num_whiskers)
     # Total received per step = states + 1 reward + 1 done flag + 1 truncated flag
     step_msg_size = state_dim + 3 
     record_trajectory = config.get("record_trajectory", False)  # Optional trajectory recording
+
+    # Trajectory output directory (episode_trajectories/ relative to this script)
+    traj_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'episode_trajectories')
+    os.makedirs(traj_dir, exist_ok=True)
+
+    # Per-episode trajectory buffer: list of observation rows using obs_var_names
+    episode_trajectory = []
+    episode_step = 0
     
     # Latency tracking
     step_latencies = []  # Track latency for each step in current episode
@@ -67,6 +84,8 @@ def main():
             recv_times = []
             agent_times = []
             send_times = []
+            episode_trajectory = []
+            episode_step = 0
             print(f"\n[Main] --- New Episode {episode_num} Started ---")
             initial_data = net.receive_doubles(step_msg_size)
             initial_state = initial_data[0:state_dim]
@@ -90,13 +109,28 @@ def main():
             reward = step_data[state_dim]
             done = step_data[state_dim + 1]
             truncated = step_data[state_dim + 2]
+            episode_done = (done >= 0.5) or bool(truncated)
             
             # Time: agent inference and trajectory recording
             agent_start = time.perf_counter()
             action = agent.step(state, reward, done, truncated, record=record_trajectory)
             agent_ms = (time.perf_counter() - agent_start) * 1000
             agent_times.append(agent_ms)
-            
+
+            # Record step observations to episode trajectory (state only)
+            episode_step += 1
+            state_arr = np.asarray(state, dtype=np.float64)
+            expected_state_size = n_rl_interval * n_ch_total
+            if state_arr.size != expected_state_size:
+                print(
+                    f"[Warn] State size mismatch at step {episode_step}: "
+                    f"got {state_arr.size}, expected {expected_state_size}. Skipping trajectory row(s)."
+                )
+            else:
+                state_mat = state_arr.reshape(n_rl_interval, n_ch_total)
+                for obs_row in state_mat:
+                    episode_trajectory.append(dict(zip(obs_var_names, obs_row.tolist())))
+
             # Time: send action back to MATLAB
             send_start = time.perf_counter()
             if action is not None:
@@ -116,8 +150,18 @@ def main():
                 print(f"[Step {len(step_latencies):5d}] Total: {avg_total:.3f}ms | Recv: {avg_recv:.3f}ms | Agent: {avg_agent:.3f}ms | Send: {avg_send:.3f}ms")
                 
         elif header == CMD_END_SYNC:
-            # 0x03: End Episode & Sync with HPC
-            print("[Main] Episode ended. Syncing...")
+            # 0x03: End Episode & Sync with HPC — save trajectory CSV
+            print("[Main] Episode ended. Saving trajectory and syncing...")
+
+            if episode_trajectory:
+                ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+                csv_path = os.path.join(traj_dir, f'traj_{ts}_ep{episode_num:04d}.csv')
+                fieldnames = obs_var_names
+                with open(csv_path, 'w', newline='') as f:
+                    writer = csv.DictWriter(f, fieldnames=fieldnames)
+                    writer.writeheader()
+                    writer.writerows(episode_trajectory)
+                print(f"[Main] Trajectory saved: {csv_path} ({len(episode_trajectory)} rows)")
             
             # Print detailed latency statistics for this episode
             if step_latencies:
@@ -149,6 +193,13 @@ def main():
     print("--- Shutting Down ---")
     hpc.close()
     net.close()
+
+def make_obs_var_names(num_whiskers: int) -> list[str]:
+    return ['t', 'x', 'y', 'x_vel', 'y_vel'] + [
+        f'M{component}{index}'
+        for index in range(1, num_whiskers + 1)
+        for component in ('L', 'D') # whisker simulators send lift moment and drag moment in order
+    ]
 
 if __name__ == "__main__":
     main()
