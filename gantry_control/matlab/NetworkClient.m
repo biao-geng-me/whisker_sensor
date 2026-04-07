@@ -90,7 +90,7 @@ classdef NetworkClient < handle
             obj.outStream.flush();
             
             % Block until Python says it's done
-            obj.waitForString('SYNC_COMPLETE');
+            obj.waitForString('SYNC_COMPLETE', 5*1000);
             fprintf('[Network] HPC Sync complete. Weights updated.\n');
         end
         
@@ -153,9 +153,34 @@ classdef NetworkClient < handle
             end
         end
         
-        function waitForString(obj, expectedStr)
+        function waitForString(obj, expectedStr, timeoutMs)
             % Reads a 4-byte length header, then reads the string and compares
-            msgLength = obj.inStream.readInt();
+            if nargin < 3
+                timeoutMs = 10000;
+            end
+
+            previousTimeout = obj.socket.getSoTimeout();
+            cleanup = onCleanup(@() obj.socket.setSoTimeout(previousTimeout));
+            obj.socket.setSoTimeout(timeoutMs);
+
+            try
+                msgLength = obj.inStream.readInt();
+            catch ME
+                if contains(char(ME.message), 'Read timed out')
+                    error('NetworkClient:Timeout', ...
+                        'Timed out waiting for "%s" after %.1f s.', ...
+                        expectedStr, timeoutMs / 1000);
+                end
+                rethrow(ME);
+            end
+
+            maxMessageLength = 1024;
+            if msgLength < 0 || msgLength > maxMessageLength
+                error('NetworkClient:InvalidMessageLength', ...
+                    ['Received invalid string length %d while waiting for "%s". ' ...
+                     'The TCP stream is out of sync.'], ...
+                    msgLength, expectedStr);
+            end
             
             byteArr = zeros(1, msgLength, 'int8');
             for i = 1:msgLength

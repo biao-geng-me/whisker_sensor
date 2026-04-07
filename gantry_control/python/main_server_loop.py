@@ -133,7 +133,7 @@ def main():
 
             # Time: send action back to MATLAB
             send_start = time.perf_counter()
-            if action is not None:
+            if (not episode_done) and action is not None:
                 net.send_doubles(action)
             send_ms = (time.perf_counter() - send_start) * 1000
             send_times.append(send_ms)
