@@ -101,9 +101,18 @@ classdef Jakiro < handle
                 mkdir(outpath);
             end
             app.outpath = outpath;
+            sig_filter_options = struct('filterType','lowpass-iir',...
+                                        'fs',app.wa_Fs,...
+                                        'order',3,...
+                                        'cutoffHz',2,...
+                                        'highpassHz',0.01,...
+                                        'gain',1.2,...
+                                        'nChannels',app.num_whiskers*2);
             app.WA = wavi(wa_panel,false,nsensor=app.num_whiskers,...
                             n_update=1,ns_read=app.n_rl_interval,ns_fill=6,...
                             ch_map =load('channel_map.txt'),... % not standalone mode
+                            sig_filter = SigFilter(sig_filter_options),...
+                            filter_add_offset_back = false,... % remove offset for rl
                             outpath = outpath,...
                             t_buffer = 120,...
                             scale = 10);
@@ -291,6 +300,18 @@ classdef Jakiro < handle
                 return
             end
 
+            % prepare daq first
+            try
+                if ~isempty(app.WA.s)
+                    % app.WA.is_recording = true;
+                    % app.WA.init_datalog_file();
+                    app.WA.align_data_read();
+                    app.WA.average_signal_as_offset(round(app.WA.Fs));
+                    app.WA.reset_data_buffers();
+                end
+            catch
+            end
+            
             % set velocities
             app.CC1.Car.vel_max = round(v1*1000/app.CC1.Car.step2mm);
             app.CC2.Car.vel_max = round(v2*1000/app.CC2.Car.step2mm);
@@ -327,29 +348,22 @@ classdef Jakiro < handle
                 catch
                 end
             end
-            
-            % prepare daq
-            try
-                if ~isempty(app.WA.s)
-                    app.WA.tag = sprintf('%s_%s-v1=%.2f_%s-v2=%.2f_delay=%.1f',run_tag,pathtag1,v1,pathtag2,v2,delay_s);
-                    app.WA.is_recording = true;
-                    app.WA.init_datalog_file();
-                    app.WA.align_data_read();
-                    app.WA.average_signal_as_offset(round(app.WA.Fs));
-                    app.WA.reset_data_buffers();
-                end
-            catch
-            end
-            app.run_start_time = datetime('now');
+
             % start(app.pathpathTimer);
 
             % blocking path tracking loop
             period = app.pathpath_tick_period_ms/1000; % seconds
-            t0 = tic;
-            n = 0;
             app.CC1.hArrow.Visible = 'on';
             app.CC2.hArrow.Visible = 'on';
+                
+            if ~isempty(app.WA.s)
+                app.WA.tag = sprintf('%s_%s-v1=%.2f_%s-v2=%.2f_delay=%.1f',run_tag,pathtag1,v1,pathtag2,v2,delay_s);
+                app.WA.align_data_read(); % clear samples during carriage movement before starting
+            end
 
+            n = 0;
+            app.run_start_time = datetime('now');
+            t0 = tic;
             % Main loop: build src/event and call pathTrackingTick(app,src,event)
             while true
                 t1 = tic;
@@ -395,6 +409,7 @@ classdef Jakiro < handle
             app.CC1.hArrow.Visible = 'off';
             app.CC2.hArrow.Visible = 'off';
             app.WA.is_recording = false;
+            app.WA.write_buffer_to_file(app.run_start_time, datetime('now'), app.WA.tag);
             app.WA.close_datafile();
         end
 
@@ -546,25 +561,20 @@ classdef Jakiro < handle
             cc2_state_buffer = zeros(5, app.n_rl_interval); % back carriage state buffer for constructing state to send to agent
             % prepare daq
             try
-                if ~isempty(app.WA.s)
-                    app.WA.ns_read = app.n_rl_interval; % set number of samples to read per tick to match agent action update interval
-                    app.WA.n_update = 2;
-                    app.WA.n_fill = 1;
-                    app.WA.tag = sprintf('%s_PathAgentPre-v1=%.2f_v2max=%.2f_delay=%.1f',run_tag,v1,v2,delay_s);
-                    app.WA.is_recording = true;
-                    app.WA.init_datalog_file();
-                    app.WA.align_data_read();
-                    app.WA.average_signal_as_offset(round(app.WA.Fs));
-                    app.WA.reset_data_buffers();
-                end
-            catch
-                % error('DataAcquisitionError', 'Error during data acquisition setup: %s', e.message);
+                app.WA.ns_read = app.n_rl_interval; % set number of samples to read per tick to match agent action update interval
+                app.WA.n_update = 2;
+                app.WA.n_fill = 1;
+                app.WA.align_data_read();
+                app.WA.average_signal_as_offset(round(app.WA.Fs));
+                app.WA.reset_data_buffers();
+            catch e
+                error('DataAcquisitionError:SetupFailed', 'Error during data acquisition setup: %s', e.message);
             end
 
             % connect to agent server
 
             % prepare CC1 for path tracking
-            [xp,yp,rp,thetap1,L,start_x,start_y,start_s,~] = app.CC1.prepare_pathtracking_data();
+            [xp,yp,rp,thetap1,L,start_x,start_y,start_s,pathtag1] = app.CC1.prepare_pathtracking_data();
 
             % prepare CC2 for agent control
             app.CC2.Car.poll_gamepad = 0;
@@ -599,6 +609,12 @@ classdef Jakiro < handle
             n = 0;
             num_agent_interactions = 0;
             pause(2); % allow some time for water to calm down from carriages moving to start positions.
+            try
+                app.WA.tag = sprintf('%s_PathAgentPre-%s_v1=%.2f_v2max=%.2f_delay=%.1f',run_tag,pathtag1,v1,v2,delay_s);
+                app.WA.align_data_read(); % clear samples during carriage movement before starting
+            catch
+
+            end
             app.run_start_time = datetime('now');
             t0 = tic;
             while true
@@ -745,11 +761,11 @@ classdef Jakiro < handle
                     app.net.syncWithHPC();
                 end
             catch ME
-                warning('AgentSyncError', 'Failed to sync with agent server: %s', ME.message);
+                warning('AgentSyncError:SyncFailed', 'Failed to sync with agent server: %s', ME.message);
             end
         end
 
-        function onPathAgentLive(app, ~, ~)
+        function onPathAgentLive(~, ~, ~)
             disp('PathAgentLive triggered (placeholder)');
         end
 
@@ -797,7 +813,7 @@ classdef Jakiro < handle
                 % finished path tracking for carriage 1
                 try
                     stop(src);
-                    fclose(app.WA.fout);
+                    % fclose(app.WA.fout);
                 catch
                 end
             end
