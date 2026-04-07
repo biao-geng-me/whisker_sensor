@@ -125,6 +125,7 @@ classdef Jakiro < handle
             addlistener(app.ExpPanel,'PathHuman',@(src,evt) app.onPathHuman(src,evt));
             addlistener(app.ExpPanel,'PathAgentPre',@(src,evt) app.onPathAgentPre(src,evt));
             addlistener(app.ExpPanel,'PathAgentLive',@(src,evt) app.onPathAgentLive(src,evt));
+            addlistener(app.ExpPanel,'FilterConfigRequested',@(src,evt) app.onFilterConfigRequested(src,evt));
             app.connect_agent_server(); % connect to agent server at startup (for RL agent control modes)
 
             try
@@ -727,6 +728,149 @@ classdef Jakiro < handle
 
         function onPathAgentLive(~, ~, ~)
             disp('PathAgentLive triggered (placeholder)');
+        end
+
+        function onFilterConfigRequested(app, ~, ~)
+            [filterSpec, wasCancelled] = app.promptFilterConfig();
+            if wasCancelled
+                return;
+            end
+
+            try
+                app.WA.set_filter(filterSpec);
+                if isempty(filterSpec)
+                    fprintf('Wavi filter disabled (type=none).\n');
+                else
+                    fprintf('Wavi filter updated: %s\n', char(string(filterSpec.filterType)));
+                end
+            catch me
+                warning('FilterConfig:ApplyFailed', 'Failed to apply filter configuration: %s', me.message);
+            end
+        end
+
+        function [filterSpec, wasCancelled] = promptFilterConfig(app)
+            filterSpec = [];
+
+            defaults = struct('filterType','lowpass-iir',...
+                              'order',3,...
+                              'cutoffHz',2,...
+                              'highpassHz',0.01,...
+                              'gain',1.2);
+            try
+                if ~isempty(app.WA) && ~isempty(app.WA.sig_filter)
+                    sf = app.WA.sig_filter;
+                    defaults.filterType = char(string(sf.filterType));
+                    defaults.order = sf.order;
+                    defaults.cutoffHz = sf.cutoffHz;
+                    defaults.highpassHz = sf.highpassHz;
+                    defaults.gain = sf.gain;
+                end
+            catch
+            end
+
+            dlg = uifigure('Name','Filter Config',...
+                           'Position',[360 220 360 260],...
+                           'WindowStyle','modal');
+            gl = uigridlayout(dlg,[7 2]);
+            gl.RowHeight = {'fit','fit','fit','fit','fit','1x','fit'};
+            gl.ColumnWidth = {'1x','1x'};
+
+            lblType = uilabel(gl,'Text','Type');
+            lblType.Layout.Row = 1;
+            ddType = uidropdown(gl,'Items',{'none','lowpass-iir','highpass-iir','moving-average','biquad-lowpass'},...
+                                   'Value',char(string(defaults.filterType)));
+            ddType.Layout.Row = 1;
+            ddType.Layout.Column = 2;
+
+            lblOrder = uilabel(gl,'Text','Order');
+            lblOrder.Layout.Row = 2;
+            efOrder = uieditfield(gl,'numeric','Value',double(defaults.order));
+            efOrder.Layout.Row = 2;
+            efOrder.Layout.Column = 2;
+
+            lblCutoff = uilabel(gl,'Text','Cutoff Hz');
+            lblCutoff.Layout.Row = 3;
+            efCutoff = uieditfield(gl,'numeric','Value',double(defaults.cutoffHz));
+            efCutoff.Layout.Row = 3;
+            efCutoff.Layout.Column = 2;
+
+            lblHighpass = uilabel(gl,'Text','Highpass Hz');
+            lblHighpass.Layout.Row = 4;
+            efHighpass = uieditfield(gl,'numeric','Value',double(defaults.highpassHz));
+            efHighpass.Layout.Row = 4;
+            efHighpass.Layout.Column = 2;
+
+            lblGain = uilabel(gl,'Text','Gain');
+            lblGain.Layout.Row = 5;
+            efGain = uieditfield(gl,'numeric','Value',double(defaults.gain));
+            efGain.Layout.Row = 5;
+            efGain.Layout.Column = 2;
+
+            btnGl = uigridlayout(gl,[1 2]);
+            btnGl.RowHeight = {'fit'};
+            btnGl.ColumnWidth = {'1x','1x'};
+            btnGl.Layout.Row = 7;
+            btnGl.Layout.Column = [1 2];
+
+            uibutton(btnGl,'Text','Cancel','ButtonPushedFcn',@(~,~) onCancel());
+            uibutton(btnGl,'Text','Apply','ButtonPushedFcn',@(~,~) onApply());
+
+            ddType.ValueChangedFcn = @(~,~) updateFieldEnableState();
+            dlg.CloseRequestFcn = @(~,~) onCancel();
+            updateFieldEnableState();
+
+            uiwait(dlg);
+
+            if isvalid(dlg)
+                ud = dlg.UserData;
+                delete(dlg);
+            else
+                ud = struct('action','cancel');
+            end
+
+            if ~isstruct(ud) || ~isfield(ud,'action') || ~strcmp(ud.action,'apply')
+                wasCancelled = true;
+                return;
+            end
+
+            wasCancelled = false;
+            if strcmp(ud.type, 'none')
+                filterSpec = [];
+            else
+                filterSpec = struct('filterType',ud.type,...
+                                    'fs',app.wa_Fs,...
+                                    'order',ud.order,...
+                                    'cutoffHz',ud.cutoffHz,...
+                                    'highpassHz',ud.highpassHz,...
+                                    'gain',ud.gain,...
+                                    'nChannels',app.WA.nch);
+            end
+
+            function updateFieldEnableState()
+                enabled = 'on';
+                if strcmp(ddType.Value, 'none')
+                    enabled = 'off';
+                end
+                efOrder.Enable = enabled;
+                efCutoff.Enable = enabled;
+                efHighpass.Enable = enabled;
+                efGain.Enable = enabled;
+            end
+
+            function onApply()
+                dlg.UserData = struct('action','apply',...
+                                      'type',char(string(ddType.Value)),...
+                                      'order',max(1, round(double(efOrder.Value))),...
+                                      'cutoffHz',double(efCutoff.Value),...
+                                      'highpassHz',double(efHighpass.Value),...
+                                      'gain',double(efGain.Value));
+                uiresume(dlg);
+            end
+
+            function onCancel()
+                dlg.UserData = struct('action','cancel');
+                uiresume(dlg);
+            end
         end
 
     end

@@ -1069,6 +1069,34 @@ classdef wavi < handle
             end
         end
 
+        function set_filter(obj, filterSpec)
+            % set_filter Update runtime signal filter. Use [] to disable filtering.
+            if nargin < 2 || isempty(filterSpec)
+                obj.sig_filter = [];
+                obj.sig_filtered = nan(obj.ns_tot,obj.nch);
+                return
+            end
+
+            if isa(filterSpec, 'SigFilter')
+                obj.sig_filter = filterSpec;
+                obj.sig_filter.configure(struct('fs', obj.Fs, 'nChannels', obj.nch));
+            elseif isstruct(filterSpec)
+                if isfield(filterSpec, 'filterType') && strcmpi(string(filterSpec.filterType), "none")
+                    obj.sig_filter = [];
+                    obj.sig_filtered = nan(obj.ns_tot,obj.nch);
+                    return
+                end
+                tmpOpt = filterSpec;
+                tmpOpt.fs = obj.Fs;
+                tmpOpt.nChannels = obj.nch;
+                obj.sig_filter = SigFilter(tmpOpt);
+            else
+                error('wavi:InvalidSigFilter', 'filterSpec must be empty, a SigFilter, or a struct.');
+            end
+
+            obj.sig_filtered = nan(obj.ns_tot,obj.nch);
+        end
+
         function reset(obj)
             try
                 stop(obj.readTimer);
