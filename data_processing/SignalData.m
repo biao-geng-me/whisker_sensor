@@ -1,7 +1,7 @@
 classdef SignalData
     % SignalData  Simple container for time-series sensor data
     %
-    %   obj = SignalData(filepath) loads common file types (.mat, .csv, .txt)
+    %   obj = SignalData(filepath) loads common file types (.dat, .txt, .csv)
     %   and tries to extract a time vector and signal matrix. It performs
     %   light cleaning: convert datetimes, remove NaNs, normalize shapes.
 
@@ -40,7 +40,7 @@ classdef SignalData
                 % load t and sig from file
                 case {'.dat', '.txt'}
                     try
-                        [dat,dt_str,tag] = load_datalog(filepath);
+                        [dat,~,~] = load_datalog(filepath);
                     catch
                         error('SignalData:ReadFailed','Failed to load data from %s', filepath);
                     end
@@ -49,6 +49,83 @@ classdef SignalData
                     obj.dtime  = dat{:,1} + dat{:,2};
                     t = obj.dtime;
                     sig = dat{:,3:end};
+                case '.csv'
+                    try
+                        tbl = readtable(filepath);
+                    catch ME
+                        error('SignalData:ReadFailed','Failed to load CSV from %s: %s', filepath, ME.message);
+                    end
+
+                    if isempty(tbl) || width(tbl) == 0
+                        error('SignalData:ReadFailed','CSV appears to be empty: %s', filepath);
+                    end
+
+                    nVars = width(tbl);
+                    varNames = tbl.Properties.VariableNames;
+                    if isempty(varNames)
+                        varNames = repmat({''}, 1, nVars);
+                    end
+
+                    % Identify possible time column first.
+                    timeIdx = [];
+                    for i = 1:nVars
+                        col = tbl{:, i};
+                        if isdatetime(col) || isduration(col)
+                            timeIdx = i;
+                            break;
+                        end
+                    end
+                    if isempty(timeIdx)
+                        for i = 1:nVars
+                            if ~isnumeric(tbl{:, i}) && ~islogical(tbl{:, i})
+                                continue;
+                            end
+                            nameChars = char(varNames{i});
+                            if any(strcmpi(nameChars, {'t','time','timestamp','sec','seconds'}))
+                                timeIdx = i;
+                                break;
+                            end
+                        end
+                    end
+
+                    isSignalCol = false(1, nVars);
+                    for i = 1:nVars
+                        col = tbl{:, i};
+                        isSignalCol(i) = isnumeric(col) || islogical(col);
+                    end
+                    if ~isempty(timeIdx)
+                        isSignalCol(timeIdx) = false;
+                    end
+
+                    sigIdx = find(isSignalCol);
+                    if isempty(sigIdx)
+                        error('SignalData:ReadFailed','CSV does not contain numeric signal channels: %s', filepath);
+                    end
+
+                    sig = double(tbl{:, sigIdx});
+                    if ~isempty(timeIdx)
+                        t = tbl{:, timeIdx};
+                    else
+                        t = (0:size(sig, 1)-1)';
+                    end
+
+                    if isempty(obj.chNames)
+                        obj.chNames = cell(1, numel(sigIdx));
+                        for k = 1:numel(sigIdx)
+                            vi = sigIdx(k);
+                            fallback = sprintf('S%d-Ch%d', ceil(k/2), 1 + mod(k-1,2));
+                            if vi <= numel(varNames)
+                                nm = varNames{vi};
+                            else
+                                nm = '';
+                            end
+                            if isempty(nm) || startsWith(nm, 'Var')
+                                obj.chNames{k} = fallback;
+                            else
+                                obj.chNames{k} = strrep(nm, '_', ' ');
+                            end
+                        end
+                    end
                 otherwise
                     error('SignalData:UnsupportedExt','Unsupported extension: %s', ext);
             end
@@ -72,7 +149,11 @@ classdef SignalData
             obj.sig = sig;
 
             obj.t = t;
-            obj.Fs = (numel(t)-1)/t(end);
+            if numel(t) > 1 && t(end) > 0
+                obj.Fs = (numel(t)-1)/t(end);
+            else
+                obj.Fs = NaN;
+            end
 
             % initialize offsets: timeOffset default 0, sigOffset = mean of first 0.5s samples
             obj.timeOffset = 0;
