@@ -565,14 +565,7 @@ classdef Jakiro < handle
 
             % prepare CC1 for path tracking
             [xp,yp,rp,thetap1,L,start_x,start_y,start_s,~] = app.CC1.prepare_pathtracking_data();
-            try
-                start(app.CC1.redrawTimer);
-            catch
-            end
-            app.CC1.Car.moveToPositionMM(start_x-app.CC1.Car.origin_mm(1), start_y-app.CC1.Car.origin_mm(2), 20, 1, false);
-            app.CC1.Car.init_pathtracking_variables(xp,yp,rp,L,start_s,thetap1);
-            stop(app.CC1.redrawTimer);
-            
+
             % prepare CC2 for agent control
             app.CC2.Car.poll_gamepad = 0;
             app.CC2.Car.poll_keyboard = 1; % for interupting the agent control
@@ -583,6 +576,14 @@ classdef Jakiro < handle
             end
             app.CC2.Car.moveToPositionMM(0, start_y-app.CC2.Car.origin_mm(2), 20, 1, false); % move to same y as CC1 but x=0 to start
             stop(app.CC2.redrawTimer);
+
+            try
+                start(app.CC1.redrawTimer);
+            catch
+            end
+            app.CC1.Car.moveToPositionMM(start_x-app.CC1.Car.origin_mm(1), start_y-app.CC1.Car.origin_mm(2), 20, 1, false);
+            app.CC1.Car.init_pathtracking_variables(xp,yp,rp,L,start_s,thetap1);
+            stop(app.CC1.redrawTimer);
             
             % blocking path+agent control loop
             period = 1/app.wa_Fs; % seconds, control loop period for agent control (80 Hz)
@@ -644,6 +645,7 @@ classdef Jakiro < handle
                 reward = 0; % placeholder reward
 
                 % data acquisition
+                new_samples = [];
                 try
                     if ~isempty(app.WA.s)
                         new_samples = app.WA.rl_read_update_tick(); % offset subtracted
