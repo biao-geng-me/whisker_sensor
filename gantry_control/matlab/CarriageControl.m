@@ -419,7 +419,7 @@ classdef CarriageControl < handle
                 obj.vy_cruise = obj.vy_max*ydir*obj.motor_settings.Y_SIGN;
                 
                 % aoa of commanded velocity
-                aoa = atan(obj.vy_cruise/obj.vx_cruise);
+                aoa = atan(obj.vy_cruise/(obj.vx_cruise+eps));
                 % aoa_d = round(aoa/pi*180);
             
                 % fprintf('\n');
@@ -442,7 +442,7 @@ classdef CarriageControl < handle
                 end
                 % aoa before boundary velocity enforcement
                 % will be kept for AOA control even when velocity is reduced by boundary enforcement
-                aoa = atan(obj.vy_current/obj.vx_current);
+                aoa = atan(obj.vy_current/(obj.vx_current+eps));
 
                 % enforce movement boundaries (zero velocity component if at/near boundary)
                 [obj.vx_current, obj.vy_current] = obj.limit_velocity_by_bounds(obj.vx_current, obj.vy_current);
