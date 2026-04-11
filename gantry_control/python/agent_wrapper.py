@@ -1,5 +1,8 @@
 import numpy as np
 import logging
+import os
+import shutil
+from pathlib import Path
 
 logger = logging.getLogger('server')
 
@@ -15,6 +18,9 @@ try:
     from agents.rl_sac_v4_pathblind_hardware.replay_buffer import ReplayBuffer
     from agents.rl_sac_v4_pathblind_hardware.config import SACV2PathblindConfig
     from agents.rl_sac_v4_pathblind_hardware.train import run_between_episode_updates
+    from agents.rl_sac_v4_pathblind_hardware.path_utils import calc_path_data, local_path_frame
+    import torch
+    import random
     _sac_imports_ok = True
 except Exception as _sac_import_err:
     SACAgent = None
@@ -94,7 +100,11 @@ class AgentWrapper:
             self._sac_prev_sensor = None
             self._sac_prev_kin = None
             self._sac_prev_action = None
-            logger.debug("[Agent] SAC state cleared")
+            self._sac_select_path()
+            # Extract start_x from initial_state for object gap calculation
+            arr = np.asarray(initial_state, dtype=np.float64).reshape(self.n_rl_interval, self.n_ch_total)
+            self._sac_episode_start_x = float(arr[-1, 1]) + self._sac_initial_gap
+            logger.debug("[Agent] SAC state cleared, start_x=%.1f", self._sac_episode_start_x)
         
         logger.debug("[Agent] Computing first action...")
         action = self._compute_action(initial_state)
@@ -265,6 +275,43 @@ class AgentWrapper:
         self._sac_prev_sensor = None
         self._sac_prev_kin = None
         self._sac_prev_action = None
+
+        # --- Path data for server-side reward ---
+        self._sac_path_data_list = []
+        self._sac_current_path_data = None
+        self._sac_current_path_idx = 0
+        raw_paths = self.config.get("path_data", [])
+        if raw_paths:
+            rng = np.random.default_rng(cfg.seed)
+            self._sac_path_rng = rng
+            for p in raw_paths:
+                xy = np.asarray(p, dtype=np.float64)
+                if xy.ndim == 2 and xy.shape[1] >= 2:
+                    self._sac_path_data_list.append(calc_path_data(xy[:, :2]))
+            logger.info(f"[Agent] Loaded {len(self._sac_path_data_list)} path(s) for server-side reward")
+        else:
+            self._sac_path_rng = np.random.default_rng(cfg.seed)
+            logger.warning("[Agent] No path data received from MATLAB; server-side reward disabled")
+
+        self._sac_reward_corridor = float(cfg.reward_corridor_half_width_mm)
+        self._sac_terminate_corridor = float(cfg.terminate_corridor_half_width_mm)
+        self._sac_min_gap_mm = float(cfg.min_object_x_gap_terminate_mm)
+        self._sac_object_speed = float(cfg.object_tangential_speed_mm_per_ms)
+        self._sac_initial_gap = float(cfg.initial_object_gap_mm)
+        self._sac_episode_start_x = 0.0  # set on reset
+
+        # --- Checkpoint / resume ---
+        self._sac_output_dir = self.config.get("output_dir", "")
+        self._sac_keep_checkpoints = int(self.config.get("keep_checkpoints", 5))
+        self._sac_total_env_steps = 0
+        self._sac_episodes_completed = 0
+
+        # Resume from checkpoint if requested
+        resume = self.config.get("resume", False)
+        resume_path = self.config.get("resume_path", "")
+        if resume and resume_path and os.path.isfile(resume_path):
+            self._load_checkpoint(resume_path)
+
         self.use_sac_train = True
         logger.info(f"[Agent] SAC train mode ready. history_steps={cfg.history_steps} "
               f"sensor_shape={cfg.sensor_shape} device={cfg.device}")
@@ -391,3 +438,186 @@ class AgentWrapper:
         except Exception as ex:
             logger.error(f"[Agent._sac_store_transition] Exception: {ex}", exc_info=True)
             raise
+
+    # ------------------------------------------------------------------
+    # Server-side reward
+    # ------------------------------------------------------------------
+
+    def _sac_select_path(self):
+        """Pick a random path for this episode (called from reset)."""
+        if not self._sac_path_data_list:
+            self._sac_current_path_data = None
+            return
+        idx = int(self._sac_path_rng.integers(len(self._sac_path_data_list)))
+        self._sac_current_path_data = self._sac_path_data_list[idx]
+        self._sac_current_path_idx = idx
+        logger.debug(f"[Agent] Selected path index {idx} for this episode")
+
+    def compute_reward(self, state):
+        """Compute reward from state using path data and the hardware_adapter reward logic.
+
+        Returns (reward, done, info_dict).
+        If no path data is loaded, returns (0.0, False, {}).
+        """
+        if self._sac_current_path_data is None:
+            return 0.0, False, {}
+
+        try:
+            arr = np.asarray(state, dtype=np.float64).reshape(self.n_rl_interval, self.n_ch_total)
+            last = arr[-1]
+            t_ms = float(last[0])
+            x_mm = float(last[1])
+            y_mm = float(last[2])
+
+            position_xy = np.array([x_mm, y_mm], dtype=np.float64)
+            frame = local_path_frame(self._sac_current_path_data, position_xy)
+            lateral = abs(float(frame['signed_lateral_error']))
+
+            reward = 1.0 - (lateral / self._sac_reward_corridor)
+            reward = float(np.clip(reward, -1.0, 1.0))
+
+            # Object gap approximation
+            object_x = self._sac_episode_start_x + t_ms * self._sac_object_speed
+            object_gap = object_x - x_mm
+
+            too_far = lateral > self._sac_terminate_corridor
+            too_close = object_gap < self._sac_min_gap_mm
+
+            done = too_far or too_close
+            if too_far:
+                reward -= 2.0
+            if too_close:
+                reward -= 2.0
+
+            info = {
+                'signed_lateral_error_mm': float(frame['signed_lateral_error']),
+                'object_x_gap_mm': float(object_gap),
+                'too_far': too_far,
+                'too_close': too_close,
+            }
+            return reward, done, info
+        except Exception as ex:
+            logger.error(f"[Agent.compute_reward] Exception: {ex}", exc_info=True)
+            return 0.0, False, {}
+
+    # ------------------------------------------------------------------
+    # Checkpoint save / load
+    # ------------------------------------------------------------------
+
+    def save_checkpoint(self, episode_num, total_steps):
+        """Save model + replay to output_dir following train.py pattern."""
+        if not self.use_sac_train or not self._sac_output_dir:
+            return None
+        try:
+            output_dir = Path(self._sac_output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            ckpt_path = output_dir / f'checkpoint_{total_steps:07d}.pt'
+            replay_path = output_dir / f'replay_{total_steps:07d}.npz'
+
+            checkpoint = {
+                'actor': self._sac_agent.actor.state_dict(),
+                'q1': self._sac_agent.q1.state_dict(),
+                'q2': self._sac_agent.q2.state_dict(),
+                'q1_target': self._sac_agent.q1_target.state_dict(),
+                'q2_target': self._sac_agent.q2_target.state_dict(),
+                'log_alpha': self._sac_agent.log_alpha.detach().cpu(),
+                'actor_optim': self._sac_agent.actor_optim.state_dict(),
+                'q1_optim': self._sac_agent.q1_optim.state_dict(),
+                'q2_optim': self._sac_agent.q2_optim.state_dict(),
+                'alpha_optim': self._sac_agent.alpha_optim.state_dict(),
+                'counters': {
+                    'total_env_steps': int(total_steps),
+                    'episodes_completed': int(episode_num),
+                },
+                'rng': {
+                    'python': random.getstate(),
+                    'numpy': np.random.get_state(),
+                    'torch': torch.get_rng_state(),
+                    'cuda': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+                },
+                'replay_path': str(replay_path),
+            }
+            torch.save(checkpoint, ckpt_path)
+            self._sac_replay.save(str(replay_path))
+
+            # Copy to latest
+            shutil.copyfile(ckpt_path, output_dir / 'latest_checkpoint.pt')
+            shutil.copyfile(replay_path, output_dir / 'latest_replay.npz')
+
+            # Prune old checkpoints
+            self._prune_checkpoints(output_dir, self._sac_keep_checkpoints)
+
+            logger.info(f"[Agent] Checkpoint saved: {ckpt_path}")
+            return str(ckpt_path)
+        except Exception as ex:
+            logger.error(f"[Agent.save_checkpoint] Exception: {ex}", exc_info=True)
+            return None
+
+    def _load_checkpoint(self, checkpoint_path_str):
+        """Restore model + replay from a checkpoint file."""
+        try:
+            checkpoint_path = Path(checkpoint_path_str)
+            device = self._sac_cfg.device
+            checkpoint = torch.load(checkpoint_path, map_location=device)
+
+            self._sac_agent.actor.load_state_dict(checkpoint['actor'])
+            self._sac_agent.q1.load_state_dict(checkpoint['q1'])
+            self._sac_agent.q2.load_state_dict(checkpoint['q2'])
+            self._sac_agent.q1_target.load_state_dict(checkpoint['q1_target'])
+            self._sac_agent.q2_target.load_state_dict(checkpoint['q2_target'])
+            self._sac_agent.log_alpha.data.copy_(checkpoint['log_alpha'].to(device))
+
+            self._sac_agent.actor_optim.load_state_dict(checkpoint['actor_optim'])
+            self._sac_agent.q1_optim.load_state_dict(checkpoint['q1_optim'])
+            self._sac_agent.q2_optim.load_state_dict(checkpoint['q2_optim'])
+            self._sac_agent.alpha_optim.load_state_dict(checkpoint['alpha_optim'])
+
+            self._sac_agent.actor.train()
+            self._sac_agent.q1.train()
+            self._sac_agent.q2.train()
+
+            # Restore replay
+            replay_path = checkpoint.get('replay_path')
+            rp = Path(replay_path) if replay_path else (checkpoint_path.parent / 'latest_replay.npz')
+            if rp.exists():
+                self._sac_replay.load(str(rp))
+            elif (checkpoint_path.parent / 'latest_replay.npz').exists():
+                self._sac_replay.load(str(checkpoint_path.parent / 'latest_replay.npz'))
+                logger.warning(f"[Agent] Replay not found at {rp}; loaded latest_replay.npz instead")
+
+            # Restore counters
+            counters = checkpoint.get('counters', {})
+            self._sac_total_env_steps = counters.get('total_env_steps', 0)
+            self._sac_episodes_completed = counters.get('episodes_completed', 0)
+
+            # Restore RNG state
+            rng = checkpoint.get('rng')
+            if rng:
+                random.setstate(rng['python'])
+                np.random.set_state(rng['numpy'])
+                torch.set_rng_state(rng['torch'])
+                if torch.cuda.is_available() and rng.get('cuda') is not None:
+                    torch.cuda.set_rng_state_all(rng['cuda'])
+
+            logger.info(
+                f"[Agent] Resumed from checkpoint: {checkpoint_path} "
+                f"(steps={self._sac_total_env_steps}, episodes={self._sac_episodes_completed}, "
+                f"replay_size={self._sac_replay.size})"
+            )
+        except Exception as ex:
+            logger.error(f"[Agent._load_checkpoint] Failed to load {checkpoint_path_str}: {ex}", exc_info=True)
+
+    def _prune_checkpoints(self, output_dir, keep):
+        """Keep only the N most recent checkpoints."""
+        if keep <= 0:
+            return
+        ckpts = sorted(output_dir.glob('checkpoint_*.pt'))
+        if len(ckpts) <= keep:
+            return
+        for ckpt in ckpts[:-keep]:
+            step = ckpt.stem.split('_', 1)[1]
+            replay = output_dir / f'replay_{step}.npz'
+            ckpt.unlink(missing_ok=True)
+            if replay.exists():
+                replay.unlink()

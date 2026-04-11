@@ -11,6 +11,13 @@ classdef ServerConfigWindow < handle
         RecordTrajectoryCheck
         PolicyDropdown
 
+        OutputDirField
+        OutputDirBrowseBtn
+        ResumeCheck
+        ResumePathField
+        ResumePathBrowseBtn
+        KeepCheckpointsField
+
         StartBtn
         ShutdownBtn
         BrowseBtn
@@ -42,9 +49,9 @@ classdef ServerConfigWindow < handle
             obj.PolicyOptions = obj.readDefault(defaults, 'policy_options', {'agents/hardware_handoff_v2'});
             selectedPolicy = obj.readDefault(defaults, 'policy_package_dir', obj.PolicyOptions{1});
 
-            obj.UIFigure = uifigure('Name', 'Server Config', 'Position', [280 180 520 330]);
-            obj.Grid = uigridlayout(obj.UIFigure, [8, 3]);
-            obj.Grid.RowHeight = {'fit', 'fit', 'fit', 'fit', 'fit', '1x', 'fit', 'fit'};
+            obj.UIFigure = uifigure('Name', 'Server Config', 'Position', [280 180 520 520]);
+            obj.Grid = uigridlayout(obj.UIFigure, [13, 3]);
+            obj.Grid.RowHeight = {'fit', 'fit', 'fit', 'fit', 'fit', 'fit', 'fit', 'fit', 'fit', 'fit', '1x', 'fit', 'fit'};
             obj.Grid.ColumnWidth = {'1x', '1.2x', 'fit'};
 
             lblMode = uilabel(obj.Grid, 'Text', 'Mode');
@@ -95,19 +102,56 @@ classdef ServerConfigWindow < handle
             obj.RecordTrajectoryCheck.Layout.Row = 5;
             obj.RecordTrajectoryCheck.Layout.Column = [1 2];
 
+            % --- Checkpoint / resume controls ---
+            lblOutput = uilabel(obj.Grid, 'Text', 'Output directory');
+            lblOutput.Layout.Row = 6;
+            defaultOutputDir = obj.readDefault(defaults, 'output_dir', '');
+            obj.OutputDirField = uieditfield(obj.Grid, 'text', 'Value', defaultOutputDir);
+            obj.OutputDirField.Layout.Row = 6;
+            obj.OutputDirField.Layout.Column = 2;
+            obj.OutputDirBrowseBtn = uibutton(obj.Grid, 'push', 'Text', 'Browse...', ...
+                'ButtonPushedFcn', @(~,~) obj.onBrowseOutputDir());
+            obj.OutputDirBrowseBtn.Layout.Row = 6;
+            obj.OutputDirBrowseBtn.Layout.Column = 3;
+
+            obj.ResumeCheck = uicheckbox(obj.Grid, ...
+                'Text', 'Resume from checkpoint', ...
+                'Value', obj.readDefault(defaults, 'resume', false));
+            obj.ResumeCheck.Layout.Row = 7;
+            obj.ResumeCheck.Layout.Column = [1 2];
+
+            lblResume = uilabel(obj.Grid, 'Text', 'Resume checkpoint');
+            lblResume.Layout.Row = 8;
+            defaultResumePath = obj.readDefault(defaults, 'resume_path', '');
+            obj.ResumePathField = uieditfield(obj.Grid, 'text', 'Value', defaultResumePath);
+            obj.ResumePathField.Layout.Row = 8;
+            obj.ResumePathField.Layout.Column = 2;
+            obj.ResumePathBrowseBtn = uibutton(obj.Grid, 'push', 'Text', 'Browse...', ...
+                'ButtonPushedFcn', @(~,~) obj.onBrowseResumePath());
+            obj.ResumePathBrowseBtn.Layout.Row = 8;
+            obj.ResumePathBrowseBtn.Layout.Column = 3;
+
+            lblKeep = uilabel(obj.Grid, 'Text', 'Keep checkpoints');
+            lblKeep.Layout.Row = 9;
+            obj.KeepCheckpointsField = uieditfield(obj.Grid, 'numeric', ...
+                'Value', obj.readDefault(defaults, 'keep_checkpoints', 5), ...
+                'RoundFractionalValues', 'on', 'LowerLimit', 1, 'LowerLimitInclusive', 'on');
+            obj.KeepCheckpointsField.Layout.Row = 9;
+            obj.KeepCheckpointsField.Layout.Column = [2 3];
+
             obj.StatusLabel = uilabel(obj.Grid, 'Text', 'Server is not running.', 'WordWrap', 'on');
-            obj.StatusLabel.Layout.Row = 7;
+            obj.StatusLabel.Layout.Row = 12;
             obj.StatusLabel.Layout.Column = [1 3];
 
             obj.StartBtn = uibutton(obj.Grid, 'push', 'Text', 'Start', ...
                 'ButtonPushedFcn', @(~,~) obj.onStartPressed());
-            obj.StartBtn.Layout.Row = 8;
+            obj.StartBtn.Layout.Row = 13;
             obj.StartBtn.Layout.Column = 2;
 
             obj.ShutdownBtn = uibutton(obj.Grid, 'push', 'Text', 'Shutdown', ...
                 'ButtonPushedFcn', @(~,~) obj.onShutdownPressed(), ...
                 'Enable', 'off');
-            obj.ShutdownBtn.Layout.Row = 8;
+            obj.ShutdownBtn.Layout.Row = 13;
             obj.ShutdownBtn.Layout.Column = 3;
         end
 
@@ -183,6 +227,31 @@ classdef ServerConfigWindow < handle
             obj.PolicyDropdown.Value = relPolicy;
         end
 
+        function onBrowseOutputDir(obj)
+            startDir = obj.OutputDirField.Value;
+            if isempty(startDir) || ~isfolder(startDir)
+                startDir = obj.PythonRoot;
+            end
+            selectedDir = uigetdir(startDir, 'Select output directory for checkpoints');
+            if isequal(selectedDir, 0)
+                return
+            end
+            obj.OutputDirField.Value = selectedDir;
+        end
+
+        function onBrowseResumePath(obj)
+            startDir = obj.OutputDirField.Value;
+            if isempty(startDir) || ~isfolder(startDir)
+                startDir = obj.PythonRoot;
+            end
+            [file, path] = uigetfile({'*.pt', 'Checkpoint files (*.pt)'}, ...
+                'Select checkpoint file to resume from', startDir);
+            if isequal(file, 0)
+                return
+            end
+            obj.ResumePathField.Value = fullfile(path, file);
+        end
+
         function onRefreshPolicies(obj)
             options = obj.discoverPolicies();
             obj.PolicyOptions = options;
@@ -200,6 +269,10 @@ classdef ServerConfigWindow < handle
             config.hpc_port = max(1, min(65535, round(double(obj.HpcPortField.Value))));
             config.record_trajectory = logical(obj.RecordTrajectoryCheck.Value);
             config.policy_package_dir = char(string(obj.PolicyDropdown.Value));
+            config.output_dir = char(string(obj.OutputDirField.Value));
+            config.resume = logical(obj.ResumeCheck.Value);
+            config.resume_path = char(string(obj.ResumePathField.Value));
+            config.keep_checkpoints = max(1, round(double(obj.KeepCheckpointsField.Value)));
         end
 
         function ensurePolicyOption(obj, value)

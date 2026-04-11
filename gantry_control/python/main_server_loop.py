@@ -169,9 +169,17 @@ def main():
             recv_times.append(recv_ms)
             
             state = step_data[0:state_dim]
-            reward = step_data[state_dim]
+            matlab_reward = step_data[state_dim]
             done = step_data[state_dim + 1]
             truncated = step_data[state_dim + 2]
+
+            # Server-side reward replaces MATLAB reward when path data is available.
+            # Done/truncated signals still come from MATLAB to keep the protocol in sync.
+            if agent.use_sac_train and agent._sac_current_path_data is not None:
+                reward, _, _ = agent.compute_reward(state)
+            else:
+                reward = matlab_reward
+
             episode_done = (done >= 0.5) or bool(truncated)
             
             logger.debug(f"[Episode {episode_num} Step {episode_step:4d}] Received: reward={reward:.4f}, done={done:.1f}, truncated={truncated:.1f}")
@@ -256,6 +264,15 @@ def main():
             
             # Run local SAC update (train mode) or no-op (infer mode).
             needs_reset = agent.between_episode_update(episode_step)
+
+            # Save checkpoint after each episode (train mode only)
+            if agent.use_sac_train:
+                agent._sac_total_env_steps += episode_step
+                agent._sac_episodes_completed = episode_num
+                ckpt = agent.save_checkpoint(episode_num, agent._sac_total_env_steps)
+                if ckpt:
+                    logger.info(f"[Episode {episode_num}] Checkpoint saved at step {agent._sac_total_env_steps}")
+
             if needs_reset:
                 logger.info(f"[Episode {episode_num}] Agent requested reset")
                 net.send_string("RESET_NEEDED")
@@ -266,6 +283,11 @@ def main():
         elif header == CMD_SHUTDOWN:
             # 0x04: Teardown
             logger.info("Shutdown command received from MATLAB.")
+            # Save final checkpoint before exiting
+            if agent.use_sac_train:
+                ckpt = agent.save_checkpoint(episode_num, agent._sac_total_env_steps)
+                if ckpt:
+                    logger.info(f"Final checkpoint saved at step {agent._sac_total_env_steps}")
             running = False
             
         else:

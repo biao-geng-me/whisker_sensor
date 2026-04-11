@@ -175,6 +175,36 @@ classdef Jakiro < handle
             config.episode_time_ms = episode_time_s * 1000;
             config.fixed_vx = 0.2;         % mm/ms — fixed forward speed used by SAC adapter
             config.y_speed_limit = 0.15;   % mm/ms — lateral speed limit for SAC action scaling
+
+            % Pass path data so the server can compute reward
+            try
+                pathFiles = app.CC1.ModePanel.SelectedFiles;
+                if ~isempty(pathFiles)
+                    paths_cell = cell(1, numel(pathFiles));
+                    for ip = 1:numel(pathFiles)
+                        pd = PathData(pathFiles{ip});
+                        paths_cell{ip} = [pd.x(:), pd.y(:)];
+                    end
+                    config.path_data = paths_cell;
+                end
+            catch pathErr
+                fprintf('[connect_agent_server] Warning: could not read path files: %s\n', pathErr.message);
+            end
+
+            % Checkpoint / resume settings from server config window
+            if isfield(userConfig, 'output_dir')
+                config.output_dir = userConfig.output_dir;
+            end
+            if isfield(userConfig, 'resume')
+                config.resume = userConfig.resume;
+            end
+            if isfield(userConfig, 'resume_path')
+                config.resume_path = userConfig.resume_path;
+            end
+            if isfield(userConfig, 'keep_checkpoints')
+                config.keep_checkpoints = userConfig.keep_checkpoints;
+            end
+
             % connect_agent_server Connect to the agent server at the specified address and port
             try
                 app.net = NetworkClient(app.agent_server_address, app.agent_server_port,STATE_DIM, ACTION_DIM);
