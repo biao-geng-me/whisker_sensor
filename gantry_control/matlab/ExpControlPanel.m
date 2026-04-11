@@ -4,9 +4,9 @@ classdef ExpControlPanel < handle
         PathPath
         PathHuman
         PathAgentPre
-        PathAgentLive
         FilterConfigRequested
         ServerConfigRequested
+        PathAgentTrain
     end
     properties
         Parent
@@ -22,7 +22,7 @@ classdef ExpControlPanel < handle
         PathPathBtn
         PathHumanBtn
         PathAgentPreBtn
-        PathAgentLiveBtn
+        PathAgentTrainBtn
         FilterConfigBtn
         ConfigServerBtn
     end
@@ -97,9 +97,9 @@ classdef ExpControlPanel < handle
                 'ButtonPushedFcn',@(btn,evt) obj.onPathAgentPrePressed());
             obj.PathAgentPreBtn.Layout.Row = 6; obj.PathAgentPreBtn.Layout.Column = 2;
 
-            obj.PathAgentLiveBtn = uibutton(obj.Grid,'push','Text','Path Agent Live',...
-                'ButtonPushedFcn',@(btn,evt) obj.onPathAgentLivePressed());
-            obj.PathAgentLiveBtn.Layout.Row = 6; obj.PathAgentLiveBtn.Layout.Column = 3;
+            obj.PathAgentTrainBtn = uibutton(obj.Grid,'push','Text','Path Agent Train',...
+                'ButtonPushedFcn',@(btn,evt) obj.onPathAgentTrainPressed());
+            obj.PathAgentTrainBtn.Layout.Row = 6; obj.PathAgentTrainBtn.Layout.Column = 3;
 
             obj.ConfigServerBtn = uibutton(obj.Grid,'push','Text','Config server',...
                 'ButtonPushedFcn',@(btn,evt) obj.onServerConfigPressed());
@@ -128,9 +128,9 @@ classdef ExpControlPanel < handle
             end
         end
 
-        function onPathAgentLivePressed(obj)
+        function onPathAgentTrainPressed(obj)
             try
-                notify(obj,'PathAgentLive');
+                notify(obj,'PathAgentTrain');
             catch
             end
         end

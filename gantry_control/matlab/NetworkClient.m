@@ -83,15 +83,26 @@ classdef NetworkClient < handle
             end
         end
         
-        function syncWithHPC(obj)
-            % Sends State C (0x03) and blocks until HPC training is complete
-            fprintf('[Network] Episode complete. Requesting HPC Sync...\n');
+        function reset_needed = syncWithHPC(obj)
+            % Sends CMD_END_SYNC (0x03) and blocks until Python training update completes.
+            % Returns true if Python requests a hardware reset, false otherwise.
+            reset_needed = false;
+            fprintf('[Network] Episode complete. Requesting sync...\n');
             obj.outStream.writeByte(obj.CMD_END_SYNC);
             obj.outStream.flush();
             
-            % Block until Python says it's done
-            obj.waitForString('SYNC_COMPLETE', 5*1000);
-            fprintf('[Network] HPC Sync complete. Weights updated.\n');
+            % Block until Python responds — either SYNC_COMPLETE or RESET_NEEDED.
+            response = obj.receiveString(5*60*1000);
+            if strcmp(response, 'RESET_NEEDED')
+                reset_needed = true;
+                fprintf('[Network] Sync complete. Hardware reset requested by agent.\n');
+            else
+                if ~strcmp(response, 'SYNC_COMPLETE')
+                    warning('NetworkClient:UnexpectedSyncResponse', ...
+                        'Expected SYNC_COMPLETE or RESET_NEEDED but received "%s".', response);
+                end
+                fprintf('[Network] Sync complete.\n');
+            end
         end
         
         function shutdown(obj)
@@ -193,6 +204,40 @@ classdef NetworkClient < handle
                 warning('NetworkClient:UnexpectedResponse', ...
                     'Expected "%s" but received "%s"', expectedStr, receivedStr);
             end
+        end
+
+        function str = receiveString(obj, timeoutMs)
+            % Reads a length-prefixed string (4-byte int header + UTF-8 bytes).
+            % Returns the received string. Throws on timeout or invalid length.
+            if nargin < 2
+                timeoutMs = 10000;
+            end
+
+            previousTimeout = obj.socket.getSoTimeout();
+            cleanup = onCleanup(@() obj.socket.setSoTimeout(previousTimeout));
+            obj.socket.setSoTimeout(timeoutMs);
+
+            try
+                msgLength = obj.inStream.readInt();
+            catch ME
+                if contains(char(ME.message), 'Read timed out')
+                    error('NetworkClient:Timeout', ...
+                        'Timed out waiting for string after %.1f s.', timeoutMs / 1000);
+                end
+                rethrow(ME);
+            end
+
+            maxMessageLength = 1024;
+            if msgLength < 0 || msgLength > maxMessageLength
+                error('NetworkClient:InvalidMessageLength', ...
+                    'Received invalid string length %d. The TCP stream is out of sync.', msgLength);
+            end
+
+            byteArr = zeros(1, msgLength, 'int8');
+            for i = 1:msgLength
+                byteArr(i) = obj.inStream.readByte();
+            end
+            str = native2unicode(byteArr, 'UTF-8');
         end
     end
 end

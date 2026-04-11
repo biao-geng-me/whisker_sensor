@@ -131,7 +131,7 @@ classdef Jakiro < handle
             addlistener(app.ExpPanel,'PathPath',@(src,evt) app.onPathPath(src,evt));
             addlistener(app.ExpPanel,'PathHuman',@(src,evt) app.onPathHuman(src,evt));
             addlistener(app.ExpPanel,'PathAgentPre',@(src,evt) app.onPathAgentPre(src,evt));
-            addlistener(app.ExpPanel,'PathAgentLive',@(src,evt) app.onPathAgentLive(src,evt));
+            addlistener(app.ExpPanel,'PathAgentTrain',@(src,evt) app.onPathAgentTrain(src,evt));
             addlistener(app.ExpPanel,'FilterConfigRequested',@(src,evt) app.onFilterConfigRequested(src,evt));
             addlistener(app.ExpPanel,'ServerConfigRequested',@(src,evt) app.onServerConfigRequested(src,evt));
 
@@ -166,6 +166,15 @@ classdef Jakiro < handle
             config.num_whiskers = app.num_whiskers;
             config.record_trajectory = logical(userConfig.record_trajectory);
             config.policy_package_dir = userConfig.policy_package_dir;
+            % Parameters used by the Python agent for observation normalisation and action scaling
+            try
+                [~,~,~,~,episode_time_s,~] = app.ExpPanel.getParameters();
+            catch
+                episode_time_s = 20.0; % default fallback
+            end
+            config.episode_time_ms = episode_time_s * 1000;
+            config.fixed_vx = 0.2;         % mm/ms — fixed forward speed used by SAC adapter
+            config.y_speed_limit = 0.15;   % mm/ms — lateral speed limit for SAC action scaling
             % connect_agent_server Connect to the agent server at the specified address and port
             try
                 app.net = NetworkClient(app.agent_server_address, app.agent_server_port,STATE_DIM, ACTION_DIM);
@@ -916,6 +925,319 @@ classdef Jakiro < handle
 
         function onPathAgentLive(~, ~, ~)
             disp('PathAgentLive triggered (placeholder)');
+        end
+
+        function onPathAgentTrain(app, ~, ~)
+            % PathAgentTrain: CC1 follows a randomly selected path each episode,
+            % CC2 is controlled by a SAC agent that trains locally between episodes.
+
+            if isempty(app.net)
+                warning('AgentConnectionError:NotConnected', ...
+                    'Agent server is not connected. Use Config server -> Start first.');
+                return
+            end
+
+            try
+                [v1,v2,delay_s,run_tag,episode_time_s,settle_delay_s] = app.ExpPanel.getParameters();
+            catch
+                warning('Failed to read experiment parameters.');
+                return
+            end
+
+            % Read all path files loaded in CC1's panel
+            pathFiles = app.CC1.ModePanel.SelectedFiles;
+            if isempty(pathFiles)
+                warning('PathAgentTrain:NoPaths', ...
+                    'No path files loaded in CC1 panel. Load at least one path before training.');
+                return
+            end
+
+            max_episodes = app.agent_server_max_episodes;
+
+            % set velocity limits for both carriages
+            app.CC1.Car.vel_max = round(v1*1000/app.CC1.Car.step2mm);
+            app.CC2.Car.vel_max = round(v2*1000/app.CC2.Car.step2mm);
+
+            % DAQ setup (same as PathAgentPre)
+            try
+                app.WA.ns_read = app.n_rl_interval;
+                app.WA.n_update = 2;
+                app.WA.n_fill = 1;
+                app.WA.align_data_read();
+                app.WA.average_signal_as_offset(round(app.WA.Fs));
+                app.WA.reset_data_buffers();
+            catch e
+                error('DataAcquisitionError:SetupFailed', 'Error during data acquisition setup: %s', e.message);
+            end
+
+            app.CC2.Car.poll_gamepad = 0;
+            app.CC2.Car.poll_keyboard = 1;
+
+            period = 1/app.wa_Fs;
+
+            for ep = 1:max_episodes
+                fprintf('\n[PathAgentTrain] === Episode %d / %d ===\n', ep, max_episodes);
+
+                % --- Pick a random path for this episode ---
+                path_idx = randi(numel(pathFiles));
+                chosen_file = pathFiles{path_idx};
+                [~, fname, fext] = fileparts(chosen_file);
+                pathtag1 = erase([fname fext], 'xy_');
+                fprintf('[PathAgentTrain] Path: %s\n', chosen_file);
+
+                pd = PathData(chosen_file);
+                [xp_interp, yp_interp, rp_interp, thetap1, L] = pd.getInterpolants();
+
+                % Compute start_s: find arc position where path x matches CC1 origin x
+                try
+                    origin_x_mm = app.CC1.Car.origin(1) * app.CC1.Car.step2mm;
+                catch
+                    origin_x_mm = 0;
+                end
+                s_grid = linspace(0, L, 4001);
+                x_vals = xp_interp(s_grid);
+                [~, idx_min] = min(abs(x_vals - origin_x_mm));
+                start_s = max(0, min(L, s_grid(idx_min)));
+                start_x = xp_interp(start_s);
+                start_y = yp_interp(start_s);
+
+                % --- Move CC2 first, then CC1 (back carriage always first) ---
+                try; start(app.CC2.redrawTimer); catch; end
+                app.CC2.Car.moveToPositionMM(0, start_y - app.CC2.Car.origin_mm(2), 20, 1, false);
+                try; stop(app.CC2.redrawTimer); catch; end
+
+                try; start(app.CC1.redrawTimer); catch; end
+                app.CC1.Car.moveToPositionMM(start_x - app.CC1.Car.origin_mm(1), ...
+                    start_y - app.CC1.Car.origin_mm(2), 20, 1, false);
+                app.CC1.Car.init_pathtracking_variables(xp_interp, yp_interp, rp_interp, L, start_s, thetap1);
+                try; stop(app.CC1.redrawTimer); catch; end
+
+                % Settle pause
+                pause(settle_delay_s);
+
+                % DAQ: align after carriage movement
+                try
+                    app.WA.tag = sprintf('%s_PathAgentTrain-%s_v1=%.2f_v2max=%.2f_delay=%.1f_ep%03d', ...
+                        run_tag, pathtag1, v1, v2, delay_s, ep);
+                    app.WA.align_data_read();
+                catch
+                end
+
+                cc2_state_buffer = zeros(5, app.n_rl_interval);
+                is_done_cc1 = false;
+                is_done = 0;
+                truncated = 0;
+                num_agent_interactions = 0;
+                reward = 0;
+
+                app.run_start_time = datetime('now');
+                action = app.net.startEpisode(app.currentState(:)');
+
+                app.CC1.hArrow.Visible = 'on';
+                app.CC2.hArrow.Visible = 'on';
+                app.CC2.Car.cmd_npoll = 0;
+
+                n = 0;
+                t0 = tic;
+
+                while true
+                    t1 = tic;
+                    n = n + 1;
+
+                    src = struct(); src.TasksExecuted = n;
+                    ev  = struct(); ev.Data.time = datetime('now');
+
+                    % CC1: path tracking
+                    if ~is_done_cc1
+                        try
+                            is_done_cc1 = app.CC1.Car.pathTrackingTick(src, ev);
+                        catch ME
+                            warning(ME.identifier, '%s', ME.message);
+                            is_done_cc1 = true;
+                        end
+                    end
+
+                    now_dt = datetime('now');
+                    elapsed_time_sec = seconds(now_dt - app.run_start_time);
+
+                    if elapsed_time_sec > episode_time_s
+                        truncated = 1;
+                    end
+
+                    % CC2: delay gate (mirrors PathAgentPre)
+                    if elapsed_time_sec > delay_s
+                        vx_in = round(action(1)*1000/app.CC2.Car.step2mm);
+                        vy_in = round(action(2)*1000/app.CC2.Car.step2mm);
+                    else
+                        vx_in = round(0.15*1000/app.CC2.Car.step2mm);
+                        vy_in = 0;
+                    end
+                    try
+                        app.CC2.Car.agentControlStep(ev, vx_in, vy_in);
+                    catch ME
+                        warning(ME.identifier, '%s', ME.message);
+                    end
+
+                    % DAQ
+                    new_samples = [];
+                    try
+                        if ~isempty(app.WA.s)
+                            new_samples = app.WA.rl_read_update_tick();
+                        end
+                    catch
+                    end
+
+                    if elapsed_time_sec > delay_s && ~isempty(new_samples)
+                        num_agent_interactions = num_agent_interactions + 1;
+
+                        % Build CC2 kinematic state (same interpolation as PathAgentPre)
+                        n_q = app.n_rl_interval;
+                        dt_q_ms = 1000 / app.wa_Fs;
+                        t_query = (-(n_q-1):0) * dt_q_ms;
+
+                        sb = app.CC2.Car.state_buffer;
+                        n_valid = min(app.CC2.Car.state_buffer_count, size(sb,1));
+                        cc2_state_buffer(1,:) = t_query + num_agent_interactions * n_q * dt_q_ms;
+                        if n_valid <= 0
+                            cc2_state_buffer(2:5,:) = zeros(4, n_q);
+                        else
+                            sb_valid = sb(end-n_valid+1:end,:);
+                            t_rel = sb_valid(:,1) - sb_valid(end,1);
+                            [t_rel_u, iu] = unique(t_rel, 'stable');
+                            state_u = sb_valid(iu, 2:5);
+                            if isscalar(t_rel_u)
+                                cc2_state_buffer(2:5,:) = repmat(state_u(1,:)', 1, n_q);
+                            else
+                                state_q = interp1(t_rel_u, state_u, t_query, 'linear', 0);
+                                cc2_state_buffer(2:5,:) = state_q';
+                            end
+                        end
+
+                        % Compute reward from lateral error of CC2 vs CC1's current path
+                        x2 = cc2_state_buffer(2, end);  % latest CC2 x position (mm)
+                        y2 = cc2_state_buffer(3, end);  % latest CC2 y position (mm)
+                        x2_gap = start_x + elapsed_time_sec*1000*v1 - x2;  % approximate object gap
+
+                        % Closest point on discrete path
+                        dists_sq = (pd.x - x2).^2 + (pd.y - y2).^2;
+                        [~, kp] = min(dists_sq);
+                        k_prev = max(kp-1, 1);
+                        k_next = min(kp+1, numel(pd.x));
+                        tx = (pd.x(k_next) - pd.x(k_prev));
+                        ty = (pd.y(k_next) - pd.y(k_prev));
+                        tnorm = sqrt(tx^2 + ty^2);
+                        if tnorm > 0
+                            tx = tx/tnorm; ty = ty/tnorm;
+                        end
+                        % Signed lateral error: positive = left of path direction
+                        signed_err = (x2 - pd.x(kp))*(-ty) + (y2 - pd.y(kp))*(tx);
+
+                        reward_corridor = 180;   % mm
+                        terminate_corridor = 300; % mm
+                        min_gap_mm = 25;          % mm
+
+                        reward = max(-1.0, min(1.0, 1.0 - abs(signed_err)/reward_corridor));
+
+                        if abs(signed_err) > terminate_corridor
+                            reward = reward - 2.0;
+                            is_done = 1;
+                        end
+                        if x2_gap < min_gap_mm
+                            reward = reward - 2.0;
+                            is_done = 1;
+                        end
+
+                        % Build full state and send to agent
+                        bending_moments = app.signal_to_bending_moment.convertSamples( ...
+                            new_samples, reorderToSimulation=true);
+                        app.currentState = [cc2_state_buffer; bending_moments'];
+                        fprintf('Episode %d, Step %d, geting action ...', ...
+                            ep, num_agent_interactions);
+                        action = app.net.stepRL(app.currentState(:)', reward, is_done, truncated);
+                        fprintf('done. action=[%.3f, %.3f]\n', action);
+                    end
+
+                    % Visuals
+                    if mod(n, app.pathpath_redraw_interval) == 0
+                        app.CC1.update_view();
+                        app.CC2.update_view();
+                    end
+
+                    % Timing
+                    next_time = n * period;
+                    elapsed = toc(t0);
+                    fprintf('PathAgentTrain ep%d Tick %d: total=%.3f s, frame=%.1f ms, avg FPS=%.1f\n', ...
+                        ep, n, elapsed, toc(t1)*1000, n/elapsed);
+                    while toc(t0) < next_time
+                        pause(0.0005);
+                    end
+
+                    if truncated || is_done
+                        if truncated
+                            fprintf('[PathAgentTrain] Episode truncated after %.2f s\n', elapsed_time_sec);
+                        else
+                            fprintf('[PathAgentTrain] Episode ended (is_done) after %.2f s\n', elapsed_time_sec);
+                        end
+                        break;
+                    end
+                end % tick loop
+
+                % --- Episode cleanup ---
+                try; app.CC1.Car.stopPathTracking(); catch; end
+                app.CC1.hArrow.Visible = 'off';
+                app.CC2.hArrow.Visible = 'off';
+                try
+                    app.WA.write_buffer_to_file(app.run_start_time, datetime('now'), app.WA.tag);
+                    app.WA.close_datafile();
+                catch
+                end
+
+                % Sync with agent server (local SAC update); check if reset is requested
+                reset_needed = false;
+                try
+                    if ~isempty(app.net)
+                        reset_needed = app.net.syncWithHPC();
+                    end
+                catch ME
+                    warning('AgentSyncError:SyncFailed', 'Failed to sync with agent server: %s', ME.message);
+                end
+
+                if ep < max_episodes
+                    % Reposition carriages for next episode: CC2 first, then CC1
+                    settle = settle_delay_s;
+                    if reset_needed
+                        fprintf('[PathAgentTrain] Hardware reset requested. Extended settle.\n');
+                        settle = settle_delay_s * 2;
+                    end
+                    try; start(app.CC2.redrawTimer); catch; end
+                    app.CC2.Car.moveToPositionMM(0, start_y - app.CC2.Car.origin_mm(2), 20, 1, false);
+                    try; stop(app.CC2.redrawTimer); catch; end
+                    try; start(app.CC1.redrawTimer); catch; end
+                    app.CC1.Car.moveToPositionMM(start_x - app.CC1.Car.origin_mm(1), ...
+                        start_y - app.CC1.Car.origin_mm(2), 20, 1, false);
+                    try; stop(app.CC1.redrawTimer); catch; end
+                    pause(settle);
+                end
+
+            end % episode loop
+
+            % --- Final cleanup ---
+            app.CC2.Car.poll_gamepad = 0;
+            app.CC2.Car.poll_keyboard = 0;
+            app.WA.is_recording = false;
+
+            % Send shutdown signal to agent server
+            try
+                if ~isempty(app.net)
+                    app.net.shutdown();
+                    app.net = [];
+                    app.agent_server_pid = [];
+                end
+            catch ME
+                warning('AgentTrainShutdown:Failed', 'Failed to shut down agent server: %s', ME.message);
+            end
+
+            fprintf('[PathAgentTrain] Training complete (%d episodes).\n', max_episodes);
         end
 
         function onFilterConfigRequested(app, ~, ~)
