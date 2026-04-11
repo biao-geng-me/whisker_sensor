@@ -6,6 +6,7 @@ classdef ExpControlPanel < handle
         PathAgentPre
         PathAgentLive
         FilterConfigRequested
+        ServerConfigRequested
     end
     properties
         Parent
@@ -23,6 +24,7 @@ classdef ExpControlPanel < handle
         PathAgentPreBtn
         PathAgentLiveBtn
         FilterConfigBtn
+        ConfigServerBtn
     end
     methods
         function obj = ExpControlPanel(parent)
@@ -98,6 +100,10 @@ classdef ExpControlPanel < handle
             obj.PathAgentLiveBtn = uibutton(obj.Grid,'push','Text','Path Agent Live',...
                 'ButtonPushedFcn',@(btn,evt) obj.onPathAgentLivePressed());
             obj.PathAgentLiveBtn.Layout.Row = 6; obj.PathAgentLiveBtn.Layout.Column = 3;
+
+            obj.ConfigServerBtn = uibutton(obj.Grid,'push','Text','Config server',...
+                'ButtonPushedFcn',@(btn,evt) obj.onServerConfigPressed());
+            obj.ConfigServerBtn.Layout.Row = 6; obj.ConfigServerBtn.Layout.Column = 1;
         end
 
         function onPathPathPressed(obj)
@@ -132,6 +138,13 @@ classdef ExpControlPanel < handle
         function onFilterConfigPressed(obj)
             try
                 notify(obj,'FilterConfigRequested');
+            catch
+            end
+        end
+
+        function onServerConfigPressed(obj)
+            try
+                notify(obj,'ServerConfigRequested');
             catch
             end
         end

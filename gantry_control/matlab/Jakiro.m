@@ -24,6 +24,13 @@ classdef Jakiro < handle
         n_ch_total = 23; % total number of channels in the state sent to the agent (for rl agent control modes)
         agent_server_address = '127.0.0.1'; % address of the agent server (for rl agent control modes)
         agent_server_port = 65432; % port of the agent server (for rl agent control modes)
+        agent_server_hpc_port = 5555;
+        agent_server_mode = 'infer';
+        agent_server_max_episodes = 1;
+        agent_server_record_trajectory = false;
+        agent_policy_package_dir = 'agents/hardware_handoff_v2';
+        agent_server_pid = [];
+        server_config_window = [];
         currentState = []; % current state for RL agent control
         calibration_data_file = 'sensor_calibration/calibration_sim_v1.csv' % calibration data file for converting raw sensor readings to bending moments (for rl agent control modes)
         exp2sim_channel_map_file = 'sensor_calibration/ch_map_sim_v1.csv'; % mapping from hardware channels to simulated sensor channels for RL agent control modes
@@ -126,7 +133,7 @@ classdef Jakiro < handle
             addlistener(app.ExpPanel,'PathAgentPre',@(src,evt) app.onPathAgentPre(src,evt));
             addlistener(app.ExpPanel,'PathAgentLive',@(src,evt) app.onPathAgentLive(src,evt));
             addlistener(app.ExpPanel,'FilterConfigRequested',@(src,evt) app.onFilterConfigRequested(src,evt));
-            app.connect_agent_server(); % connect to agent server at startup (for RL agent control modes)
+            addlistener(app.ExpPanel,'ServerConfigRequested',@(src,evt) app.onServerConfigRequested(src,evt));
 
             try
                 app.signal_to_bending_moment = SignalToBendingMoment( ...
@@ -137,35 +144,204 @@ classdef Jakiro < handle
             end
         end
     
-        function connect_agent_server(app)
+        function [ok,msg] = connect_agent_server(app, userConfig)
+
+            if nargin < 2 || isempty(userConfig)
+                userConfig = app.getServerConfig();
+            end
 
             STATE_DIM = app.n_rl_interval*app.n_ch_total;
             ACTION_DIM = 2;
-            MAX_EPISODES = 1;
             SAMPLE_RATE = 80;
 
-            config.mode = 'infer';
-            config.hpc_port = 5555;
+            config.mode = userConfig.mode;
+            config.hpc_port = userConfig.hpc_port;
             config.n_rl_interval = app.n_rl_interval;
             config.n_ch_total = app.n_ch_total;
             config.state_dim = STATE_DIM;
             config.action_dim = ACTION_DIM;
-            config.max_episodes = MAX_EPISODES;
+            config.max_episodes = userConfig.max_episodes;
             config.sample_rate = SAMPLE_RATE;
             config.dt = 1/SAMPLE_RATE;
             config.num_whiskers = app.num_whiskers;
+            config.record_trajectory = logical(userConfig.record_trajectory);
+            config.policy_package_dir = userConfig.policy_package_dir;
             % connect_agent_server Connect to the agent server at the specified address and port
             try
                 app.net = NetworkClient(app.agent_server_address, app.agent_server_port,STATE_DIM, ACTION_DIM);
                 % Phase 1: Handshake
                 app.net.sendConfig(config);
                 fprintf('Connected to agent server at %s:%d\n', app.agent_server_address, app.agent_server_port);
+                ok = true;
+                msg = sprintf('Connected to agent server at %s:%d.', app.agent_server_address, app.agent_server_port);
             catch ME
                 warning('AgentConnectionError');
                 fprintf('Failed to connect to agent server at %s:%d: \n%s', app.agent_server_address, app.agent_server_port, ME.message);
                 app.net = [];
+                ok = false;
+                msg = sprintf('Failed to connect to server: %s', ME.message);
             end
             app.currentState = zeros(app.n_ch_total,app.n_rl_interval); % hardware state buffer
+        end
+
+        function config = getServerConfig(app)
+            config = struct();
+            config.mode = app.agent_server_mode;
+            config.hpc_port = app.agent_server_hpc_port;
+            config.max_episodes = app.agent_server_max_episodes;
+            config.record_trajectory = app.agent_server_record_trajectory;
+            config.policy_package_dir = app.agent_policy_package_dir;
+        end
+
+        function options = discoverPolicyPackages(app)
+            agentsDir = fullfile(app.getPythonRootDir(), 'agents');
+            if ~isfolder(agentsDir)
+                options = {app.agent_policy_package_dir};
+                return
+            end
+
+            d = dir(agentsDir);
+            names = {};
+            for i = 1:numel(d)
+                if ~d(i).isdir
+                    continue
+                end
+                n = d(i).name;
+                if strcmp(n, '.') || strcmp(n, '..')
+                    continue
+                end
+                names{end+1} = ['agents/', n]; %#ok<AGROW>
+            end
+
+            if isempty(names)
+                options = {app.agent_policy_package_dir};
+            else
+                options = sort(names);
+            end
+        end
+
+        function rootDir = getPythonRootDir(~)
+            matlabDir = fileparts(mfilename('fullpath'));
+            rootDir = char(java.io.File(fullfile(matlabDir, '..', 'python')).getCanonicalPath());
+        end
+
+        function [ok,msg] = startAgentServer(app, userConfig)
+            ok = false;
+
+            if nargin < 2 || isempty(userConfig)
+                userConfig = app.getServerConfig();
+            end
+
+            app.agent_server_mode = userConfig.mode;
+            app.agent_server_hpc_port = userConfig.hpc_port;
+            app.agent_server_max_episodes = userConfig.max_episodes;
+            app.agent_server_record_trajectory = logical(userConfig.record_trajectory);
+            app.agent_policy_package_dir = userConfig.policy_package_dir;
+
+            app.shutdownAgentServer();
+
+            [pidOk, pid, pidMsg] = app.launchServerProcess();
+            if ~pidOk
+                msg = pidMsg;
+                return
+            end
+
+            app.agent_server_pid = pid;
+
+            maxAttempts = 8;
+            lastMsg = '';
+            for i = 1:maxAttempts
+                pause(0.35);
+                [connected, connectMsg] = app.connect_agent_server(userConfig);
+                if connected
+                    ok = true;
+                    msg = sprintf('Server started (PID %d) and connected.', pid);
+                    return
+                end
+                lastMsg = connectMsg;
+            end
+
+            app.shutdownAgentServer();
+            msg = sprintf('Started Python server but failed to connect: %s', lastMsg);
+        end
+
+        function [ok,msg] = shutdownAgentServer(app)
+            ok = true;
+            msg = 'Server is shut down.';
+
+            if ~isempty(app.net)
+                try
+                    app.net.shutdown();
+                catch
+                end
+                app.net = [];
+            end
+
+            if ~isempty(app.agent_server_pid)
+                pid = app.agent_server_pid;
+                [status, out] = system(sprintf('taskkill /PID %d /T /F', pid));
+                if status ~= 0
+                    if contains(out, 'not found', 'IgnoreCase', true)
+                        % Process already exited, treat as success.
+                    else
+                        ok = false;
+                        msg = sprintf('Failed to kill server process %d: %s', pid, strtrim(out));
+                    end
+                end
+                app.agent_server_pid = [];
+            end
+        end
+
+        function [ok,pid,msg] = launchServerProcess(app)
+            ok = false;
+            pid = [];
+
+            activateScript = fullfile(getenv('USERPROFILE'), 'py_envs', 'rl', 'Scripts', 'Activate.ps1');
+            if ~isfile(activateScript)
+                msg = sprintf('Activation script not found: %s', activateScript);
+                return
+            end
+
+            pyRoot = app.getPythonRootDir();
+            scriptName = 'main_server_loop.py';
+            if ~isfile(fullfile(pyRoot, scriptName))
+                msg = sprintf('Server script not found: %s', fullfile(pyRoot, scriptName));
+                return
+            end
+
+            activateQ = strrep(activateScript, '''', '''''');
+            pyRootQ = strrep(pyRoot, '''', '''''');
+
+            psCmd = [ ...
+                '$ErrorActionPreference = ''Stop''; ' ...
+                '& ''' activateQ '''; ' ...
+                '$p = Start-Process -FilePath ''python.exe'' ' ...
+                '-ArgumentList ''-u'',''main_server_loop.py'' ' ...
+                '-WorkingDirectory ''' pyRootQ ''' -PassThru; ' ...
+                'Write-Output $p.Id'];
+
+            fullCmd = ['powershell -NoProfile -ExecutionPolicy Bypass -Command "' psCmd '"'];
+            [status, out] = system(fullCmd);
+            if status ~= 0
+                msg = sprintf('Failed to launch server process: %s', strtrim(out));
+                return
+            end
+
+            pid = str2double(strtrim(out));
+            if isnan(pid)
+                tokens = regexp(out, '\d+', 'match');
+                if ~isempty(tokens)
+                    pid = str2double(tokens{end});
+                end
+            end
+
+            if isnan(pid) || pid <= 0
+                msg = sprintf('Could not parse server PID from output: %s', strtrim(out));
+                return
+            end
+
+            ok = true;
+            msg = sprintf('Started server process with PID %d.', pid);
         end
 
     end
@@ -240,11 +416,17 @@ classdef Jakiro < handle
             catch
             end
 
-            % Disconnect agent server
+            % Disconnect and stop agent server
             try
-                if ~isempty(app.net)
-                    app.net.shutdown();
-                    app.net = [];
+                app.shutdownAgentServer();
+            catch
+            end
+
+            try
+                if ~isempty(app.server_config_window) && isvalid(app.server_config_window)
+                    if isvalid(app.server_config_window.UIFigure)
+                        delete(app.server_config_window.UIFigure);
+                    end
                 end
             catch
             end
@@ -514,6 +696,12 @@ classdef Jakiro < handle
         function onPathAgentPre(app, ~, ~)
             % PathAgentPre: CC1 follows a prescribed path, CC2 is agent-controlled
             % Both run in the same blocking loop to avoid timer jitter
+
+            if isempty(app.net)
+                warning('AgentConnectionError:NotConnected', ...
+                    'Agent server is not connected. Use Config server -> Start first.');
+                return
+            end
             
             try
                 [v1,v2,delay_s,run_tag,episode_time_s,settle_delay_s] = app.ExpPanel.getParameters();
@@ -745,6 +933,40 @@ classdef Jakiro < handle
                 end
             catch me
                 warning('FilterConfig:ApplyFailed', 'Failed to apply filter configuration: %s', me.message);
+            end
+        end
+
+        function onServerConfigRequested(app, ~, ~)
+            cfg = app.getServerConfig();
+            defaults = cfg;
+            defaults.python_root = app.getPythonRootDir();
+            defaults.policy_options = app.discoverPolicyPackages();
+
+            try
+                if isempty(app.server_config_window) || ~isvalid(app.server_config_window) || ~isvalid(app.server_config_window.UIFigure)
+                    app.server_config_window = ServerConfigWindow( ...
+                        @(newCfg) app.startAgentServer(newCfg), ...
+                        @() app.shutdownAgentServer(), ...
+                        defaults);
+                else
+                    app.server_config_window.UIFigure.Visible = 'on';
+                end
+
+                app.server_config_window.setServerRunning(~isempty(app.net), app.serverStatusMessage());
+            catch me
+                warning('ServerConfig:OpenFailed', 'Failed to open server config window: %s', me.message);
+            end
+        end
+
+        function msg = serverStatusMessage(app)
+            if ~isempty(app.net)
+                if ~isempty(app.agent_server_pid)
+                    msg = sprintf('Server connected. PID %d.', app.agent_server_pid);
+                else
+                    msg = 'Server connected.';
+                end
+            else
+                msg = 'Server is not running.';
             end
         end
 
