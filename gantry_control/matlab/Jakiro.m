@@ -516,7 +516,7 @@ classdef Jakiro < handle
             % Both run in the same blocking loop to avoid timer jitter
             
             try
-                [v1,v2,delay_s,run_tag,episode_time_s] = app.ExpPanel.getParameters();
+                [v1,v2,delay_s,run_tag,episode_time_s,settle_delay_s] = app.ExpPanel.getParameters();
             catch
                 warning('Failed to read experiment parameters.');
                 return
@@ -575,7 +575,7 @@ classdef Jakiro < handle
             
             n = 0;
             num_agent_interactions = 0;
-            pause(2); % allow some time for water to calm down from carriages moving to start positions.
+            pause(settle_delay_s); % allow some time for water to calm down from carriages moving to start positions.
             try
                 app.WA.tag = sprintf('%s_PathAgentPre-%s_v1=%.2f_v2max=%.2f_delay=%.1f',run_tag,pathtag1,v1,v2,delay_s);
                 app.WA.align_data_read(); % clear samples during carriage movement before starting

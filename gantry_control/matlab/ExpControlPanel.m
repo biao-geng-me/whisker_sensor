@@ -14,6 +14,7 @@ classdef ExpControlPanel < handle
         Vel1Field
         Vel2Field
         EpisodeTimeField
+        SettleDelayField
         DelayField
         TagField
         % buttons for various path modes
@@ -62,7 +63,10 @@ classdef ExpControlPanel < handle
             % Row 3: Delay start
             lbl4 = uilabel(obj.Grid,'Text','Delay start (s):');
             lbl4.Layout.Row = 3; lbl4.Layout.Column = 1;
-            % Col 2 (row 3) left empty for spacing
+            obj.SettleDelayField = uieditfield(obj.Grid,'numeric','Value',3.0,...
+                'Tooltip',sprintf(['Delay after both carriages move to start position.\n', ...
+                                   ' It is to settle down water motion due to the initial movement.']));
+            obj.SettleDelayField.Layout.Row = 3; obj.SettleDelayField.Layout.Column = 2;
             obj.DelayField = uieditfield(obj.Grid,'numeric','Value',1.0);
             obj.DelayField.Layout.Row = 3; obj.DelayField.Layout.Column = 3;
 
@@ -78,7 +82,7 @@ classdef ExpControlPanel < handle
                 'ButtonPushedFcn',@(btn,evt) obj.onPathPathPressed());
             obj.PathPathBtn.Layout.Row = 5; obj.PathPathBtn.Layout.Column = 2;
 
-            obj.FilterConfigBtn = uibutton(obj.Grid,'push','Text','Config',...
+            obj.FilterConfigBtn = uibutton(obj.Grid,'push','Text','Config Filter',...
                 'ButtonPushedFcn',@(btn,evt) obj.onFilterConfigPressed());
             obj.FilterConfigBtn.Layout.Row = 5; obj.FilterConfigBtn.Layout.Column = 1;
 
@@ -132,13 +136,14 @@ classdef ExpControlPanel < handle
             end
         end
 
-        function [v1,v2,delay_s,tag,episode_time_s] = getParameters(obj)
+        function [v1,v2,delay_s,tag,episode_time_s,settle_delay_s] = getParameters(obj)
             % Return configured parameters
             v1 = obj.Vel1Field.Value;
             v2 = obj.Vel2Field.Value;
             delay_s = obj.DelayField.Value;
             tag = obj.getTag();
             episode_time_s = obj.EpisodeTimeField.Value;
+            settle_delay_s = obj.SettleDelayField.Value;
         end
 
         function tag = getTag(obj)
