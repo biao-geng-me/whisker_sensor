@@ -10,6 +10,17 @@ import numpy as np
 import logging
 import sys
 
+# Set interactive backend before any matplotlib import so live plots work.
+# TkAgg is the standard interactive backend on Windows; falls back gracefully.
+_matplotlib_ok = False
+try:
+    import matplotlib
+    matplotlib.use('TkAgg')
+    import matplotlib.pyplot as _plt
+    _matplotlib_ok = True
+except Exception:
+    _plt = None
+
 _analyze_ok = False
 try:
     from agents.rl_sac_v4_pathblind_hardware.analyze_run import (
@@ -18,6 +29,74 @@ try:
     _analyze_ok = True
 except Exception:
     pass
+
+
+_TERM_COLORS = {
+    'too_far': 'tab:red',
+    'too_close': 'tab:orange',
+    'time_limit': 'tab:blue',
+    'done': 'tab:olive',
+}
+
+
+class LivePlotter:
+    """Persistent interactive matplotlib window updated after each episode."""
+
+    def __init__(self):
+        self._ok = False
+        if not _matplotlib_ok:
+            return
+        try:
+            _plt.ion()
+            self.fig, (self.ax_ret, self.ax_lat) = _plt.subplots(2, 1, figsize=(10, 7))
+            self.fig.suptitle('Training Progress (live)')
+            self._setup_axes()
+            _plt.tight_layout()
+            _plt.show(block=False)
+            _plt.pause(0.1)
+            self._ok = True
+        except Exception as ex:
+            logging.getLogger('server').warning(f'[LivePlotter] Init failed: {ex}')
+
+    def _setup_axes(self):
+        self.ax_ret.set_title('Episode Return')
+        self.ax_ret.set_xlabel('Episode')
+        self.ax_ret.set_ylabel('Return')
+        self.ax_ret.grid(True, alpha=0.3)
+
+        self.ax_lat.set_title('Episode-End Signed Lateral Error')
+        self.ax_lat.set_xlabel('Episode')
+        self.ax_lat.set_ylabel('Error (mm)')
+        for level, color in [( 180, 'tab:orange'), (-180, 'tab:orange'),
+                              ( 300, 'tab:red'),    (-300, 'tab:red')]:
+            self.ax_lat.axhline(level, ls='--', color=color, alpha=0.5)
+        self.ax_lat.grid(True, alpha=0.3)
+
+    def update(self, episode_log_rows: list):
+        if not self._ok or not episode_log_rows:
+            return
+        try:
+            ep_idx   = list(range(1, len(episode_log_rows) + 1))
+            returns  = [float(r['episode_return'])          for r in episode_log_rows]
+            laterals = [float(r['signed_lateral_error_mm']) for r in episode_log_rows]
+            reasons  = [r['termination_reason']             for r in episode_log_rows]
+            colors   = [_TERM_COLORS.get(r, 'tab:gray')     for r in reasons]
+
+            for ax, vals in [(self.ax_ret, returns), (self.ax_lat, laterals)]:
+                ax.cla()
+            self._setup_axes()
+
+            self.ax_ret.plot(ep_idx, returns,  color='0.6', alpha=0.5, lw=1)
+            self.ax_lat.plot(ep_idx, laterals, color='0.6', alpha=0.5, lw=1)
+            self.ax_ret.scatter(ep_idx, returns,  c=colors, s=35, zorder=3)
+            self.ax_lat.scatter(ep_idx, laterals, c=colors, s=35, zorder=3)
+
+            self.fig.suptitle(f'Training Progress (live) — episode {len(episode_log_rows)}')
+            _plt.tight_layout()
+            self.fig.canvas.draw_idle()
+            _plt.pause(0.05)
+        except Exception as ex:
+            logging.getLogger('server').debug(f'[LivePlotter] Update error: {ex}')
 
 # Protocol Header Bytes
 CMD_START    = 0x01
@@ -79,6 +158,16 @@ def main():
     logger.debug(f"[PHASE 1] Full config: {config}")
     
     agent = AgentWrapper(config)
+
+    # Live training plot (train mode only, requires interactive display)
+    live_plotter = None
+    if config.get('mode') == 'train' and _matplotlib_ok:
+        live_plotter = LivePlotter()
+        if not live_plotter._ok:
+            live_plotter = None
+            logger.warning('[LivePlotter] Could not open interactive window; live plots disabled.')
+        else:
+            logger.info('[LivePlotter] Live training plot window opened.')
 
     net.send_string("READY")
     logger.info("[PHASE 1] Sent READY to MATLAB")
@@ -371,6 +460,10 @@ def main():
                     logger.debug(f"[Episode {episode_num}] Convergence logs updated")
                 except Exception as log_ex:
                     logger.warning(f"[Episode {episode_num}] Convergence logging failed: {log_ex}")
+
+                # Update live plot window
+                if live_plotter is not None:
+                    live_plotter.update(episode_log_rows)
 
             if needs_reset:
                 logger.info(f"[Episode {episode_num}] Agent requested reset")
