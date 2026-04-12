@@ -59,7 +59,7 @@ classdef ExpControlPanel < handle
             lbl3 = uilabel(obj.Grid,'Text','Episode Time (s):');
             lbl3.Layout.Row = 2; lbl3.Layout.Column = 1;
             % Col 2 (row 2) left empty for spacing
-            obj.EpisodeTimeField = uieditfield(obj.Grid,'numeric','Value',22.0);
+            obj.EpisodeTimeField = uieditfield(obj.Grid,'numeric','Value',20.0);
             obj.EpisodeTimeField.Layout.Row = 2; obj.EpisodeTimeField.Layout.Column = 3;
 
             % Row 3: Delay start
@@ -69,7 +69,9 @@ classdef ExpControlPanel < handle
                 'Tooltip',sprintf(['Delay after both carriages move to start position.\n', ...
                                    ' It is to settle down water motion due to the initial movement.']));
             obj.SettleDelayField.Layout.Row = 3; obj.SettleDelayField.Layout.Column = 2;
-            obj.DelayField = uieditfield(obj.Grid,'numeric','Value',1.0);
+            obj.DelayField = uieditfield(obj.Grid,'numeric','Value',3.0,...
+                'Tooltip',sprintf(['Delay before agent control starts.\n', ...
+                                   ' It is to make sure the sensor array starts in the wake.']));
             obj.DelayField.Layout.Row = 3; obj.DelayField.Layout.Column = 3;
 
             % Row 4: Run tag
