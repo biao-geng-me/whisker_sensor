@@ -34,6 +34,87 @@ Use the game controller to adjust the position. Controls:
 
 When accidents happen, mostly carriages colliding with one another or hitting the edge, turn off the power immediately and restart the process.
 
+### Reset
+
+Should collision happen, you'll hear heavy click sounds. The positions of the carriages will be inaccurate. A reset is needed. Turn off the power and move carriages to marked positions manually. Turn the sensor box so the angle of attack is zero.
+
 ### Running path tracking
 
-To be added.
+Select a path file in the Experiment panel of the Jakiro app. Click a run mode (Path-Path, PathHuman, PathAgentPre, or PathAgent). The front carriage will follow the selected path profile.
+
+For **Agent-Train** mode, the Python RL server must be running first (see [RL agent server](#rl-agent-server) below).
+
+## MATLAB dependencies
+
+### Simulink 3D Animation (vrjoystick)
+
+Joystick/gamepad input uses `vrjoystick`, which ships with the **Simulink 3D Animation** toolbox. Install it from the MATLAB Add-On Explorer if it is not already present:
+
+1. In MATLAB, go to **Home → Add-Ons → Get Add-Ons**.
+2. Search for **Simulink 3D Animation** and install it.
+3. Verify with `vrjoystick(1)` in the command window — it should return a joystick object when a controller is connected.
+
+### HebiKeyboard
+
+Keyboard input uses `HebiKeyboard`, a utility class from the **HEBI Robotics MATLABInput**. It reads key states at a hardware level (`'native'` mode) so control responds even when the MATLAB figure is not in focus.
+
+1. Download the HEBI Robotics MATLAB API from [github.com/HebiRobotics/MatlabInput](https://github.com/HebiRobotics/MatlabInput) (click **Code → Download ZIP** or clone the repo).
+2. Extract the archive to a convenient location, e.g. `C:\tools\hebi-MATLABInput`.
+3. Add it to the MATLAB path (see path setup below).
+
+Verify the install with `HebiKeyboard('native')` in the MATLAB command window — it should return a keyboard object without error.
+
+### MATLAB path setup
+
+`Jakiro.m` depends on the `wavi/` module (data acquisition) and the HEBI Robotics API for keyboard input. Before launching, add all required directories to the MATLAB path:
+
+```matlab
+addpath('path/to/whisker_sensor_repo/gantry_control/matlab');
+addpath('path/to/whisker_sensor_repo/wavi');
+addpath('path/to/hebi-MATLABInput');  % HebiKeyboard
+```
+
+Or use **Home → Set Path** and add the three folders above. Save the path so this is not needed on every launch.
+
+## Python environment (RL agent server)
+
+### Requirements
+
+The Python server requires:
+
+- Python 3.10+
+- `numpy`
+- `matplotlib` (TkAgg backend — standard on Windows)
+- `torch` (PyTorch, CPU or CUDA)
+
+### Environment location (hardcoded)
+
+The MATLAB app launches the server by activating a virtual environment at a **hardcoded path**:
+
+```
+%USERPROFILE%\py_envs\rl\
+```
+
+For example, on a typical Windows machine this is `C:\Users\<YourName>\py_envs\rl\`.
+
+Create the environment there:
+
+```powershell
+python -m venv "$env:USERPROFILE\py_envs\rl"
+& "$env:USERPROFILE\py_envs\rl\Scripts\Activate.ps1"
+pip install numpy matplotlib torch
+```
+
+Install a CUDA-enabled PyTorch build if GPU training is desired (see [pytorch.org](https://pytorch.org/get-started/locally/) for the correct install command).
+
+### Starting the server manually
+
+The Jakiro app can launch the server automatically via the **Server Config** button in the Experiment panel. To start it manually instead:
+
+```powershell
+& "$env:USERPROFILE\py_envs\rl\Scripts\Activate.ps1"
+cd path/to/whisker_sensor_repo/gantry_control/python
+python main_server_loop.py
+```
+
+The server listens on `127.0.0.1:65432` by default. Connect from Jakiro using the **Connect Agent** button after the server reports it is waiting for a client.
