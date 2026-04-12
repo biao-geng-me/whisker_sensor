@@ -204,6 +204,9 @@ classdef Jakiro < handle
             if isfield(userConfig, 'keep_checkpoints')
                 config.keep_checkpoints = userConfig.keep_checkpoints;
             end
+            if isfield(userConfig, 'checkpoint_every_episodes')
+                config.checkpoint_every_episodes = userConfig.checkpoint_every_episodes;
+            end
 
             % connect_agent_server Connect to the agent server at the specified address and port
             try

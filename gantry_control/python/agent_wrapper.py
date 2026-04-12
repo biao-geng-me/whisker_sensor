@@ -166,6 +166,7 @@ class AgentWrapper:
             msg = f"[Agent] {updates_run} updates in {update_seconds:.1f}s"
             if metrics:
                 msg += f" | actor={metrics['actor_loss']:.3f} q1={metrics['q1_loss']:.3f} alpha={metrics['alpha']:.3f}"
+                self._sac_last_update_metrics = metrics
             logger.info(msg)
         else:
             logger.debug(f"[Agent] No updates (replay size={self._sac_replay.size}, need>={self._sac_cfg.update_after})")
@@ -303,8 +304,10 @@ class AgentWrapper:
         # --- Checkpoint / resume ---
         self._sac_output_dir = self.config.get("output_dir", "")
         self._sac_keep_checkpoints = int(self.config.get("keep_checkpoints", 5))
+        self._sac_checkpoint_every = int(self.config.get("checkpoint_every_episodes", 1))
         self._sac_total_env_steps = 0
         self._sac_episodes_completed = 0
+        self._sac_last_update_metrics = {}
 
         # Resume from checkpoint if requested
         resume = self.config.get("resume", False)
@@ -505,15 +508,12 @@ class AgentWrapper:
     # ------------------------------------------------------------------
 
     def save_checkpoint(self, episode_num, total_steps):
-        """Save model + replay to output_dir following train.py pattern."""
+        """Save model weights every episode (latest) and full checkpoint+replay every N episodes."""
         if not self.use_sac_train or not self._sac_output_dir:
             return None
         try:
             output_dir = Path(self._sac_output_dir)
             output_dir.mkdir(parents=True, exist_ok=True)
-
-            ckpt_path = output_dir / f'checkpoint_{total_steps:07d}.pt'
-            replay_path = output_dir / f'replay_{total_steps:07d}.npz'
 
             checkpoint = {
                 'actor': self._sac_agent.actor.state_dict(),
@@ -536,20 +536,28 @@ class AgentWrapper:
                     'torch': torch.get_rng_state(),
                     'cuda': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
                 },
-                'replay_path': str(replay_path),
             }
-            torch.save(checkpoint, ckpt_path)
-            self._sac_replay.save(str(replay_path))
 
-            # Copy to latest
-            shutil.copyfile(ckpt_path, output_dir / 'latest_checkpoint.pt')
-            shutil.copyfile(replay_path, output_dir / 'latest_replay.npz')
+            # Always update latest model weights (fast, no replay)
+            torch.save(checkpoint, output_dir / 'latest_checkpoint.pt')
 
-            # Prune old checkpoints
-            self._prune_checkpoints(output_dir, self._sac_keep_checkpoints)
-
-            logger.info(f"[Agent] Checkpoint saved: {ckpt_path}")
-            return str(ckpt_path)
+            # Save full checkpoint + replay every N episodes
+            if episode_num % self._sac_checkpoint_every == 0:
+                ckpt_path = output_dir / f'checkpoint_{total_steps:07d}.pt'
+                replay_path = output_dir / f'replay_{total_steps:07d}.npz'
+                checkpoint['replay_path'] = str(replay_path)
+                torch.save(checkpoint, ckpt_path)
+                self._sac_replay.save(str(replay_path))
+                shutil.copyfile(replay_path, output_dir / 'latest_replay.npz')
+                self._prune_checkpoints(output_dir, self._sac_keep_checkpoints)
+                logger.info(f"[Agent] Full checkpoint saved: {ckpt_path}")
+                return str(ckpt_path)
+            else:
+                logger.debug(
+                    f"[Agent] Latest model updated (episode {episode_num}, "
+                    f"next full save at episode divisible by {self._sac_checkpoint_every})"
+                )
+                return None
         except Exception as ex:
             logger.error(f"[Agent.save_checkpoint] Exception: {ex}", exc_info=True)
             return None

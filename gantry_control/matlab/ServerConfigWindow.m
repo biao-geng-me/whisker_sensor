@@ -17,6 +17,7 @@ classdef ServerConfigWindow < handle
         ResumePathField
         ResumePathBrowseBtn
         KeepCheckpointsField
+        CheckpointEveryField
 
         StartBtn
         ShutdownBtn
@@ -138,6 +139,14 @@ classdef ServerConfigWindow < handle
                 'RoundFractionalValues', 'on', 'LowerLimit', 1, 'LowerLimitInclusive', 'on');
             obj.KeepCheckpointsField.Layout.Row = 9;
             obj.KeepCheckpointsField.Layout.Column = [2 3];
+
+            lblCkptEvery = uilabel(obj.Grid, 'Text', 'Save every N episodes');
+            lblCkptEvery.Layout.Row = 10;
+            obj.CheckpointEveryField = uieditfield(obj.Grid, 'numeric', ...
+                'Value', obj.readDefault(defaults, 'checkpoint_every_episodes', 1), ...
+                'RoundFractionalValues', 'on', 'LowerLimit', 1, 'LowerLimitInclusive', 'on');
+            obj.CheckpointEveryField.Layout.Row = 10;
+            obj.CheckpointEveryField.Layout.Column = [2 3];
 
             obj.StatusLabel = uilabel(obj.Grid, 'Text', 'Server is not running.', 'WordWrap', 'on');
             obj.StatusLabel.Layout.Row = 12;
@@ -273,6 +282,7 @@ classdef ServerConfigWindow < handle
             config.resume = logical(obj.ResumeCheck.Value);
             config.resume_path = char(string(obj.ResumePathField.Value));
             config.keep_checkpoints = max(1, round(double(obj.KeepCheckpointsField.Value)));
+            config.checkpoint_every_episodes = max(1, round(double(obj.CheckpointEveryField.Value)));
         end
 
         function ensurePolicyOption(obj, value)
