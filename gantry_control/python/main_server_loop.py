@@ -1,6 +1,7 @@
 from connection_manager import ConnectionManager
 from agent_wrapper import AgentWrapper
 from hpc_client import HPCClient
+from pathlib import Path
 import time
 import csv
 import os
@@ -8,6 +9,15 @@ import datetime
 import numpy as np
 import logging
 import sys
+
+_analyze_ok = False
+try:
+    from agents.rl_sac_v4_pathblind_hardware.analyze_run import (
+        make_training_curves, make_loss_curves_log, make_episode_curves,
+    )
+    _analyze_ok = True
+except Exception:
+    pass
 
 # Protocol Header Bytes
 CMD_START    = 0x01
@@ -97,7 +107,30 @@ def main():
     recv_times = []
     agent_times = []
     send_times = []
-    episode_num = 0 
+    episode_num = 0
+
+    # Convergence logging (train mode): in-memory rows + CSV output
+    output_dir_str = config.get('output_dir', '')
+    ckpt_output_dir = Path(output_dir_str) if output_dir_str else None
+    train_log_rows: list[dict] = []
+    episode_log_rows: list[dict] = []
+    # Pre-load existing logs if resuming
+    if ckpt_output_dir and ckpt_output_dir.is_dir():
+        for fname, target in [('train_log.csv', train_log_rows), ('episode_log.csv', episode_log_rows)]:
+            p = ckpt_output_dir / fname
+            if p.exists():
+                with p.open(newline='') as f:
+                    target.extend(csv.DictReader(f))
+        if train_log_rows:
+            logger.info(f"[Convergence] Loaded {len(train_log_rows)} existing rows from {ckpt_output_dir}")
+
+    # Per-episode reward / lateral tracking (reset in CMD_START)
+    episode_rewards: list[float] = []
+    episode_signed_laterals: list[float] = []
+    last_signed_lateral = 0.0
+    last_reward_info: dict = {}
+    last_done = 0.0
+    last_truncated_flag = False
 
     # PHASE 2 & 3: The State Machine Loop
     logger.info("[PHASE 2] Starting control loop...")
@@ -121,6 +154,12 @@ def main():
             send_times = []
             episode_trajectory = []
             episode_step = 0
+            episode_rewards = []
+            episode_signed_laterals = []
+            last_signed_lateral = 0.0
+            last_reward_info = {}
+            last_done = 0.0
+            last_truncated_flag = False
             logger.info(f"\n[Episode {episode_num}] STARTED")
             
             logger.debug(f"[Episode {episode_num}] Waiting for initial state data (expecting {step_msg_size} doubles)...")
@@ -176,9 +215,17 @@ def main():
             # Server-side reward replaces MATLAB reward when path data is available.
             # Done/truncated signals still come from MATLAB to keep the protocol in sync.
             if agent.use_sac_train and agent._sac_current_path_data is not None:
-                reward, _, _ = agent.compute_reward(state)
+                reward, _, reward_info = agent.compute_reward(state)
+                last_signed_lateral = float(reward_info.get('signed_lateral_error_mm', 0.0))
+                episode_signed_laterals.append(last_signed_lateral)
+                last_reward_info = reward_info
             else:
                 reward = matlab_reward
+                reward_info = {}
+
+            episode_rewards.append(reward)
+            last_done = done
+            last_truncated_flag = bool(truncated >= 0.5)
 
             episode_done = (done >= 0.5) or bool(truncated)
             
@@ -273,6 +320,58 @@ def main():
                 if ckpt:
                     logger.info(f"[Episode {episode_num}] Checkpoint saved at step {agent._sac_total_env_steps}")
 
+            # --- Convergence logging (train mode only) ---
+            if ckpt_output_dir and agent.use_sac_train:
+                ep_return = sum(episode_rewards)
+                mean_rwd = ep_return / len(episode_rewards) if episode_rewards else 0.0
+                mean_lat = (
+                    sum(episode_signed_laterals) / len(episode_signed_laterals)
+                    if episode_signed_laterals else 0.0
+                )
+                # Termination reason
+                if last_reward_info.get('too_far'):
+                    term_reason = 'too_far'
+                elif last_reward_info.get('too_close'):
+                    term_reason = 'too_close'
+                elif last_truncated_flag:
+                    term_reason = 'time_limit'
+                else:
+                    term_reason = 'done'
+
+                sac_m = getattr(agent, '_sac_last_update_metrics', {})
+                train_row = {
+                    'total_env_steps': str(agent._sac_total_env_steps),
+                    'mean_reward_this_episode': f'{mean_rwd:.6f}',
+                    'mean_lateral_error_mm': f'{mean_lat:.4f}',
+                    'actor_loss': str(sac_m.get('actor_loss', '')),
+                    'q1_loss': str(sac_m.get('q1_loss', '')),
+                    'q2_loss': str(sac_m.get('q2_loss', '')),
+                    'alpha': str(sac_m.get('alpha', '')),
+                    'episode_return': f'{ep_return:.6f}',
+                }
+                ep_row = {
+                    'episode_return': f'{ep_return:.6f}',
+                    'signed_lateral_error_mm': f'{last_signed_lateral:.4f}',
+                    'termination_reason': term_reason,
+                }
+                train_log_rows.append(train_row)
+                episode_log_rows.append(ep_row)
+
+                try:
+                    ckpt_output_dir.mkdir(parents=True, exist_ok=True)
+                    _write_log_csv(ckpt_output_dir / 'train_log.csv', train_log_rows,
+                                   list(train_row.keys()))
+                    _write_log_csv(ckpt_output_dir / 'episode_log.csv', episode_log_rows,
+                                   list(ep_row.keys()))
+                    if _analyze_ok and len(train_log_rows) >= 1:
+                        make_training_curves(train_log_rows, ckpt_output_dir)
+                        make_loss_curves_log(train_log_rows, ckpt_output_dir)
+                    if _analyze_ok and len(episode_log_rows) >= 2:
+                        make_episode_curves(episode_log_rows, ckpt_output_dir)
+                    logger.debug(f"[Episode {episode_num}] Convergence logs updated")
+                except Exception as log_ex:
+                    logger.warning(f"[Episode {episode_num}] Convergence logging failed: {log_ex}")
+
             if needs_reset:
                 logger.info(f"[Episode {episode_num}] Agent requested reset")
                 net.send_string("RESET_NEEDED")
@@ -297,6 +396,14 @@ def main():
     logger.info("=== Shutting Down ===")
     net.close()
     logger.info("Server shut down complete.")
+
+def _write_log_csv(path: Path, rows: list, fieldnames: list):
+    """Rewrite a log CSV from in-memory rows."""
+    with path.open('w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
 
 def make_obs_var_names(num_whiskers: int) -> list[str]:
     return ['t', 'x', 'y', 'x_vel', 'y_vel'] + [
