@@ -47,7 +47,7 @@ classdef ServerConfigWindow < handle
             obj.ShutdownCallback = shutdownCallback;
 
             obj.PythonRoot = obj.readDefault(defaults, 'python_root', fullfile(pwd, 'gantry_control', 'python'));
-            obj.PolicyOptions = obj.readDefault(defaults, 'policy_options', {'agents/hardware_handoff_v2'});
+            obj.PolicyOptions = obj.readDefault(defaults, 'policy_options', {'agents/rl_sac_v4_pathblind_hardware'});
             selectedPolicy = obj.readDefault(defaults, 'policy_package_dir', obj.PolicyOptions{1});
 
             obj.UIFigure = uifigure('Name', 'Server Config', 'Position', [280 180 520 520]);
@@ -58,7 +58,7 @@ classdef ServerConfigWindow < handle
             lblMode = uilabel(obj.Grid, 'Text', 'Mode');
             lblMode.Layout.Row = 1;
             obj.ModeDropdown = uidropdown(obj.Grid, 'Items', {'infer', 'train'}, ...
-                'Value', obj.readDefault(defaults, 'mode', 'infer'));
+                'Value', obj.readDefault(defaults, 'mode', 'train'));
             obj.ModeDropdown.Layout.Row = 1;
             obj.ModeDropdown.Layout.Column = [2 3];
 
@@ -106,7 +106,7 @@ classdef ServerConfigWindow < handle
             % --- Checkpoint / resume controls ---
             lblOutput = uilabel(obj.Grid, 'Text', 'Output directory');
             lblOutput.Layout.Row = 6;
-            defaultOutputDir = obj.readDefault(defaults, 'output_dir', '');
+            defaultOutputDir = obj.readDefault(defaults, 'output_dir', fullfile(obj.PythonRoot, 'checkpoints'));
             obj.OutputDirField = uieditfield(obj.Grid, 'text', 'Value', defaultOutputDir);
             obj.OutputDirField.Layout.Row = 6;
             obj.OutputDirField.Layout.Column = 2;
@@ -115,15 +115,22 @@ classdef ServerConfigWindow < handle
             obj.OutputDirBrowseBtn.Layout.Row = 6;
             obj.OutputDirBrowseBtn.Layout.Column = 3;
 
+            defaultLatestCkpt = fullfile(defaultOutputDir, 'latest_checkpoint.pt');
+            defaultResumeExists = isfile(defaultLatestCkpt);
             obj.ResumeCheck = uicheckbox(obj.Grid, ...
                 'Text', 'Resume from checkpoint', ...
-                'Value', obj.readDefault(defaults, 'resume', false));
+                'Value', obj.readDefault(defaults, 'resume', defaultResumeExists));
             obj.ResumeCheck.Layout.Row = 7;
             obj.ResumeCheck.Layout.Column = [1 2];
 
             lblResume = uilabel(obj.Grid, 'Text', 'Resume checkpoint');
             lblResume.Layout.Row = 8;
-            defaultResumePath = obj.readDefault(defaults, 'resume_path', '');
+            if defaultResumeExists
+                defaultResumeFallback = defaultLatestCkpt;
+            else
+                defaultResumeFallback = '';
+            end
+            defaultResumePath = obj.readDefault(defaults, 'resume_path', defaultResumeFallback);
             obj.ResumePathField = uieditfield(obj.Grid, 'text', 'Value', defaultResumePath);
             obj.ResumePathField.Layout.Row = 8;
             obj.ResumePathField.Layout.Column = 2;

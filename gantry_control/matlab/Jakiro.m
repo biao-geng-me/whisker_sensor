@@ -25,10 +25,10 @@ classdef Jakiro < handle
         agent_server_address = '127.0.0.1'; % address of the agent server (for rl agent control modes)
         agent_server_port = 65432; % port of the agent server (for rl agent control modes)
         agent_server_hpc_port = 5555;
-        agent_server_mode = 'infer';
+        agent_server_mode = 'train';
         agent_server_max_episodes = 1;
         agent_server_record_trajectory = false;
-        agent_policy_package_dir = 'agents/hardware_handoff_v2';
+        agent_policy_package_dir = 'agents/rl_sac_v4_pathblind_hardware';
         agent_server_pid = [];
         server_config_window = [];
         currentState = []; % current state for RL agent control
