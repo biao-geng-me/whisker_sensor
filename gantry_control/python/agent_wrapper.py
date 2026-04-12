@@ -260,8 +260,8 @@ class AgentWrapper:
         cfg.device = self.config.get("policy_device", "cpu")
         cfg.episode_time_ms = float(self.config.get("episode_time_ms", cfg.episode_time_ms))
         self._sac_cfg = cfg
-        self._sac_fixed_vx = float(self.config.get("fixed_vx", 0.2))
-        self._sac_y_speed_limit = float(self.config.get("y_speed_limit", 0.15))
+        self._sac_fixed_vx = float(self.config.get("fixed_vx", cfg.fixed_x_speed_mm_per_ms))
+        self._sac_y_speed_limit = float(self.config.get("y_speed_limit", cfg.y_speed_limit_mm_per_ms))
         self._sac_agent = SACAgent(kin_dim=cfg.kin_dim, action_dim=cfg.action_dim, cfg=cfg)
         self._sac_replay = ReplayBuffer(
             sensor_shape=cfg.sensor_shape,
