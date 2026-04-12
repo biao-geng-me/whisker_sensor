@@ -1,0 +1,7 @@
+{
+  "source_run": "/expanse/lustre/projects/mai103/hpandeya/Whiskers/onr_dynamic_beta2/rl_sac_v2_pathblind_runs/v2-pathblind-path7-48h-6env-pstart_47676053",
+  "selected_checkpoint": "checkpoint_0255000.pt",
+  "actor_only_weights": "actor_only_0255000.pt",
+  "selection_basis": "requested step_0255000 from v2 path7 path-blind run",
+  "note": "Path-blind v2 policy uses fixed global x speed and learned global y velocity. Path geometry is not used for inference."
+}

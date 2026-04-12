@@ -1,0 +1,59 @@
+{
+  "observation": {
+    "sensor_history_shape": [
+      16,
+      3,
+      3,
+      2
+    ],
+    "sensor_history_meaning": "16 recent frames of the 3x3 whisker array with 2 channels per whisker",
+    "sensor_frame_order": {
+      "row_0": [
+        "w001",
+        "w002",
+        "w003"
+      ],
+      "row_1": [
+        "w004",
+        "w005",
+        "w006"
+      ],
+      "row_2": [
+        "w007",
+        "w008",
+        "w009"
+      ]
+    },
+    "channel_count": 2,
+    "kin_shape": [
+      6
+    ],
+    "kin_order": [
+      "x_mm",
+      "y_mm",
+      "vx_mm_per_ms",
+      "vy_mm_per_ms",
+      "prev_y_velocity_mm_per_ms",
+      "normalized_time"
+    ]
+  },
+  "control_timing": {
+    "sensor_rate_hz": 80.0,
+    "sensor_frame_period_ms": 12.5,
+    "rl_interval_frames": 4,
+    "control_period_ms": 50.0
+  },
+  "action": {
+    "policy_output_shape": [
+      1
+    ],
+    "policy_output_range": [
+      -1.0,
+      1.0
+    ],
+    "meaning": "normalized global-y velocity command",
+    "y_velocity_limit_mm_per_ms": 0.15,
+    "fixed_x_speed_mm_per_ms": 0.15,
+    "vel_max_mm_per_ms": 0.4
+  }
+}

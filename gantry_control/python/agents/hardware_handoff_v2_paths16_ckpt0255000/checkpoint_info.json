@@ -1,0 +1,7 @@
+{
+  "selected_checkpoint": "checkpoint_0255000.pt",
+  "actor_only_weights": "actor_only_0255000.pt",
+  "source_run_dir": "rl_sac_v2_pathblind_runs/paths16_backup_2",
+  "selection_basis": "backup of multipath paths16 run; checkpoint_0255000",
+  "notes": "Path-blind multi-path policy for hardware inference."
+}
