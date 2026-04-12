@@ -367,7 +367,9 @@ class HardwareTrainingEnv:
         too_close = float(info.get('object_x_gap_mm', np.inf)) < float(self.cfg.min_object_x_gap_terminate_mm)
         time_limit_reached = bool(float(pose.time_ms) >= float(self.cfg.episode_time_ms))
 
-        done = bool(runtime_done or too_far or too_close)
+        finish_line_reached = bool(info.get('finish_line_reached', False))
+
+        done = bool(runtime_done or too_far or too_close or finish_line_reached)
         truncated = bool(runtime_truncated or time_limit_reached)
 
         if too_far:
@@ -378,6 +380,7 @@ class HardwareTrainingEnv:
         info.update({
             'too_far': bool(too_far),
             'too_close': bool(too_close),
+            'finish_line_reached': bool(finish_line_reached),
             'time_limit_reached': bool(time_limit_reached),
             'runtime_done': bool(runtime_done),
             'runtime_truncated': bool(runtime_truncated),

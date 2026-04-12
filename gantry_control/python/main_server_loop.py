@@ -181,6 +181,7 @@ def main():
     obs_var_names = make_obs_var_names(num_whiskers)
     # Total received per step = states + 1 reward + 1 done flag + 1 truncated flag
     step_msg_size = state_dim + 3 
+    start_msg_size = state_dim + 4  # state + path index + front start x + object speed + delay
     record_trajectory = config.get("record_trajectory", False)  # Optional trajectory recording
 
     # Trajectory output directory (episode_trajectories/ relative to this script)
@@ -251,18 +252,24 @@ def main():
             last_truncated_flag = False
             logger.info(f"\n[Episode {episode_num}] STARTED")
             
-            logger.debug(f"[Episode {episode_num}] Waiting for initial state data (expecting {step_msg_size} doubles)...")
-            initial_data = net.receive_doubles(step_msg_size)
+            logger.debug(f"[Episode {episode_num}] Waiting for initial state data (expecting {start_msg_size} doubles)...")
+            initial_data = net.receive_doubles(start_msg_size)
             logger.debug(f"[Episode {episode_num}] Received initial data, shape: {len(initial_data)}")
             
             initial_state = initial_data[0:state_dim]
+            episode_meta = {
+                'path_index': int(round(float(initial_data[state_dim]))),
+                'front_start_x_mm': float(initial_data[state_dim + 1]),
+                'object_speed_mm_per_ms': float(initial_data[state_dim + 2]),
+                'delay_ms': float(initial_data[state_dim + 3]),
+            }
             logger.debug(f"[Episode {episode_num}] Extracted initial state, shape: {len(initial_state)}")
             logger.debug(f"[Episode {episode_num}] First 5 state values: {initial_state[:5] if len(initial_state) >= 5 else initial_state}")
             
             # Reset agent memory and get first action
             try:
                 logger.debug(f"[Episode {episode_num}] Calling agent.reset()...")
-                action = agent.reset(initial_state)
+                action = agent.reset(initial_state, episode_meta=episode_meta)
                 logger.debug(f"[Episode {episode_num}] agent.reset() returned, action type: {type(action)}")
                 
                 if action is None:
@@ -301,16 +308,19 @@ def main():
             done = step_data[state_dim + 1]
             truncated = step_data[state_dim + 2]
 
-            # Server-side reward replaces MATLAB reward when path data is available.
-            # Done/truncated signals still come from MATLAB to keep the protocol in sync.
+            reward = matlab_reward
+            reward_info = {}
+
+            # MATLAB remains the source of truth for training reward by default.
+            # The synchronized server-side path model is still useful for
+            # diagnostics and future bring-up when explicitly enabled.
             if agent.use_sac_train and agent._sac_current_path_data is not None:
-                reward, _, reward_info = agent.compute_reward(state)
+                server_reward, _, reward_info = agent.compute_reward(state)
                 last_signed_lateral = float(reward_info.get('signed_lateral_error_mm', 0.0))
                 episode_signed_laterals.append(last_signed_lateral)
                 last_reward_info = reward_info
-            else:
-                reward = matlab_reward
-                reward_info = {}
+                if agent.reward_source == 'server':
+                    reward = server_reward
 
             episode_rewards.append(reward)
             last_done = done

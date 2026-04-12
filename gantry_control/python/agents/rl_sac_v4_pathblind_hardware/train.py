@@ -290,6 +290,8 @@ def termination_reason(info: dict, truncated: bool) -> str:
         return 'too_close'
     if info.get('too_far', False):
         return 'too_far'
+    if info.get('finish_line_reached', False):
+        return 'finish_line'
     if truncated or info.get('time_limit_reached', False):
         return 'time_limit'
     if info.get('runtime_done', False):

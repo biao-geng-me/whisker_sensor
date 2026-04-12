@@ -168,13 +168,15 @@ classdef Jakiro < handle
             config.policy_package_dir = userConfig.policy_package_dir;
             % Parameters used by the Python agent for observation normalisation and action scaling
             try
-                [~,~,~,~,episode_time_s,~] = app.ExpPanel.getParameters();
+                [v1,v2,~,~,episode_time_s,~] = app.ExpPanel.getParameters();
             catch
+                v1 = 0.2;
+                v2 = 0.16;
                 episode_time_s = 20.0; % default fallback
             end
             config.episode_time_ms = episode_time_s * 1000;
-            config.fixed_vx = 0.2;         % mm/ms — fixed forward speed used by SAC adapter
-            config.y_speed_limit = 0.15;   % mm/ms — lateral speed limit for SAC action scaling
+            config.fixed_vx = v2;          % mm/ms — fixed forward speed for the RL-controlled back carriage
+            config.reward_source = 'matlab'; % hardware loop remains the reward source of truth
 
             % Pass path data so the server can compute reward
             try
@@ -233,6 +235,27 @@ classdef Jakiro < handle
             config.max_episodes = app.agent_server_max_episodes;
             config.record_trajectory = app.agent_server_record_trajectory;
             config.policy_package_dir = app.agent_policy_package_dir;
+        end
+
+        function state = makeInitialRlState(app, x_mm, y_mm)
+            n_q = app.n_rl_interval;
+            dt_q_ms = 1000 / app.wa_Fs;
+            t_query = (-(n_q-1):0) * dt_q_ms;
+
+            cc2_state_buffer = zeros(5, n_q);
+            cc2_state_buffer(1,:) = t_query;
+            cc2_state_buffer(2,:) = x_mm;
+            cc2_state_buffer(3,:) = y_mm;
+
+            state = [cc2_state_buffer; zeros(app.n_ch_total - 5, n_q)];
+        end
+
+        function meta = makeEpisodeStartMeta(~, path_idx, start_x_mm, object_speed_mm_per_ms, delay_s)
+            meta = struct();
+            meta.path_index = double(path_idx) - 1; % zero-based for Python list indexing
+            meta.front_start_x_mm = double(start_x_mm);
+            meta.object_speed_mm_per_ms = double(object_speed_mm_per_ms);
+            meta.delay_ms = double(delay_s) * 1000;
         end
 
         function options = discoverPolicyPackages(app)
@@ -821,7 +844,7 @@ classdef Jakiro < handle
             num_agent_interactions = 0;
             pause(settle_delay_s); % allow some time for water to calm down from carriages moving to start positions.
             try
-                app.WA.tag = sprintf('%s_PathAgentPre-%s_v1=%.2f_v2max=%.2f_delay=%.1f',run_tag,pathtag1,v1,v2,delay_s);
+                app.WA.tag = sprintf('%s_PathAgentPre-%s_front=%.2f_rlvx=%.2f_delay=%.1f',run_tag,pathtag1,v1,v2,delay_s);
                 app.WA.align_data_read(); % clear samples during carriage movement before starting
             catch
 
@@ -1078,21 +1101,25 @@ classdef Jakiro < handle
 
                 % DAQ: align after carriage movement
                 try
-                    app.WA.tag = sprintf('%s_PathAgentTrain-%s_v1=%.2f_v2max=%.2f_delay=%.1f_ep%03d', ...
+                    app.WA.tag = sprintf('%s_PathAgentTrain-%s_front=%.2f_rlvx=%.2f_delay=%.1f_ep%03d', ...
                         run_tag, pathtag1, v1, v2, delay_s, ep);
                     app.WA.align_data_read();
                 catch
                 end
 
-                cc2_state_buffer = zeros(5, app.n_rl_interval);
+                app.currentState = app.makeInitialRlState(start_x2, start_y2);
+                cc2_state_buffer = app.currentState(1:5,:);
                 is_done_cc1 = false;
                 is_done = 0;
                 truncated = 0;
+                terminal_sent = false;
                 num_agent_interactions = 0;
                 reward = 0;
 
                 app.run_start_time = datetime('now');
-                action = app.net.startEpisode(app.currentState(:)');
+                action = app.net.startEpisode( ...
+                    app.currentState(:)', ...
+                    app.makeEpisodeStartMeta(path_idx, start_x, v1, delay_s));
 
                 app.CC1.hArrow.Visible = 'on';
                 app.CC2.hArrow.Visible = 'on';
@@ -1217,7 +1244,11 @@ classdef Jakiro < handle
                         app.currentState = [cc2_state_buffer; bending_moments'];
                         fprintf('Episode %d, Step %d, geting action ...', ...
                             ep, num_agent_interactions);
-                        action = app.net.stepRL(app.currentState(:)', reward, is_done, truncated);
+                        episode_done_flag = logical(is_done || is_done_cc1);
+                        action = app.net.stepRL(app.currentState(:)', reward, episode_done_flag, truncated);
+                        if truncated || episode_done_flag
+                            terminal_sent = true;
+                        end
                         fprintf('done. action=[%.3f, %.3f]\n', action);
                     end
 
@@ -1236,9 +1267,11 @@ classdef Jakiro < handle
                         pause(0.0005);
                     end
 
-                    if truncated || is_done
+                    if (truncated || is_done || is_done_cc1) && terminal_sent
                         if truncated
                             fprintf('[PathAgentTrain] Episode truncated after %.2f s\n', elapsed_time_sec);
+                        elseif is_done_cc1 && ~is_done
+                            fprintf('[PathAgentTrain] Episode ended (path complete) after %.2f s\n', elapsed_time_sec);
                         else
                             fprintf('[PathAgentTrain] Episode ended (is_done) after %.2f s\n', elapsed_time_sec);
                         end

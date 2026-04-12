@@ -37,6 +37,8 @@ class AgentWrapper:
         self.action_dim = config.get("action_dim", 2)
         self.n_rl_interval = config.get("n_rl_interval")
         self.n_ch_total = config.get("n_ch_total")
+        reward_source = str(config.get("reward_source", "matlab")).strip().lower()
+        self.reward_source = reward_source if reward_source in {"matlab", "server"} else "matlab"
         self.policy = None
         self.use_object_policy = False
         self.use_sac_train = False
@@ -81,7 +83,7 @@ class AgentWrapper:
             self.policy = None
             self.use_object_policy = False
 
-    def reset(self, initial_state):
+    def reset(self, initial_state, episode_meta=None):
         """Clears trajectory memory and resets episode state for a new episode."""
         logger.debug("[Agent] reset() called")
         self.trajectory = []
@@ -94,17 +96,7 @@ class AgentWrapper:
         
         logger.debug("[Agent] Resetting SAC train mode state...")
         if self.use_sac_train:
-            logger.debug("[Agent] Clearing SAC sensor history and state...")
-            self._sac_sensor_history[:] = 0.0
-            self._sac_prev_vy = 0.0
-            self._sac_prev_sensor = None
-            self._sac_prev_kin = None
-            self._sac_prev_action = None
-            self._sac_select_path()
-            # Extract start_x from initial_state for object gap calculation
-            arr = np.asarray(initial_state, dtype=np.float64).reshape(self.n_rl_interval, self.n_ch_total)
-            self._sac_episode_start_x = float(arr[-1, 1]) + self._sac_initial_gap
-            logger.debug("[Agent] SAC state cleared, start_x=%.1f", self._sac_episode_start_x)
+            self._sac_begin_episode(initial_state, episode_meta=episode_meta)
         
         logger.debug("[Agent] Computing first action...")
         action = self._compute_action(initial_state)
@@ -130,7 +122,9 @@ class AgentWrapper:
                     "truncated": truncated
                 })
 
-            if done > 0.5:
+            is_terminal = (done > 0.5) or (truncated > 0.5)
+
+            if is_terminal:
                 logger.debug("[Agent.step] Terminal step received")
                 if self.use_sac_train and self._sac_prev_sensor is not None:
                     self._sac_store_transition(state, reward, done=True, truncated=bool(truncated > 0.5))
@@ -300,6 +294,8 @@ class AgentWrapper:
         self._sac_object_speed = float(cfg.object_tangential_speed_mm_per_ms)
         self._sac_initial_gap = float(cfg.initial_object_gap_mm)
         self._sac_episode_start_x = 0.0  # set on reset
+        self._sac_episode_object_speed = float(self._sac_object_speed)
+        self._sac_episode_delay_ms = 0.0
 
         # --- Checkpoint / resume ---
         self._sac_output_dir = self.config.get("output_dir", "")
@@ -317,7 +313,44 @@ class AgentWrapper:
 
         self.use_sac_train = True
         logger.info(f"[Agent] SAC train mode ready. history_steps={cfg.history_steps} "
-              f"sensor_shape={cfg.sensor_shape} device={cfg.device}")
+              f"sensor_shape={cfg.sensor_shape} device={cfg.device} reward_source={self.reward_source}")
+
+    def _sac_begin_episode(self, initial_state, episode_meta=None):
+        logger.debug("[Agent] Clearing SAC sensor history and state...")
+        self._sac_sensor_history[:] = 0.0
+        self._sac_prev_vy = 0.0
+        self._sac_prev_sensor = None
+        self._sac_prev_kin = None
+        self._sac_prev_action = None
+
+        meta = dict(episode_meta or {})
+        self._sac_select_path(path_index=meta.get("path_index"))
+
+        arr = np.asarray(initial_state, dtype=np.float64).reshape(self.n_rl_interval, self.n_ch_total)
+        default_start_x = float(arr[-1, 1]) + self._sac_initial_gap
+
+        try:
+            self._sac_episode_start_x = float(meta.get("front_start_x_mm"))
+        except (TypeError, ValueError):
+            self._sac_episode_start_x = default_start_x
+
+        try:
+            self._sac_episode_object_speed = float(meta.get("object_speed_mm_per_ms"))
+        except (TypeError, ValueError):
+            self._sac_episode_object_speed = float(self._sac_object_speed)
+
+        try:
+            self._sac_episode_delay_ms = max(0.0, float(meta.get("delay_ms")))
+        except (TypeError, ValueError):
+            self._sac_episode_delay_ms = 0.0
+
+        logger.debug(
+            "[Agent] SAC state cleared, path_index=%s start_x=%.1f object_speed=%.4f delay_ms=%.1f",
+            self._sac_current_path_idx,
+            self._sac_episode_start_x,
+            self._sac_episode_object_speed,
+            self._sac_episode_delay_ms,
+        )
 
     def _sac_parse_state(self, state):
         try:
@@ -446,12 +479,21 @@ class AgentWrapper:
     # Server-side reward
     # ------------------------------------------------------------------
 
-    def _sac_select_path(self):
+    def _sac_select_path(self, path_index=None):
         """Pick a random path for this episode (called from reset)."""
         if not self._sac_path_data_list:
             self._sac_current_path_data = None
             return
-        idx = int(self._sac_path_rng.integers(len(self._sac_path_data_list)))
+        idx = None
+        try:
+            if path_index is not None:
+                idx_candidate = int(path_index)
+                if 0 <= idx_candidate < len(self._sac_path_data_list):
+                    idx = idx_candidate
+        except (TypeError, ValueError):
+            idx = None
+        if idx is None:
+            idx = int(self._sac_path_rng.integers(len(self._sac_path_data_list)))
         self._sac_current_path_data = self._sac_path_data_list[idx]
         self._sac_current_path_idx = idx
         logger.debug(f"[Agent] Selected path index {idx} for this episode")
@@ -479,24 +521,32 @@ class AgentWrapper:
             reward = 1.0 - (lateral / self._sac_reward_corridor)
             reward = float(np.clip(reward, -1.0, 1.0))
 
-            # Object gap approximation
-            object_x = self._sac_episode_start_x + t_ms * self._sac_object_speed
+            # Object gap approximation, aligned with the front-carriage path start
+            # and the pre-control delay used by the MATLAB hardware loop.
+            elapsed_ms = self._sac_episode_delay_ms + t_ms
+            object_x = self._sac_episode_start_x + elapsed_ms * self._sac_episode_object_speed
             object_gap = object_x - x_mm
 
             too_far = lateral > self._sac_terminate_corridor
             too_close = object_gap < self._sac_min_gap_mm
+            finish_line_reached = x_mm >= float(self._sac_cfg.finish_line_mm)
 
-            done = too_far or too_close
+            done = too_far or too_close or finish_line_reached
             if too_far:
                 reward -= 2.0
             if too_close:
                 reward -= 2.0
 
             info = {
+                'path_index': int(self._sac_current_path_idx),
+                'target_path_x_mm': float(frame['point'][0]),
+                'target_path_y_mm': float(frame['point'][1]),
+                'path_progress_mm': float(frame['s']),
                 'signed_lateral_error_mm': float(frame['signed_lateral_error']),
                 'object_x_gap_mm': float(object_gap),
                 'too_far': too_far,
                 'too_close': too_close,
+                'finish_line_reached': bool(finish_line_reached),
             }
             return reward, done, info
         except Exception as ex:

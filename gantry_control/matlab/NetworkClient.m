@@ -57,10 +57,38 @@ classdef NetworkClient < handle
             fprintf('[Network] Configuration accepted by Server.\n');
         end
         
-        function action = startEpisode(obj, initialState)
-            % Sends State A (0x01) and the initial state, receives first action
+        function action = startEpisode(obj, initialState, episodeMeta)
+            % Sends State A (0x01) and the initial state, receives first action.
+            % episodeMeta is optional and can be a struct with fields:
+            % path_index, front_start_x_mm, object_speed_mm_per_ms, delay_ms
+            % or a numeric vector in the same order.
+            if nargin < 3 || isempty(episodeMeta)
+                metaValues = zeros(1, 4);
+            elseif isstruct(episodeMeta)
+                metaValues = zeros(1, 4);
+                if isfield(episodeMeta, 'path_index')
+                    metaValues(1) = double(episodeMeta.path_index);
+                end
+                if isfield(episodeMeta, 'front_start_x_mm')
+                    metaValues(2) = double(episodeMeta.front_start_x_mm);
+                end
+                if isfield(episodeMeta, 'object_speed_mm_per_ms')
+                    metaValues(3) = double(episodeMeta.object_speed_mm_per_ms);
+                end
+                if isfield(episodeMeta, 'delay_ms')
+                    metaValues(4) = double(episodeMeta.delay_ms);
+                end
+            else
+                metaValues = double(episodeMeta(:)');
+                if numel(metaValues) < 4
+                    metaValues(end+1:4) = 0;
+                elseif numel(metaValues) > 4
+                    metaValues = metaValues(1:4);
+                end
+            end
+
             obj.outStream.writeByte(obj.CMD_START);
-            obj.sendDoubles([initialState, 0, 0, 0]);
+            obj.sendDoubles([initialState, metaValues]);
             obj.outStream.flush();
             
             action = obj.receiveDoubles(obj.actionDim);
