@@ -773,6 +773,19 @@ classdef Jakiro < handle
             % prepare CC1 for path tracking
             [xp,yp,rp,thetap1,L,start_x,start_y,start_s,pathtag1] = app.CC1.prepare_pathtracking_data();
 
+            % Compute CC2-specific start position on the same path
+            try
+                origin_x_mm_cc2 = app.CC2.Car.origin(1) * app.CC2.Car.step2mm;
+            catch
+                origin_x_mm_cc2 = 0;
+            end
+            s_grid2 = linspace(0, L, 4001);
+            x_vals2 = xp(s_grid2);
+            [~, idx_min2] = min(abs(x_vals2 - origin_x_mm_cc2));
+            start_s2 = max(0, min(L, s_grid2(idx_min2)));
+            start_x2 = xp(start_s2);
+            start_y2 = yp(start_s2);
+
             % prepare CC2 for agent control
             app.CC2.Car.poll_gamepad = 0;
             app.CC2.Car.poll_keyboard = 1; % for interupting the agent control
@@ -781,7 +794,7 @@ classdef Jakiro < handle
                 start(app.CC2.redrawTimer);
             catch
             end
-            app.CC2.Car.moveToPositionMM(0, start_y-app.CC2.Car.origin_mm(2), 20, 1, false); % move to same y as CC1 but x=0 to start
+            app.CC2.Car.moveToPositionMM(start_x2-app.CC2.Car.origin_mm(1), start_y2-app.CC2.Car.origin_mm(2), 20, 1, false); % move to path start
             stop(app.CC2.redrawTimer);
 
             try
@@ -790,6 +803,7 @@ classdef Jakiro < handle
             end
             app.CC1.Car.moveToPositionMM(start_x-app.CC1.Car.origin_mm(1), start_y-app.CC1.Car.origin_mm(2), 20, 1, false);
             app.CC1.Car.init_pathtracking_variables(xp,yp,rp,L,start_s,thetap1);
+            app.CC2.Car.init_pathtracking_variables(xp,yp,rp,L,start_s2,thetap1);
             stop(app.CC1.redrawTimer);
             
             % blocking path+agent control loop
@@ -841,19 +855,21 @@ classdef Jakiro < handle
                     truncated = 1;
                 end
                 
-                % CC2: agent control
+                % CC2: path tracking during delay, then agent control
                 if elapsed_time_sec > delay_s
                     vx_in = round(action(1)*1000/app.CC2.Car.step2mm);
                     vy_in = round(action(2)*1000/app.CC2.Car.step2mm);
+                    try
+                        app.CC2.Car.agentControlStep(ev, vx_in, vy_in);
+                    catch ME
+                        warning(ME.identifier, '%s', ME.message);
+                    end
                 else
-                    vx_in = round(0.15*1000/app.CC2.Car.step2mm); % move towards the path start position during the delay period before agent control starts
-                    vy_in = 0;
-                end
-                
-                try
-                    app.CC2.Car.agentControlStep(ev, vx_in, vy_in);
-                catch ME
-                    warning(ME.identifier, '%s', ME.message);
+                    try
+                        app.CC2.Car.pathTrackingTick(src, ev);
+                    catch ME
+                        warning(ME.identifier, '%s', ME.message);
+                    end
                 end
                 reward = 0; % placeholder reward
 
@@ -1034,15 +1050,27 @@ classdef Jakiro < handle
                 start_x = xp_interp(start_s);
                 start_y = yp_interp(start_s);
 
+                % Compute CC2-specific start position on the same path
+                try
+                    origin_x_mm_cc2 = app.CC2.Car.origin(1) * app.CC2.Car.step2mm;
+                catch
+                    origin_x_mm_cc2 = 0;
+                end
+                [~, idx_min2] = min(abs(x_vals - origin_x_mm_cc2));
+                start_s2 = max(0, min(L, s_grid(idx_min2)));
+                start_x2 = xp_interp(start_s2);
+                start_y2 = yp_interp(start_s2);
+
                 % --- Move CC2 first, then CC1 (back carriage always first) ---
                 try; start(app.CC2.redrawTimer); catch; end
-                app.CC2.Car.moveToPositionMM(0, start_y - app.CC2.Car.origin_mm(2), 20, 1, false);
+                app.CC2.Car.moveToPositionMM(start_x2 - app.CC2.Car.origin_mm(1), start_y2 - app.CC2.Car.origin_mm(2), 20, 1, false);
                 try; stop(app.CC2.redrawTimer); catch; end
 
                 try; start(app.CC1.redrawTimer); catch; end
                 app.CC1.Car.moveToPositionMM(start_x - app.CC1.Car.origin_mm(1), ...
                     start_y - app.CC1.Car.origin_mm(2), 20, 1, false);
                 app.CC1.Car.init_pathtracking_variables(xp_interp, yp_interp, rp_interp, L, start_s, thetap1);
+                app.CC2.Car.init_pathtracking_variables(xp_interp, yp_interp, rp_interp, L, start_s2, thetap1);
                 try; stop(app.CC1.redrawTimer); catch; end
 
                 % Settle pause
@@ -1097,18 +1125,21 @@ classdef Jakiro < handle
                         truncated = 1;
                     end
 
-                    % CC2: delay gate (mirrors PathAgentPre)
+                    % CC2: path tracking during delay, then agent control
                     if elapsed_time_sec > delay_s
                         vx_in = round(action(1)*1000/app.CC2.Car.step2mm);
                         vy_in = round(action(2)*1000/app.CC2.Car.step2mm);
+                        try
+                            app.CC2.Car.agentControlStep(ev, vx_in, vy_in);
+                        catch ME
+                            warning(ME.identifier, '%s', ME.message);
+                        end
                     else
-                        vx_in = round(0.15*1000/app.CC2.Car.step2mm);
-                        vy_in = 0;
-                    end
-                    try
-                        app.CC2.Car.agentControlStep(ev, vx_in, vy_in);
-                    catch ME
-                        warning(ME.identifier, '%s', ME.message);
+                        try
+                            app.CC2.Car.pathTrackingTick(src, ev);
+                        catch ME
+                            warning(ME.identifier, '%s', ME.message);
+                        end
                     end
 
                     % DAQ
@@ -1243,7 +1274,7 @@ classdef Jakiro < handle
                         settle = settle_delay_s * 2;
                     end
                     try; start(app.CC2.redrawTimer); catch; end
-                    app.CC2.Car.moveToPositionMM(0, start_y - app.CC2.Car.origin_mm(2), 20, 1, false);
+                    app.CC2.Car.moveToPositionMM(start_x2 - app.CC2.Car.origin_mm(1), start_y2 - app.CC2.Car.origin_mm(2), 20, 1, false);
                     try; stop(app.CC2.redrawTimer); catch; end
                     try; start(app.CC1.redrawTimer); catch; end
                     app.CC1.Car.moveToPositionMM(start_x - app.CC1.Car.origin_mm(1), ...
