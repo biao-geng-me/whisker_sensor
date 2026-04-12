@@ -47,25 +47,25 @@ classdef ExpControlPanel < handle
             % Velocity fields (row 1)
             lbl1 = uilabel(obj.Grid,'Text','Carriage Velocities (m/s):');
             lbl1.Layout.Row = 1; lbl1.Layout.Column = 1;
-            obj.Vel1Field = uieditfield(obj.Grid,'numeric','Value',0.3);
+            obj.Vel1Field = uieditfield(obj.Grid,'numeric','Value',0.2);
             obj.Vel1Field.Layout.Row = 1; obj.Vel1Field.Layout.Column = 2;
             
             % lbl2 = uilabel(obj.Grid,'Text','Velocity Carriage 2 (m/s):');
             % lbl2.Layout.Row = 2; lbl2.Layout.Column = 1;
-            obj.Vel2Field = uieditfield(obj.Grid,'numeric','Value',0.3);
+            obj.Vel2Field = uieditfield(obj.Grid,'numeric','Value',0.16);
             obj.Vel2Field.Layout.Row = 1; obj.Vel2Field.Layout.Column = 3;
 
             % Row 2: Episode time
             lbl3 = uilabel(obj.Grid,'Text','Episode Time (s):');
             lbl3.Layout.Row = 2; lbl3.Layout.Column = 1;
             % Col 2 (row 2) left empty for spacing
-            obj.EpisodeTimeField = uieditfield(obj.Grid,'numeric','Value',30.0);
+            obj.EpisodeTimeField = uieditfield(obj.Grid,'numeric','Value',22.0);
             obj.EpisodeTimeField.Layout.Row = 2; obj.EpisodeTimeField.Layout.Column = 3;
 
             % Row 3: Delay start
             lbl4 = uilabel(obj.Grid,'Text','Delay start (s):');
             lbl4.Layout.Row = 3; lbl4.Layout.Column = 1;
-            obj.SettleDelayField = uieditfield(obj.Grid,'numeric','Value',3.0,...
+            obj.SettleDelayField = uieditfield(obj.Grid,'numeric','Value',13.0,...
                 'Tooltip',sprintf(['Delay after both carriages move to start position.\n', ...
                                    ' It is to settle down water motion due to the initial movement.']));
             obj.SettleDelayField.Layout.Row = 3; obj.SettleDelayField.Layout.Column = 2;
