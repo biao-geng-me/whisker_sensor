@@ -567,7 +567,7 @@ class AgentWrapper:
         try:
             checkpoint_path = Path(checkpoint_path_str)
             device = self._sac_cfg.device
-            checkpoint = torch.load(checkpoint_path, map_location=device)
+            checkpoint = torch.load(checkpoint_path, map_location=device,weights_only=False)
 
             self._sac_agent.actor.load_state_dict(checkpoint['actor'])
             self._sac_agent.q1.load_state_dict(checkpoint['q1'])
