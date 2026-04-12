@@ -1256,31 +1256,50 @@ classdef Jakiro < handle
                 catch
                 end
 
-                % Sync with agent server (local SAC update); check if reset is requested
-                reset_needed = false;
-                try
-                    if ~isempty(app.net)
-                        reset_needed = app.net.syncWithHPC();
-                    end
-                catch ME
-                    warning('AgentSyncError:SyncFailed', 'Failed to sync with agent server: %s', ME.message);
-                end
-
                 if ep < max_episodes
-                    % Reposition carriages for next episode: CC2 first, then CC1
+                    % Reposition carriages first so the model sync overlaps with settling
                     settle = settle_delay_s;
+
+                    % CC2 (back carriage): reset angle to 0, then start moving non-blocking
+                    try 
+                        for i=1:3
+                            app.CC2.Car.sendCommand('NUL,NUL,ABS0>');
+                            pause(0.01);
+                        end
+                    catch
+                    end
+                    pause(0.2);
+                    try start(app.CC2.redrawTimer); catch; end
+                    app.CC2.Car.moveToPositionMM(start_x2 - app.CC2.Car.origin_mm(1), start_y2 - app.CC2.Car.origin_mm(2), 20, 0, true);
+                    try stop(app.CC2.redrawTimer); catch; end
+
+                    % CC1 (front carriage): start after 2 s without waiting for CC2 to finish
+                    pause(2.0);
+                    try start(app.CC1.redrawTimer); catch; end
+                    app.CC1.Car.moveToPositionMM(start_x - app.CC1.Car.origin_mm(1), ...
+                        start_y - app.CC1.Car.origin_mm(2), 20, 1, true);
+                    try stop(app.CC1.redrawTimer); catch; end
+
+                    % Sync with agent server; subtract elapsed sync time from settle
+                    t_sync_start = tic;
+                    reset_needed = false;
+                    try
+                        if ~isempty(app.net)
+                            reset_needed = app.net.syncWithHPC();
+                        end
+                    catch ME
+                        warning('AgentSyncError:SyncFailed', 'Failed to sync with agent server: %s', ME.message);
+                    end
+                    sync_elapsed = toc(t_sync_start);
+
                     if reset_needed
                         fprintf('[PathAgentTrain] Hardware reset requested. Extended settle.\n');
                         settle = settle_delay_s * 2;
                     end
-                    try; start(app.CC2.redrawTimer); catch; end
-                    app.CC2.Car.moveToPositionMM(start_x2 - app.CC2.Car.origin_mm(1), start_y2 - app.CC2.Car.origin_mm(2), 20, 1, false);
-                    try; stop(app.CC2.redrawTimer); catch; end
-                    try; start(app.CC1.redrawTimer); catch; end
-                    app.CC1.Car.moveToPositionMM(start_x - app.CC1.Car.origin_mm(1), ...
-                        start_y - app.CC1.Car.origin_mm(2), 20, 1, false);
-                    try; stop(app.CC1.redrawTimer); catch; end
-                    pause(settle);
+                    remaining_settle = settle - sync_elapsed;
+                    if remaining_settle > 0
+                        pause(remaining_settle);
+                    end
                 end
 
             end % episode loop
