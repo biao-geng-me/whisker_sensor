@@ -254,6 +254,8 @@ def _load_checkpoint(
     agent.actor.train()
     agent.q1.train()
     agent.q2.train()
+    agent.q1_target.train()
+    agent.q2_target.train()
 
     replay_path = checkpoint.get('replay_path')
     rp = Path(replay_path) if replay_path else (output_dir / 'latest_replay.npz')
@@ -349,11 +351,23 @@ def run_between_episode_updates(
         return 0, 0.0, None
 
     metrics = None
+    metric_sums: dict[str, float] = {}
     t0 = time.monotonic()
     for _ in range(updates_to_run):
         metrics = agent.update(replay.sample(cfg.batch_size, cfg.device))
+        for key, value in metrics.items():
+            metric_sums[key] = metric_sums.get(key, 0.0) + float(value)
     update_seconds = time.monotonic() - t0
-    return updates_to_run, update_seconds, metrics
+    if metrics is None:
+        return updates_to_run, update_seconds, None
+
+    aggregated = {
+        key: (metric_sums[key] / float(updates_to_run))
+        for key in metric_sums
+    }
+    for key, value in metrics.items():
+        aggregated[f'{key}_last'] = float(value)
+    return updates_to_run, update_seconds, aggregated
 
 def make_episode_step_row(
     step_idx: int,
@@ -551,7 +565,9 @@ def main() -> None:
         'total_env_steps', 'episodes_completed', 'replay_size', 'replay_skipped_total',
         'elapsed_hours', 'episode_return', 'episode_length', 'path_sub',
         'mean_reward_this_episode', 'mean_lateral_error_mm', 'mean_object_x_gap_mm',
-        'updates_run', 'update_seconds', 'actor_loss', 'q1_loss', 'q2_loss', 'alpha',
+        'updates_run', 'update_seconds',
+        'actor_loss', 'q1_loss', 'q2_loss', 'alpha',
+        'actor_loss_last', 'q1_loss_last', 'q2_loss_last', 'alpha_last',
     ]
 
     stop_reason = None
@@ -711,6 +727,10 @@ def main() -> None:
                     'q1_loss': '' if metrics is None else float(metrics['q1_loss']),
                     'q2_loss': '' if metrics is None else float(metrics['q2_loss']),
                     'alpha': '' if metrics is None else float(metrics['alpha']),
+                    'actor_loss_last': '' if metrics is None else float(metrics['actor_loss_last']),
+                    'q1_loss_last': '' if metrics is None else float(metrics['q1_loss_last']),
+                    'q2_loss_last': '' if metrics is None else float(metrics['q2_loss_last']),
+                    'alpha_last': '' if metrics is None else float(metrics['alpha_last']),
                 })
                 train_f.flush()
 
@@ -734,10 +754,10 @@ def main() -> None:
                     msg += f' artifacts={episode_dir}'
                 if metrics is not None:
                     msg += (
-                        f' actor_loss={metrics["actor_loss"]:.3f}'
-                        f' q1_loss={metrics["q1_loss"]:.3f}'
-                        f' q2_loss={metrics["q2_loss"]:.3f}'
-                        f' alpha={metrics["alpha"]:.3f}'
+                        f' actor_loss_mean={metrics["actor_loss"]:.3f}'
+                        f' q1_loss_mean={metrics["q1_loss"]:.3f}'
+                        f' q2_loss_mean={metrics["q2_loss"]:.3f}'
+                        f' alpha_mean={metrics["alpha"]:.3f}'
                     )
                 print(msg)
 

@@ -295,6 +295,37 @@ class HardwareTrainingEnv:
             return float(path_xy[0, 0]), float(path_xy[0, 1])
         return float(self.cfg.xloc_start_mm), float(self.cfg.yloc_start_mm)
 
+    def _delta_angle_to_command(self, norm_action: float) -> tuple[float, float, float]:
+        prev_vy = float(self.prev_y_velocity)
+        delta_angle_norm = float(np.clip(norm_action, -1.0, 1.0))
+
+        cmd_vx = float(np.clip(
+            self.cfg.fixed_x_speed_mm_per_ms,
+            -self.cfg.vel_max_mm_per_ms,
+            self.cfg.vel_max_mm_per_ms,
+        ))
+        if abs(cmd_vx) <= 1e-9:
+            return prev_vy, 0.0, 0.0
+
+        prev_theta = float(np.arctan2(prev_vy, cmd_vx))
+        max_step_rad = float(np.deg2rad(max(0.0, float(self.cfg.rotation_change_limit_deg_per_control_step))))
+        requested_delta_angle_deg = float(np.rad2deg(delta_angle_norm * max_step_rad))
+        candidate_theta = prev_theta + float(np.deg2rad(requested_delta_angle_deg))
+        candidate_vy = float(cmd_vx * np.tan(candidate_theta))
+        limited_vy = float(np.clip(
+            candidate_vy,
+            -float(self.cfg.y_speed_limit_mm_per_ms),
+            float(self.cfg.y_speed_limit_mm_per_ms),
+        ))
+        final_theta = float(np.arctan2(limited_vy, cmd_vx))
+        applied_rotation_change_deg = float(np.rad2deg(final_theta - prev_theta))
+        limited_vy = float(np.clip(
+            limited_vy,
+            -float(self.cfg.y_speed_limit_mm_per_ms),
+            float(self.cfg.y_speed_limit_mm_per_ms),
+        ))
+        return limited_vy, requested_delta_angle_deg, applied_rotation_change_deg
+
     def _make_kinematics(self, pose: HardwarePose, prev_y_vel: float) -> np.ndarray:
         time_norm = float(pose.time_ms) / max(float(self.cfg.episode_time_ms), 1.0)
         return np.array(
@@ -405,6 +436,7 @@ class HardwareTrainingEnv:
             'start_y_mm': float(start_y),
             'fixed_x_speed_mm_per_ms': float(self.cfg.fixed_x_speed_mm_per_ms),
             'y_speed_limit_mm_per_ms': float(self.cfg.y_speed_limit_mm_per_ms),
+            'rotation_change_limit_deg_per_control_step': float(self.cfg.rotation_change_limit_deg_per_control_step),
             'vel_max_mm_per_ms': float(self.cfg.vel_max_mm_per_ms),
             'object_tangential_speed_mm_per_ms': float(self.cfg.object_tangential_speed_mm_per_ms),
             'initial_object_gap_mm': float(self.cfg.initial_object_gap_mm),
@@ -434,8 +466,9 @@ class HardwareTrainingEnv:
         """Apply one policy action, advance hardware, and compute RL outputs."""
         action = np.asarray(action, dtype=np.float32).reshape(1, 1)
         norm_action = float(np.clip(action[0, 0], -1.0, 1.0))
+        prev_y_velocity = float(self.prev_y_velocity)
 
-        cmd_vy = float(norm_action * self.cfg.y_speed_limit_mm_per_ms)
+        cmd_vy, requested_delta_angle_deg, applied_rotation_change_deg = self._delta_angle_to_command(norm_action)
         cmd_vx = float(np.clip(
             self.cfg.fixed_x_speed_mm_per_ms,
             -self.cfg.vel_max_mm_per_ms,
@@ -479,6 +512,10 @@ class HardwareTrainingEnv:
         info.update({
             'command_vx_mm_per_ms': float(cmd_vx),
             'command_vy_mm_per_ms': float(cmd_vy),
+            'command_delta_vy_mm_per_ms': float(cmd_vy - prev_y_velocity),
+            'requested_rotation_change_deg': float(requested_delta_angle_deg),
+            'applied_rotation_change_deg': float(applied_rotation_change_deg),
+            'rotation_change_limit_deg_per_control_step': float(self.cfg.rotation_change_limit_deg_per_control_step),
             'command_failed': bool(command_failed),
             'sensor_timeout': bool(sensor_timeout),
             'state_timeout': bool(state_timeout),

@@ -39,6 +39,14 @@ _TERM_COLORS = {
 }
 
 
+def _optional_meta_float(value):
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    return value if np.isfinite(value) else None
+
+
 class LivePlotter:
     """Persistent interactive matplotlib window updated after each episode."""
 
@@ -68,7 +76,7 @@ class LivePlotter:
         self.ax_lat.set_xlabel('Episode')
         self.ax_lat.set_ylabel('Error (mm)')
         for level, color in [( 180, 'tab:orange'), (-180, 'tab:orange'),
-                              ( 300, 'tab:red'),    (-300, 'tab:red')]:
+                              ( 200, 'tab:red'),    (-200, 'tab:red')]:
             self.ax_lat.axhline(level, ls='--', color=color, alpha=0.5)
         self.ax_lat.grid(True, alpha=0.3)
 
@@ -181,7 +189,7 @@ def main():
     obs_var_names = make_obs_var_names(num_whiskers)
     # Total received per step = states + 1 reward + 1 done flag + 1 truncated flag
     step_msg_size = state_dim + 3 
-    start_msg_size = state_dim + 4  # state + path index + front start x + object speed + delay
+    start_msg_size = state_dim + 5  # state + path index + front start x + object speed + delay + rotation-step limit
     record_trajectory = config.get("record_trajectory", False)  # Optional trajectory recording
 
     # Trajectory output directory (episode_trajectories/ relative to this script)
@@ -257,11 +265,13 @@ def main():
             logger.debug(f"[Episode {episode_num}] Received initial data, shape: {len(initial_data)}")
             
             initial_state = initial_data[0:state_dim]
+            raw_path_index = _optional_meta_float(initial_data[state_dim])
             episode_meta = {
-                'path_index': int(round(float(initial_data[state_dim]))),
-                'front_start_x_mm': float(initial_data[state_dim + 1]),
-                'object_speed_mm_per_ms': float(initial_data[state_dim + 2]),
-                'delay_ms': float(initial_data[state_dim + 3]),
+                'path_index': int(round(raw_path_index)) if raw_path_index is not None else None,
+                'front_start_x_mm': _optional_meta_float(initial_data[state_dim + 1]),
+                'object_speed_mm_per_ms': _optional_meta_float(initial_data[state_dim + 2]),
+                'delay_ms': _optional_meta_float(initial_data[state_dim + 3]),
+                'rotation_change_limit_deg_per_control_step': _optional_meta_float(initial_data[state_dim + 4]),
             }
             logger.debug(f"[Episode {episode_num}] Extracted initial state, shape: {len(initial_state)}")
             logger.debug(f"[Episode {episode_num}] First 5 state values: {initial_state[:5] if len(initial_state) >= 5 else initial_state}")
@@ -446,6 +456,10 @@ def main():
                     'q1_loss': str(sac_m.get('q1_loss', '')),
                     'q2_loss': str(sac_m.get('q2_loss', '')),
                     'alpha': str(sac_m.get('alpha', '')),
+                    'actor_loss_last': str(sac_m.get('actor_loss_last', '')),
+                    'q1_loss_last': str(sac_m.get('q1_loss_last', '')),
+                    'q2_loss_last': str(sac_m.get('q2_loss_last', '')),
+                    'alpha_last': str(sac_m.get('alpha_last', '')),
                     'episode_return': f'{ep_return:.6f}',
                 }
                 ep_row = {

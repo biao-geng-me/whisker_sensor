@@ -168,14 +168,16 @@ classdef Jakiro < handle
             config.policy_package_dir = userConfig.policy_package_dir;
             % Parameters used by the Python agent for observation normalisation and action scaling
             try
-                [v1,v2,~,~,episode_time_s,~] = app.ExpPanel.getParameters();
+                [v1,v2,~,~,episode_time_s,~,rotation_step_deg] = app.ExpPanel.getParameters();
             catch
                 v1 = 0.2;
                 v2 = 0.16;
                 episode_time_s = 20.0; % default fallback
+                rotation_step_deg = 2.0;
             end
             config.episode_time_ms = episode_time_s * 1000;
             config.fixed_vx = v2;          % mm/ms — fixed forward speed for the RL-controlled back carriage
+            config.rotation_change_limit_deg_per_control_step = rotation_step_deg;
             config.reward_source = 'matlab'; % hardware loop remains the reward source of truth
 
             % Pass path data so the server can compute reward
@@ -250,12 +252,13 @@ classdef Jakiro < handle
             state = [cc2_state_buffer; zeros(app.n_ch_total - 5, n_q)];
         end
 
-        function meta = makeEpisodeStartMeta(~, path_idx, start_x_mm, object_speed_mm_per_ms, delay_s)
+        function meta = makeEpisodeStartMeta(~, path_idx, start_x_mm, object_speed_mm_per_ms, delay_s, rotation_step_deg)
             meta = struct();
             meta.path_index = double(path_idx) - 1; % zero-based for Python list indexing
             meta.front_start_x_mm = double(start_x_mm);
             meta.object_speed_mm_per_ms = double(object_speed_mm_per_ms);
             meta.delay_ms = double(delay_s) * 1000;
+            meta.rotation_change_limit_deg_per_control_step = double(rotation_step_deg);
         end
 
         function options = discoverPolicyPackages(app)
@@ -769,7 +772,7 @@ classdef Jakiro < handle
             end
             
             try
-                [v1,v2,delay_s,run_tag,episode_time_s,settle_delay_s] = app.ExpPanel.getParameters();
+                [v1,v2,delay_s,run_tag,episode_time_s,settle_delay_s,rotation_step_deg] = app.ExpPanel.getParameters();
             catch
                 warning('Failed to read experiment parameters.');
                 return
@@ -838,13 +841,17 @@ classdef Jakiro < handle
             is_done_cc1 = false; % track when CC1 finishes path tracking
             is_done = 0; % track when episode is done for agent (currently only time-based truncation, no early termination condition)
             truncated = 0;
-            action = app.net.startEpisode(app.currentState(:)'); % get initial action from agent
+            app.currentState = app.makeInitialRlState(start_x2, start_y2);
+            action = app.net.startEpisode( ...
+                app.currentState(:)', ...
+                app.makeEpisodeStartMeta(1, start_x, v1, delay_s, rotation_step_deg)); % get initial action from agent
             
             n = 0;
             num_agent_interactions = 0;
             pause(settle_delay_s); % allow some time for water to calm down from carriages moving to start positions.
             try
-                app.WA.tag = sprintf('%s_PathAgentPre-%s_front=%.2f_rlvx=%.2f_delay=%.1f',run_tag,pathtag1,v1,v2,delay_s);
+                app.WA.tag = sprintf('%s_PathAgentPre-%s_front=%.2f_rlvx=%.2f_rotstep=%.1f_delay=%.1f', ...
+                    run_tag, pathtag1, v1, v2, rotation_step_deg, delay_s);
                 app.WA.align_data_read(); % clear samples during carriage movement before starting
             catch
 
@@ -1010,7 +1017,7 @@ classdef Jakiro < handle
             end
 
             try
-                [v1,v2,delay_s,run_tag,episode_time_s,settle_delay_s] = app.ExpPanel.getParameters();
+                [v1,v2,delay_s,run_tag,episode_time_s,settle_delay_s,rotation_step_deg] = app.ExpPanel.getParameters();
             catch
                 warning('Failed to read experiment parameters.');
                 return
@@ -1101,8 +1108,8 @@ classdef Jakiro < handle
 
                 % DAQ: align after carriage movement
                 try
-                    app.WA.tag = sprintf('%s_PathAgentTrain-%s_front=%.2f_rlvx=%.2f_delay=%.1f_ep%03d', ...
-                        run_tag, pathtag1, v1, v2, delay_s, ep);
+                    app.WA.tag = sprintf('%s_PathAgentTrain-%s_front=%.2f_rlvx=%.2f_rotstep=%.1f_delay=%.1f_ep%03d', ...
+                        run_tag, pathtag1, v1, v2, rotation_step_deg, delay_s, ep);
                     app.WA.align_data_read();
                 catch
                 end
@@ -1119,7 +1126,7 @@ classdef Jakiro < handle
                 app.run_start_time = datetime('now');
                 action = app.net.startEpisode( ...
                     app.currentState(:)', ...
-                    app.makeEpisodeStartMeta(path_idx, start_x, v1, delay_s));
+                    app.makeEpisodeStartMeta(path_idx, start_x, v1, delay_s, rotation_step_deg));
 
                 app.CC1.hArrow.Visible = 'on';
                 app.CC2.hArrow.Visible = 'on';
@@ -1224,7 +1231,7 @@ classdef Jakiro < handle
                         signed_err = (x2 - pd.x(kp))*(-ty) + (y2 - pd.y(kp))*(tx);
 
                         reward_corridor = 180;   % mm
-                        terminate_corridor = 300; % mm
+                        terminate_corridor = 200; % mm
                         min_gap_mm = 25;          % mm
 
                         reward = max(-1.0, min(1.0, 1.0 - abs(signed_err)/reward_corridor));
@@ -1245,11 +1252,22 @@ classdef Jakiro < handle
                         fprintf('Episode %d, Step %d, geting action ...', ...
                             ep, num_agent_interactions);
                         episode_done_flag = logical(is_done || is_done_cc1);
+                        prev_action = action;
                         action = app.net.stepRL(app.currentState(:)', reward, episode_done_flag, truncated);
                         if truncated || episode_done_flag
                             terminal_sent = true;
                         end
-                        fprintf('done. action=[%.3f, %.3f]\n', action);
+                        norm_action_str = 'n/a';
+                        max_step_rad = deg2rad(max(0.0, rotation_step_deg));
+                        if ~terminal_sent && max_step_rad > 0 && numel(prev_action) >= 2 && numel(action) >= 2 ...
+                                && abs(prev_action(1)) > eps && abs(action(1)) > eps
+                            prev_theta = atan2(prev_action(2), prev_action(1));
+                            curr_theta = atan2(action(2), action(1));
+                            applied_norm_action = max(-1.0, min(1.0, (curr_theta - prev_theta) / max_step_rad));
+                            norm_action_str = sprintf('%.3f', applied_norm_action);
+                        end
+                        fprintf('done. action=[%.3f, %.3f], norm_action=%s\n', ...
+                            action(1), action(2), norm_action_str);
                     end
 
                     % Visuals

@@ -196,11 +196,17 @@ class SACAgent:
         """
         sensor = torch.as_tensor(sensor_history, device=self.device, dtype=torch.float32)
         kin_t = torch.as_tensor(kin, device=self.device, dtype=torch.float32)
-        if deterministic:
-            _, _, action = self.actor.sample(sensor, kin_t)
-        else:
-            action, _, _ = self.actor.sample(sensor, kin_t)
-        return action.cpu().numpy()
+        was_training = self.actor.training
+        self.actor.eval()
+        try:
+            if deterministic:
+                _, _, action = self.actor.sample(sensor, kin_t)
+            else:
+                action, _, _ = self.actor.sample(sensor, kin_t)
+            return action.cpu().numpy()
+        finally:
+            if was_training:
+                self.actor.train()
 
     def update(self, batch: dict) -> dict:
         """Run one SAC update step and return logging scalars.
@@ -208,6 +214,12 @@ class SACAgent:
         ``batch`` is the dictionary produced by :class:`ReplayBuffer.sample`.
         Every tensor inside it already carries a leading mini-batch dimension.
         """
+        self.actor.train()
+        self.q1.train()
+        self.q2.train()
+        self.q1_target.train()
+        self.q2_target.train()
+
         sensor = batch['sensor']
         kin = batch['kin']
         action = batch['action']

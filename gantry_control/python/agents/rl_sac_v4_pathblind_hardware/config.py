@@ -52,6 +52,7 @@ class SACV2PathblindConfig:
     # ------------------------------------------------------------------
     fixed_x_speed_mm_per_ms: float = 0.16
     y_speed_limit_mm_per_ms: float = 0.15
+    rotation_change_limit_deg_per_control_step: float = 2.0
     vel_max_mm_per_ms: float = 0.4
 
     # ------------------------------------------------------------------
@@ -65,7 +66,7 @@ class SACV2PathblindConfig:
     initial_object_gap_mm: float = 200.0
     min_object_x_gap_terminate_mm: float = 25.0
     reward_corridor_half_width_mm: float = 180.0
-    terminate_corridor_half_width_mm: float = 300.0
+    terminate_corridor_half_width_mm: float = 200.0
 
     # ------------------------------------------------------------------
     # Episode settings

@@ -14,6 +14,7 @@ classdef ExpControlPanel < handle
         UIFigure
         Vel1Field
         Vel2Field
+        RotationStepField
         EpisodeTimeField
         SettleDelayField
         DelayField
@@ -61,10 +62,16 @@ classdef ExpControlPanel < handle
                                     'The RL lateral speed limit is not taken from this field.']));
             obj.Vel2Field.Layout.Row = 1; obj.Vel2Field.Layout.Column = 3;
 
-            note1 = uilabel(obj.Grid, ...
-                'Text','RL lateral speed limit comes from Python config (`config.py`), default 0.15 m/s.', ...
-                'Interpreter','none');
-            note1.Layout.Row = 2; note1.Layout.Column = [1 3];
+            lbl2 = uilabel(obj.Grid,'Text','Max Rotation Change / Control Step (deg):', ...
+                'Tooltip', sprintf(['Maximum allowed change in implied whisker/carriage rotation\n', ...
+                                    'between consecutive RL control steps.\n', ...
+                                    'This is not an absolute angle limit.']));
+            lbl2.Layout.Row = 2; lbl2.Layout.Column = [1 2];
+            obj.RotationStepField = uieditfield(obj.Grid,'numeric','Value',2.0, ...
+                'Limits',[0 Inf], ...
+                'Tooltip', sprintf(['Per control-step rotation-change limit used by the RL command wrapper.\n', ...
+                                    'Cumulative turning beyond this is still allowed.']));
+            obj.RotationStepField.Layout.Row = 2; obj.RotationStepField.Layout.Column = 3;
 
             % Row 3: Episode time
             lbl3 = uilabel(obj.Grid,'Text','Episode Time (s):');
@@ -162,7 +169,7 @@ classdef ExpControlPanel < handle
             end
         end
 
-        function [v1,v2,delay_s,tag,episode_time_s,settle_delay_s] = getParameters(obj)
+        function [v1,v2,delay_s,tag,episode_time_s,settle_delay_s,rotation_step_deg] = getParameters(obj)
             % Return configured parameters
             v1 = obj.Vel1Field.Value;
             v2 = obj.Vel2Field.Value;
@@ -170,6 +177,7 @@ classdef ExpControlPanel < handle
             tag = obj.getTag();
             episode_time_s = obj.EpisodeTimeField.Value;
             settle_delay_s = obj.SettleDelayField.Value;
+            rotation_step_deg = obj.RotationStepField.Value;
         end
 
         function tag = getTag(obj)

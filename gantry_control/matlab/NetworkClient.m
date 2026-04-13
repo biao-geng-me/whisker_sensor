@@ -60,12 +60,13 @@ classdef NetworkClient < handle
         function action = startEpisode(obj, initialState, episodeMeta)
             % Sends State A (0x01) and the initial state, receives first action.
             % episodeMeta is optional and can be a struct with fields:
-            % path_index, front_start_x_mm, object_speed_mm_per_ms, delay_ms
+            % path_index, front_start_x_mm, object_speed_mm_per_ms, delay_ms,
+            % rotation_change_limit_deg_per_control_step
             % or a numeric vector in the same order.
             if nargin < 3 || isempty(episodeMeta)
-                metaValues = zeros(1, 4);
+                metaValues = nan(1, 5);
             elseif isstruct(episodeMeta)
-                metaValues = zeros(1, 4);
+                metaValues = nan(1, 5);
                 if isfield(episodeMeta, 'path_index')
                     metaValues(1) = double(episodeMeta.path_index);
                 end
@@ -78,12 +79,15 @@ classdef NetworkClient < handle
                 if isfield(episodeMeta, 'delay_ms')
                     metaValues(4) = double(episodeMeta.delay_ms);
                 end
+                if isfield(episodeMeta, 'rotation_change_limit_deg_per_control_step')
+                    metaValues(5) = double(episodeMeta.rotation_change_limit_deg_per_control_step);
+                end
             else
                 metaValues = double(episodeMeta(:)');
-                if numel(metaValues) < 4
-                    metaValues(end+1:4) = 0;
-                elseif numel(metaValues) > 4
-                    metaValues = metaValues(1:4);
+                if numel(metaValues) < 5
+                    metaValues(end+1:5) = nan;
+                elseif numel(metaValues) > 5
+                    metaValues = metaValues(1:5);
                 end
             end
 
