@@ -4,7 +4,7 @@ There are two parts in the gantry control code. The `clearcore` folder contains 
 
 ## Gantry system
 
-The two carriages are driven by two ClearCore boards sparately. The front one has two motors for x-y motion and the back one has one extra for angle of attack control. Each motor is connected through two cables, a blue cable to the ClearCore board for instructions and a black cable to the power hub. Both power hubs are powered by the same power supply. All the boards also require additional 24VDC from a DC power supply.
+The two carriages are driven by two ClearCore boards separately. The front one has two motors for x-y motion and the back one has one extra for angle of attack control. Each motor is connected through two cables, a blue cable to the ClearCore board for instructions and a black cable to the power hub. Both power hubs are powered by the same power supply. All the boards also require additional 24VDC from a DC power supply.
 
 ## Setup
 
@@ -21,13 +21,13 @@ Turn on DC power supply and activate CH1 to turn the power supply to the motors 
 
 Connect the Xbox controller (wired or Bluetooth).
 
-Lauch the Jakiro app by running the file `jakiro.m`. Connect the ClearCore boards via the GUI. Adjust the two carriages to the starting/home position one by one. That is, activating the interactive control mode only one at a time. 
+Launch the Jakiro app by running the file `jakiro.m`. Connect the ClearCore boards via the GUI. Adjust the two carriages to the starting/home position one by one. That is, activating the interactive control mode only one at a time. 
 
 Use the game controller to adjust the position. Controls:
 - left joystick - move front/left carriage
 - right joystick - move the back/right carriage
-- left trigger - decel (reduce speed for finner adjustment of the position)
-- right triggle - accel
+- left trigger - decel (reduce speed for finer adjustment of the position)
+- right trigger - accel
 - left stick press - set current position as home position
 - option button - return home
 - left/right bumper - turn AOA (back carriage only)
