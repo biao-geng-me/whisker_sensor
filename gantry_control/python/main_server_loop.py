@@ -191,6 +191,7 @@ def main():
     step_msg_size = state_dim + 3 
     start_msg_size = state_dim + 5  # state + path index + front start x + object speed + delay + rotation-step limit
     record_trajectory = config.get("record_trajectory", False)  # Optional trajectory recording
+    use_random_paths = bool(config.get("use_random_paths", False))
 
     # Trajectory output directory (episode_trajectories/ relative to this script)
     traj_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'episode_trajectories')
@@ -199,6 +200,8 @@ def main():
     # Per-episode trajectory buffer: list of observation rows using obs_var_names
     episode_trajectory = []
     episode_step = 0
+    episode_timestamp = None
+    episode_path_xy = None
     
     # Latency tracking
     step_latencies = []  # Track latency for each step in current episode
@@ -252,6 +255,8 @@ def main():
             send_times = []
             episode_trajectory = []
             episode_step = 0
+            episode_timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+            episode_path_xy = None
             episode_rewards = []
             episode_signed_laterals = []
             last_signed_lateral = 0.0
@@ -273,6 +278,41 @@ def main():
                 'delay_ms': _optional_meta_float(initial_data[state_dim + 3]),
                 'rotation_change_limit_deg_per_control_step': _optional_meta_float(initial_data[state_dim + 4]),
             }
+
+            path_point_count = net.receive_int32()
+            if path_point_count is None:
+                logger.error(f"[Episode {episode_num}] Missing episode path length from MATLAB.")
+                break
+            if path_point_count < 0:
+                logger.warning(
+                    f"[Episode {episode_num}] Invalid negative path point count {path_point_count}; ignoring episode path."
+                )
+                path_point_count = 0
+
+            logger.debug(f"[Episode {episode_num}] Episode path point count: {path_point_count}")
+            if use_random_paths and path_point_count == 0:
+                logger.warning(f"[Episode {episode_num}] Random-path mode is enabled, but MATLAB sent an empty episode path.")
+
+            if path_point_count > 0:
+                path_flat = net.receive_doubles(path_point_count * 2)
+                if path_flat is None:
+                    logger.error(f"[Episode {episode_num}] Failed to receive episode path data.")
+                    break
+                episode_path_xy = np.asarray(path_flat, dtype=np.float64).reshape(path_point_count, 2)
+                episode_meta['path_xy'] = episode_path_xy.tolist()
+
+                path_csv_path = os.path.join(
+                    traj_dir,
+                    f'path_{episode_timestamp}_ep{episode_num:04d}.csv',
+                )
+                with open(path_csv_path, 'w', newline='') as f:
+                    writer = csv.writer(f)
+                    writer.writerow(['x_mm', 'y_mm'])
+                    writer.writerows(episode_path_xy.tolist())
+                logger.info(
+                    f"[Episode {episode_num}] Path saved: {path_csv_path} ({path_point_count} rows)"
+                )
+
             logger.debug(f"[Episode {episode_num}] Extracted initial state, shape: {len(initial_state)}")
             logger.debug(f"[Episode {episode_num}] First 5 state values: {initial_state[:5] if len(initial_state) >= 5 else initial_state}")
             
@@ -400,7 +440,7 @@ def main():
             logger.info(f"[Episode {episode_num}] Episode ended. Saving trajectory and running update...")
 
             if episode_trajectory:
-                ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+                ts = episode_timestamp or datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
                 csv_path = os.path.join(traj_dir, f'traj_{ts}_ep{episode_num:04d}.csv')
                 fieldnames = obs_var_names
                 with open(csv_path, 'w', newline='') as f:

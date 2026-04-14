@@ -285,6 +285,9 @@ class AgentWrapper:
             "resolved.keep_checkpoints": self._summary_log_value(self._sac_keep_checkpoints),
             "resolved.checkpoint_every_episodes": self._summary_log_value(self._sac_checkpoint_every),
             "resolved.loaded_path_count": self._summary_log_value(len(self._sac_path_data_list)),
+            "resolved.use_random_paths_from_matlab": self._summary_log_value(
+                getattr(self, '_sac_expect_episode_paths_from_matlab', False)
+            ),
             "resolved.state_dim": self._summary_log_value(self.state_dim),
             "resolved.n_rl_interval": self._summary_log_value(self.n_rl_interval),
             "resolved.n_ch_total": self._summary_log_value(self.n_ch_total),
@@ -350,6 +353,7 @@ class AgentWrapper:
         self._sac_path_data_list = []
         self._sac_current_path_data = None
         self._sac_current_path_idx = 0
+        self._sac_expect_episode_paths_from_matlab = bool(self.config.get("use_random_paths", False))
         raw_paths = self.config.get("path_data", [])
         if raw_paths:
             rng = np.random.default_rng(cfg.seed)
@@ -361,7 +365,10 @@ class AgentWrapper:
             logger.info(f"[Agent] Loaded {len(self._sac_path_data_list)} path(s) for server-side reward")
         else:
             self._sac_path_rng = np.random.default_rng(cfg.seed)
-            logger.warning("[Agent] No path data received from MATLAB; server-side reward disabled")
+            if self._sac_expect_episode_paths_from_matlab:
+                logger.info("[Agent] Random per-episode paths enabled; waiting for MATLAB to send each episode path.")
+            else:
+                logger.warning("[Agent] No path data received from MATLAB; server-side reward disabled")
 
         self._sac_reward_corridor = float(cfg.reward_corridor_half_width_mm)
         self._sac_terminate_corridor = float(cfg.terminate_corridor_half_width_mm)
@@ -407,7 +414,26 @@ class AgentWrapper:
         self._sac_prev_action = None
 
         meta = dict(episode_meta or {})
-        self._sac_select_path(path_index=meta.get("path_index"))
+        episode_path_xy = meta.get("path_xy")
+        if episode_path_xy is not None:
+            xy = np.asarray(episode_path_xy, dtype=np.float64)
+            if xy.ndim == 2 and xy.shape[0] >= 2 and xy.shape[1] >= 2:
+                self._sac_current_path_data = calc_path_data(xy[:, :2])
+                try:
+                    self._sac_current_path_idx = int(meta.get("path_index"))
+                except (TypeError, ValueError):
+                    self._sac_current_path_idx = -1
+                logger.debug(
+                    "[Agent] Using episode-specific path with %d points",
+                    xy.shape[0],
+                )
+            else:
+                logger.warning("[Agent] Invalid episode-specific path received; falling back to configured paths")
+                self._sac_select_path(path_index=meta.get("path_index"))
+        else:
+            if self._sac_expect_episode_paths_from_matlab and not self._sac_path_data_list:
+                logger.warning("[Agent] Expected MATLAB to provide an episode path, but none was received.")
+            self._sac_select_path(path_index=meta.get("path_index"))
 
         arr = np.asarray(initial_state, dtype=np.float64).reshape(self.n_rl_interval, self.n_ch_total)
         default_start_x = float(arr[-1, 1]) + self._sac_initial_gap

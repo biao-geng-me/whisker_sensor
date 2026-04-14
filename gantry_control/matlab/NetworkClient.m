@@ -15,6 +15,8 @@ classdef NetworkClient < handle
         
         stateDim
         actionDim
+        startEpisodeTimeoutMs = 30000
+        stepReplyTimeoutMs = 5000
     end
     
     methods
@@ -57,12 +59,13 @@ classdef NetworkClient < handle
             fprintf('[Network] Configuration accepted by Server.\n');
         end
         
-        function action = startEpisode(obj, initialState, episodeMeta)
+        function action = startEpisode(obj, initialState, episodeMeta, episodePathXY)
             % Sends State A (0x01) and the initial state, receives first action.
             % episodeMeta is optional and can be a struct with fields:
             % path_index, front_start_x_mm, object_speed_mm_per_ms, delay_ms,
             % rotation_change_limit_deg_per_control_step
             % or a numeric vector in the same order.
+            % episodePathXY is optional Nx2 path data for the current episode.
             if nargin < 3 || isempty(episodeMeta)
                 metaValues = nan(1, 5);
             elseif isstruct(episodeMeta)
@@ -91,11 +94,26 @@ classdef NetworkClient < handle
                 end
             end
 
+            if nargin < 4 || isempty(episodePathXY)
+                pathXY = zeros(0, 2);
+            else
+                pathXY = double(episodePathXY);
+                if size(pathXY, 2) < 2
+                    error('NetworkClient:InvalidEpisodePath', ...
+                        'episodePathXY must be an Nx2 numeric matrix.');
+                end
+                pathXY = pathXY(:, 1:2);
+            end
+
             obj.outStream.writeByte(obj.CMD_START);
             obj.sendDoubles([initialState, metaValues]);
+            obj.outStream.writeInt(int32(size(pathXY, 1)));
+            if ~isempty(pathXY)
+                obj.sendDoubles(pathXY.');
+            end
             obj.outStream.flush();
             
-            action = obj.receiveDoubles(obj.actionDim);
+            action = obj.receiveDoubles(obj.actionDim, obj.startEpisodeTimeoutMs);
         end
         
         function action = stepRL(obj, state, reward, done, truncated)
@@ -109,7 +127,7 @@ classdef NetworkClient < handle
             
             % Only wait for an action if the episode isn't done
             if done < 0.5 && ~truncated
-                action = obj.receiveDoubles(obj.actionDim);
+                action = obj.receiveDoubles(obj.actionDim, obj.stepReplyTimeoutMs);
             else
                 action = zeros(1, obj.actionDim); % Dummy action on terminal state
             end
@@ -183,16 +201,36 @@ classdef NetworkClient < handle
         
         function sendDoubles(obj, dataArray)
             % Writes an array of doubles sequentially
-            for i = 1:length(dataArray)
-                obj.outStream.writeDouble(dataArray(i));
+            try
+                flatData = double(dataArray(:));
+                for i = 1:numel(flatData)
+                    obj.outStream.writeDouble(flatData(i));
+                end
+            catch ME
+                obj.throwSocketError(ME, 'sending data to the Python server');
             end
         end
         
-        function dataArray = receiveDoubles(obj, count)
+        function dataArray = receiveDoubles(obj, count, timeoutMs)
             % Reads 'count' number of doubles sequentially
+            if nargin < 3
+                timeoutMs = [];
+            end
+
+            cleanup = [];
+            if ~isempty(timeoutMs)
+                previousTimeout = obj.socket.getSoTimeout();
+                cleanup = onCleanup(@() obj.restoreSocketTimeout(previousTimeout)); %#ok<NASGU>
+                obj.socket.setSoTimeout(timeoutMs);
+            end
+
             dataArray = zeros(1, count);
-            for i = 1:count
-                dataArray(i) = obj.inStream.readDouble();
+            try
+                for i = 1:count
+                    dataArray(i) = obj.inStream.readDouble();
+                end
+            catch ME
+                obj.throwSocketError(ME, sprintf('waiting for %d doubles', count), timeoutMs);
             end
         end
         
@@ -203,38 +241,32 @@ classdef NetworkClient < handle
             end
 
             previousTimeout = obj.socket.getSoTimeout();
-            cleanup = onCleanup(@() obj.socket.setSoTimeout(previousTimeout));
+            cleanup = onCleanup(@() obj.restoreSocketTimeout(previousTimeout)); %#ok<NASGU>
             obj.socket.setSoTimeout(timeoutMs);
 
             try
                 msgLength = obj.inStream.readInt();
-            catch ME
-                if contains(char(ME.message), 'Read timed out')
-                    error('NetworkClient:Timeout', ...
-                        'Timed out waiting for "%s" after %.1f s.', ...
-                        expectedStr, timeoutMs / 1000);
+                maxMessageLength = 1024;
+                if msgLength < 0 || msgLength > maxMessageLength
+                    error('NetworkClient:InvalidMessageLength', ...
+                        ['Received invalid string length %d while waiting for "%s". ' ...
+                         'The TCP stream is out of sync.'], ...
+                        msgLength, expectedStr);
                 end
-                rethrow(ME);
-            end
-
-            maxMessageLength = 1024;
-            if msgLength < 0 || msgLength > maxMessageLength
-                error('NetworkClient:InvalidMessageLength', ...
-                    ['Received invalid string length %d while waiting for "%s". ' ...
-                     'The TCP stream is out of sync.'], ...
-                    msgLength, expectedStr);
-            end
-            
-            byteArr = zeros(1, msgLength, 'int8');
-            for i = 1:msgLength
-                byteArr(i) = obj.inStream.readByte();
-            end
-            
-            receivedStr = native2unicode(byteArr, 'UTF-8');
-            
-            if ~strcmp(receivedStr, expectedStr)
-                warning('NetworkClient:UnexpectedResponse', ...
-                    'Expected "%s" but received "%s"', expectedStr, receivedStr);
+                
+                byteArr = zeros(1, msgLength, 'int8');
+                for i = 1:msgLength
+                    byteArr(i) = obj.inStream.readByte();
+                end
+                
+                receivedStr = native2unicode(byteArr, 'UTF-8');
+                
+                if ~strcmp(receivedStr, expectedStr)
+                    warning('NetworkClient:UnexpectedResponse', ...
+                        'Expected "%s" but received "%s"', expectedStr, receivedStr);
+                end
+            catch ME
+                obj.throwSocketError(ME, sprintf('waiting for "%s"', expectedStr), timeoutMs);
             end
         end
 
@@ -246,30 +278,69 @@ classdef NetworkClient < handle
             end
 
             previousTimeout = obj.socket.getSoTimeout();
-            cleanup = onCleanup(@() obj.socket.setSoTimeout(previousTimeout));
+            cleanup = onCleanup(@() obj.restoreSocketTimeout(previousTimeout)); %#ok<NASGU>
             obj.socket.setSoTimeout(timeoutMs);
 
             try
                 msgLength = obj.inStream.readInt();
-            catch ME
-                if contains(char(ME.message), 'Read timed out')
-                    error('NetworkClient:Timeout', ...
-                        'Timed out waiting for string after %.1f s.', timeoutMs / 1000);
+                maxMessageLength = 1024;
+                if msgLength < 0 || msgLength > maxMessageLength
+                    error('NetworkClient:InvalidMessageLength', ...
+                        'Received invalid string length %d. The TCP stream is out of sync.', msgLength);
                 end
-                rethrow(ME);
+
+                byteArr = zeros(1, msgLength, 'int8');
+                for i = 1:msgLength
+                    byteArr(i) = obj.inStream.readByte();
+                end
+                str = native2unicode(byteArr, 'UTF-8');
+            catch ME
+                obj.throwSocketError(ME, 'waiting for a string response', timeoutMs);
+            end
+        end
+
+        function restoreSocketTimeout(obj, previousTimeout)
+            try
+                if ~isempty(obj.socket)
+                    obj.socket.setSoTimeout(previousTimeout);
+                end
+            catch
+            end
+        end
+
+        function throwSocketError(obj, ME, operation, timeoutMs)
+            if nargin < 4
+                timeoutMs = [];
             end
 
-            maxMessageLength = 1024;
-            if msgLength < 0 || msgLength > maxMessageLength
-                error('NetworkClient:InvalidMessageLength', ...
-                    'Received invalid string length %d. The TCP stream is out of sync.', msgLength);
+            msg = char(string(ME.message));
+            msgLower = lower(msg);
+
+            try
+                if ~isempty(obj.socket)
+                    obj.socket.close();
+                end
+            catch
             end
 
-            byteArr = zeros(1, msgLength, 'int8');
-            for i = 1:msgLength
-                byteArr(i) = obj.inStream.readByte();
+            if contains(msgLower, 'read timed out')
+                if isempty(timeoutMs)
+                    error('NetworkClient:Timeout', ...
+                        'Timed out while %s.', operation);
+                end
+                error('NetworkClient:Timeout', ...
+                    'Timed out while %s after %.1f s.', operation, timeoutMs / 1000);
             end
-            str = native2unicode(byteArr, 'UTF-8');
+
+            if contains(msgLower, 'connection reset') || ...
+                    contains(msgLower, 'socket closed') || ...
+                    contains(msgLower, 'forcibly closed') || ...
+                    contains(msgLower, 'broken pipe')
+                error('NetworkClient:ConnectionLost', ...
+                    'Connection to the Python server was lost while %s.', operation);
+            end
+
+            rethrow(ME);
         end
     end
 end

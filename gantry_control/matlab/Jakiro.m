@@ -28,6 +28,7 @@ classdef Jakiro < handle
         agent_server_mode = 'train';
         agent_server_max_episodes = 1;
         agent_server_record_trajectory = false;
+        agent_server_use_random_paths = false;
         agent_policy_package_dir = 'agents/rl_sac_v4_pathblind_hardware';
         agent_server_pid = [];
         server_config_window = [];
@@ -35,6 +36,7 @@ classdef Jakiro < handle
         calibration_data_file = 'sensor_calibration/calibration_sim_v1.csv' % calibration data file for converting raw sensor readings to bending moments (for rl agent control modes)
         exp2sim_channel_map_file = 'sensor_calibration/ch_map_sim_v1.csv'; % mapping from hardware channels to simulated sensor channels for RL agent control modes
         signal_to_bending_moment = [];
+        episode_path_plot_handle = [];
     end
     methods
         function app = Jakiro()
@@ -153,6 +155,7 @@ classdef Jakiro < handle
             STATE_DIM = app.n_rl_interval*app.n_ch_total;
             ACTION_DIM = 2;
             SAMPLE_RATE = 80;
+            use_random_paths = isfield(userConfig, 'use_random_paths') && logical(userConfig.use_random_paths);
 
             config.mode = userConfig.mode;
             config.hpc_port = userConfig.hpc_port;
@@ -165,6 +168,7 @@ classdef Jakiro < handle
             config.dt = 1/SAMPLE_RATE;
             config.num_whiskers = app.num_whiskers;
             config.record_trajectory = logical(userConfig.record_trajectory);
+            config.use_random_paths = use_random_paths;
             config.policy_package_dir = userConfig.policy_package_dir;
             % Parameters used by the Python agent for observation normalisation and action scaling
             try
@@ -181,18 +185,20 @@ classdef Jakiro < handle
             config.reward_source = 'matlab'; % hardware loop remains the reward source of truth
 
             % Pass path data so the server can compute reward
-            try
-                pathFiles = app.CC1.ModePanel.SelectedFiles;
-                if ~isempty(pathFiles)
-                    paths_cell = cell(1, numel(pathFiles));
-                    for ip = 1:numel(pathFiles)
-                        pd = PathData(pathFiles{ip});
-                        paths_cell{ip} = [pd.x(:), pd.y(:)];
+            if ~use_random_paths
+                try
+                    pathFiles = app.CC1.ModePanel.SelectedFiles;
+                    if ~isempty(pathFiles)
+                        paths_cell = cell(1, numel(pathFiles));
+                        for ip = 1:numel(pathFiles)
+                            pd = PathData(pathFiles{ip});
+                            paths_cell{ip} = [pd.x(:), pd.y(:)];
+                        end
+                        config.path_data = paths_cell;
                     end
-                    config.path_data = paths_cell;
+                catch pathErr
+                    fprintf('[connect_agent_server] Warning: could not read path files: %s\n', pathErr.message);
                 end
-            catch pathErr
-                fprintf('[connect_agent_server] Warning: could not read path files: %s\n', pathErr.message);
             end
 
             % Checkpoint / resume settings from server config window
@@ -236,6 +242,7 @@ classdef Jakiro < handle
             config.hpc_port = app.agent_server_hpc_port;
             config.max_episodes = app.agent_server_max_episodes;
             config.record_trajectory = app.agent_server_record_trajectory;
+            config.use_random_paths = app.agent_server_use_random_paths;
             config.policy_package_dir = app.agent_policy_package_dir;
         end
 
@@ -259,6 +266,128 @@ classdef Jakiro < handle
             meta.object_speed_mm_per_ms = double(object_speed_mm_per_ms);
             meta.delay_ms = double(delay_s) * 1000;
             meta.rotation_change_limit_deg_per_control_step = double(rotation_step_deg);
+        end
+
+        function [start_s, start_x, start_y, s_grid, x_vals] = findPathStartForCarriage(~, carObj, xp, L, s_grid, x_vals)
+            if nargin < 5 || isempty(s_grid)
+                s_grid = linspace(0, L, 4001);
+            end
+            if nargin < 6 || isempty(x_vals)
+                x_vals = xp(s_grid);
+            end
+
+            try
+                origin_x_mm = carObj.origin(1) * carObj.step2mm;
+            catch
+                origin_x_mm = 0;
+            end
+
+            [~, idx_min] = min(abs(x_vals - origin_x_mm));
+            start_s = max(0, min(L, s_grid(idx_min)));
+            start_x = xp(start_s);
+            start_y = [];
+            try
+                start_y = carObj.path_yp(start_s); %#ok<NASGU>
+            catch
+            end
+        end
+
+        function episodePath = buildEpisodePathContext(app, pd, path_idx, pathtag, source_identifier)
+            [xp, yp, rp, thetap, L] = pd.getInterpolants();
+            [start_s1, start_x1, ~, s_grid, x_vals] = app.findPathStartForCarriage(app.CC1.Car, xp, L);
+            start_y1 = yp(start_s1);
+            [start_s2, start_x2, ~] = app.findPathStartForCarriage(app.CC2.Car, xp, L, s_grid, x_vals);
+            start_y2 = yp(start_s2);
+
+            episodePath = struct();
+            episodePath.pd = pd;
+            episodePath.xy = [pd.x(:), pd.y(:)];
+            episodePath.xp = xp;
+            episodePath.yp = yp;
+            episodePath.rp = rp;
+            episodePath.thetap = thetap;
+            episodePath.L = L;
+            episodePath.path_index = path_idx;
+            episodePath.pathtag = pathtag;
+            episodePath.source_identifier = source_identifier;
+            episodePath.start_s1 = start_s1;
+            episodePath.start_x1 = start_x1;
+            episodePath.start_y1 = start_y1;
+            episodePath.start_s2 = start_s2;
+            episodePath.start_x2 = start_x2;
+            episodePath.start_y2 = start_y2;
+        end
+
+        function episodePath = resolvePathAgentPreEpisodePath(app)
+            if app.agent_server_use_random_paths
+                generator = RandomPathGenerator();
+                generator.Seed = double(randi(intmax('int32')));
+                [xy, seedPoints, genMeta] = generator.generate();
+                pd = PathData(xy);
+                pathtag = sprintf('random_ep%03d_seed%d', 1, generator.Seed);
+                episodePath = app.buildEpisodePathContext(pd, 1, pathtag, ...
+                    sprintf('random seed %d', generator.Seed));
+                episodePath.seed_points = seedPoints;
+                episodePath.generator_meta = genMeta;
+            else
+                [pd, fullpath] = app.CC1.ModePanel.createPathDataFromSelection();
+                [~, name1, ext1] = fileparts(fullpath);
+                pathtag = erase([name1 ext1], 'xy_');
+                episodePath = app.buildEpisodePathContext(pd, 1, pathtag, fullpath);
+            end
+        end
+
+        function episodePath = resolvePathAgentTrainEpisodePath(app, episodeIndex, pathFiles)
+            if app.agent_server_use_random_paths
+                generator = RandomPathGenerator();
+                generator.Seed = double(randi(intmax('int32')));
+                [xy, seedPoints, genMeta] = generator.generate();
+                pd = PathData(xy);
+                pathtag = sprintf('random_ep%03d_seed%d', episodeIndex, generator.Seed);
+                episodePath = app.buildEpisodePathContext(pd, episodeIndex, pathtag, ...
+                    sprintf('random seed %d', generator.Seed));
+                episodePath.seed_points = seedPoints;
+                episodePath.generator_meta = genMeta;
+            else
+                path_idx = randi(numel(pathFiles));
+                chosen_file = pathFiles{path_idx};
+                pd = PathData(chosen_file);
+                [~, fname, fext] = fileparts(chosen_file);
+                pathtag = erase([fname fext], 'xy_');
+                episodePath = app.buildEpisodePathContext(pd, path_idx, pathtag, chosen_file);
+            end
+        end
+
+        function updateEpisodePathPlot(app, path_xy, path_label)
+            ax = app.CC1.Ax;
+            if isempty(ax) || ~isvalid(ax)
+                return
+            end
+
+            if ~isempty(app.episode_path_plot_handle)
+                try
+                    if isgraphics(app.episode_path_plot_handle)
+                        delete(app.episode_path_plot_handle);
+                    end
+                catch
+                end
+            end
+
+            if nargin < 3 || isempty(path_label)
+                path_label = 'Episode Path';
+            end
+
+            hold(ax, 'on');
+            app.episode_path_plot_handle = plot(ax, path_xy(:,1), path_xy(:,2), ...
+                'LineWidth', 2.0, ...
+                'LineStyle', '--', ...
+                'Color', [0.1 0.1 0.1], ...
+                'DisplayName', path_label);
+            try
+                legend(ax, 'show');
+            catch
+            end
+            drawnow limitrate
         end
 
         function options = discoverPolicyPackages(app)
@@ -304,6 +433,7 @@ classdef Jakiro < handle
             app.agent_server_hpc_port = userConfig.hpc_port;
             app.agent_server_max_episodes = userConfig.max_episodes;
             app.agent_server_record_trajectory = logical(userConfig.record_trajectory);
+            app.agent_server_use_random_paths = isfield(userConfig, 'use_random_paths') && logical(userConfig.use_random_paths);
             app.agent_policy_package_dir = userConfig.policy_package_dir;
 
             app.shutdownAgentServer();
@@ -764,6 +894,7 @@ classdef Jakiro < handle
         function onPathAgentPre(app, ~, ~)
             % PathAgentPre: CC1 follows a prescribed path, CC2 is agent-controlled
             % Both run in the same blocking loop to avoid timer jitter
+            modeCleanup = onCleanup(@() agentPathModeCleanup(app)); %#ok<NASGU>
 
             if isempty(app.net)
                 warning('AgentConnectionError:NotConnected', ...
@@ -794,23 +925,29 @@ classdef Jakiro < handle
                 error('DataAcquisitionError:SetupFailed', 'Error during data acquisition setup: %s', e.message);
             end
 
-            % connect to agent server
-
-            % prepare CC1 for path tracking
-            [xp,yp,rp,thetap1,L,start_x,start_y,start_s,pathtag1] = app.CC1.prepare_pathtracking_data();
-
-            % Compute CC2-specific start position on the same path
+            % Resolve the episode path, update the plot, and prepare both carriages.
             try
-                origin_x_mm_cc2 = app.CC2.Car.origin(1) * app.CC2.Car.step2mm;
-            catch
-                origin_x_mm_cc2 = 0;
+                episodePath = app.resolvePathAgentPreEpisodePath();
+            catch ME
+                warning('PathAgentPre:PathSetupFailed', ...
+                    'Failed to prepare the episode path: %s', ME.message);
+                return
             end
-            s_grid2 = linspace(0, L, 4001);
-            x_vals2 = xp(s_grid2);
-            [~, idx_min2] = min(abs(x_vals2 - origin_x_mm_cc2));
-            start_s2 = max(0, min(L, s_grid2(idx_min2)));
-            start_x2 = xp(start_s2);
-            start_y2 = yp(start_s2);
+
+            xp = episodePath.xp;
+            yp = episodePath.yp;
+            rp = episodePath.rp;
+            thetap1 = episodePath.thetap;
+            L = episodePath.L;
+            start_s = episodePath.start_s1;
+            start_x = episodePath.start_x1;
+            start_y = episodePath.start_y1;
+            start_s2 = episodePath.start_s2;
+            start_x2 = episodePath.start_x2;
+            start_y2 = episodePath.start_y2;
+            pathtag1 = episodePath.pathtag;
+
+            app.updateEpisodePathPlot(episodePath.xy, sprintf('Episode Path (%s)', pathtag1));
 
             % prepare CC2 for agent control
             app.CC2.Car.poll_gamepad = 0;
@@ -841,10 +978,17 @@ classdef Jakiro < handle
             is_done_cc1 = false; % track when CC1 finishes path tracking
             is_done = 0; % track when episode is done for agent (currently only time-based truncation, no early termination condition)
             truncated = 0;
+            connection_lost = false;
             app.currentState = app.makeInitialRlState(start_x2, start_y2);
-            action = app.net.startEpisode( ...
-                app.currentState(:)', ...
-                app.makeEpisodeStartMeta(1, start_x, v1, delay_s, rotation_step_deg)); % get initial action from agent
+            try
+                action = app.net.startEpisode( ...
+                    app.currentState(:)', ...
+                    app.makeEpisodeStartMeta(episodePath.path_index, start_x, v1, delay_s, rotation_step_deg), ...
+                    episodePath.xy); % get initial action from agent
+            catch ME
+                handleAgentConnectionFailure(app, 'PathAgentPre startEpisode', ME);
+                return
+            end
             
             n = 0;
             num_agent_interactions = 0;
@@ -951,7 +1095,13 @@ classdef Jakiro < handle
 
                     app.currentState = [cc2_state_buffer; bending_moments']; % 5 rows of carriage state + 18 rows of daq data, each with n_rl_interval columns
                     % send state to agent and receive action
-                    action = app.net.stepRL(app.currentState(:)', reward, is_done, truncated); % flatten state to 1D array for sending to agent
+                    try
+                        action = app.net.stepRL(app.currentState(:)', reward, is_done, truncated); % flatten state to 1D array for sending to agent
+                    catch ME
+                        handleAgentConnectionFailure(app, sprintf('PathAgentPre step %d', num_agent_interactions), ME);
+                        connection_lost = true;
+                        break;
+                    end
                 end
 
                 % update visuals periodically
@@ -979,26 +1129,25 @@ classdef Jakiro < handle
                 end
             end
 
-            % cleanup
+            app.WA.is_recording = false;
             try
-                app.CC1.Car.stopPathTracking();
+                app.WA.close_datafile();
             catch
             end
-            app.CC2.Car.poll_gamepad = 0;
-            app.CC2.Car.poll_keyboard = 0;
-            app.CC1.hArrow.Visible = 'off';
-            app.CC2.hArrow.Visible = 'off';
-            app.WA.is_recording = false;
-            app.WA.close_datafile();
-            app.WA.write_buffer_to_file(app.run_start_time, datetime('now'), app.WA.tag);
+            try
+                app.WA.write_buffer_to_file(app.run_start_time, datetime('now'), app.WA.tag);
+            catch
+            end
 
             % Signal episode end to the agent server and wait for sync
-            try
-                if ~isempty(app.net)
-                    app.net.syncWithHPC();
+            if ~connection_lost
+                try
+                    if ~isempty(app.net)
+                        app.net.syncWithHPC();
+                    end
+                catch ME
+                    handleAgentConnectionFailure(app, 'PathAgentPre syncWithHPC', ME);
                 end
-            catch ME
-                warning('AgentSyncError:SyncFailed', 'Failed to sync with agent server: %s', ME.message);
             end
         end
 
@@ -1009,6 +1158,7 @@ classdef Jakiro < handle
         function onPathAgentTrain(app, ~, ~)
             % PathAgentTrain: CC1 follows a randomly selected path each episode,
             % CC2 is controlled by a SAC agent that trains locally between episodes.
+            modeCleanup = onCleanup(@() agentPathModeCleanup(app)); %#ok<NASGU>
 
             if isempty(app.net)
                 warning('AgentConnectionError:NotConnected', ...
@@ -1023,9 +1173,8 @@ classdef Jakiro < handle
                 return
             end
 
-            % Read all path files loaded in CC1's panel
             pathFiles = app.CC1.ModePanel.SelectedFiles;
-            if isempty(pathFiles)
+            if ~app.agent_server_use_random_paths && isempty(pathFiles)
                 warning('PathAgentTrain:NoPaths', ...
                     'No path files loaded in CC1 panel. Load at least one path before training.');
                 return
@@ -1053,43 +1202,36 @@ classdef Jakiro < handle
             app.CC2.Car.poll_keyboard = 1;
 
             period = 1/app.wa_Fs;
+            connection_lost = false;
 
             for ep = 1:max_episodes
                 fprintf('\n[PathAgentTrain] === Episode %d / %d ===\n', ep, max_episodes);
 
-                % --- Pick a random path for this episode ---
-                path_idx = randi(numel(pathFiles));
-                chosen_file = pathFiles{path_idx};
-                [~, fname, fext] = fileparts(chosen_file);
-                pathtag1 = erase([fname fext], 'xy_');
-                fprintf('[PathAgentTrain] Path: %s\n', chosen_file);
-
-                pd = PathData(chosen_file);
-                [xp_interp, yp_interp, rp_interp, thetap1, L] = pd.getInterpolants();
-
-                % Compute start_s: find arc position where path x matches CC1 origin x
                 try
-                    origin_x_mm = app.CC1.Car.origin(1) * app.CC1.Car.step2mm;
-                catch
-                    origin_x_mm = 0;
+                    episodePath = app.resolvePathAgentTrainEpisodePath(ep, pathFiles);
+                catch ME
+                    warning('PathAgentTrain:PathSetupFailed', ...
+                        'Failed to prepare the episode path: %s', ME.message);
+                    break;
                 end
-                s_grid = linspace(0, L, 4001);
-                x_vals = xp_interp(s_grid);
-                [~, idx_min] = min(abs(x_vals - origin_x_mm));
-                start_s = max(0, min(L, s_grid(idx_min)));
-                start_x = xp_interp(start_s);
-                start_y = yp_interp(start_s);
 
-                % Compute CC2-specific start position on the same path
-                try
-                    origin_x_mm_cc2 = app.CC2.Car.origin(1) * app.CC2.Car.step2mm;
-                catch
-                    origin_x_mm_cc2 = 0;
-                end
-                [~, idx_min2] = min(abs(x_vals - origin_x_mm_cc2));
-                start_s2 = max(0, min(L, s_grid(idx_min2)));
-                start_x2 = xp_interp(start_s2);
-                start_y2 = yp_interp(start_s2);
+                pd = episodePath.pd;
+                xp_interp = episodePath.xp;
+                yp_interp = episodePath.yp;
+                rp_interp = episodePath.rp;
+                thetap1 = episodePath.thetap;
+                L = episodePath.L;
+                path_idx = episodePath.path_index;
+                pathtag1 = episodePath.pathtag;
+                start_s = episodePath.start_s1;
+                start_x = episodePath.start_x1;
+                start_y = episodePath.start_y1;
+                start_s2 = episodePath.start_s2;
+                start_x2 = episodePath.start_x2;
+                start_y2 = episodePath.start_y2;
+
+                app.updateEpisodePathPlot(episodePath.xy, sprintf('Episode Path Ep %03d', ep));
+                fprintf('[PathAgentTrain] Path source: %s\n', episodePath.source_identifier);
 
                 % --- Move CC2 first, then CC1 (back carriage always first) ---
                 try; start(app.CC2.redrawTimer); catch; end
@@ -1124,9 +1266,16 @@ classdef Jakiro < handle
                 reward = 0;
 
                 app.run_start_time = datetime('now');
-                action = app.net.startEpisode( ...
-                    app.currentState(:)', ...
-                    app.makeEpisodeStartMeta(path_idx, start_x, v1, delay_s, rotation_step_deg));
+                try
+                    action = app.net.startEpisode( ...
+                        app.currentState(:)', ...
+                        app.makeEpisodeStartMeta(path_idx, start_x, v1, delay_s, rotation_step_deg), ...
+                        episodePath.xy);
+                catch ME
+                    handleAgentConnectionFailure(app, sprintf('PathAgentTrain episode %d startEpisode', ep), ME);
+                    connection_lost = true;
+                    break;
+                end
 
                 app.CC1.hArrow.Visible = 'on';
                 app.CC2.hArrow.Visible = 'on';
@@ -1253,7 +1402,14 @@ classdef Jakiro < handle
                             ep, num_agent_interactions);
                         episode_done_flag = logical(is_done || is_done_cc1);
                         prev_action = action;
-                        action = app.net.stepRL(app.currentState(:)', reward, episode_done_flag, truncated);
+                        try
+                            action = app.net.stepRL(app.currentState(:)', reward, episode_done_flag, truncated);
+                        catch ME
+                            handleAgentConnectionFailure(app, ...
+                                sprintf('PathAgentTrain episode %d step %d', ep, num_agent_interactions), ME);
+                            connection_lost = true;
+                            break;
+                        end
                         if truncated || episode_done_flag
                             terminal_sent = true;
                         end
@@ -1268,6 +1424,10 @@ classdef Jakiro < handle
                         end
                         fprintf('done. action=[%.3f, %.3f], norm_action=%s\n', ...
                             action(1), action(2), norm_action_str);
+                    end
+
+                    if connection_lost
+                        break;
                     end
 
                     % Visuals
@@ -1307,6 +1467,25 @@ classdef Jakiro < handle
                 catch
                 end
 
+                if connection_lost
+                    break;
+                end
+
+                if ep == max_episodes
+                    try
+                        if ~isempty(app.net)
+                            app.net.syncWithHPC();
+                        end
+                    catch ME
+                        handleAgentConnectionFailure(app, sprintf('PathAgentTrain episode %d syncWithHPC', ep), ME);
+                        connection_lost = true;
+                    end
+                end
+
+                if connection_lost
+                    break;
+                end
+
                 if ep < max_episodes
                     % Reposition carriages first so the model sync overlaps with settling
                     settle = settle_delay_s;
@@ -1339,7 +1518,9 @@ classdef Jakiro < handle
                             reset_needed = app.net.syncWithHPC();
                         end
                     catch ME
-                        warning('AgentSyncError:SyncFailed', 'Failed to sync with agent server: %s', ME.message);
+                        handleAgentConnectionFailure(app, sprintf('PathAgentTrain episode %d inter-episode sync', ep), ME);
+                        connection_lost = true;
+                        break;
                     end
                     sync_elapsed = toc(t_sync_start);
 
@@ -1356,8 +1537,6 @@ classdef Jakiro < handle
             end % episode loop
 
             % --- Final cleanup ---
-            app.CC2.Car.poll_gamepad = 0;
-            app.CC2.Car.poll_keyboard = 0;
             app.WA.is_recording = false;
 
             % Send shutdown signal to agent server

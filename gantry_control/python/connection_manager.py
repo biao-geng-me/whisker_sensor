@@ -62,6 +62,13 @@ class ConnectionManager:
         if not raw_data: return None
         return struct.unpack(f'>{count}d', raw_data)
 
+    def receive_int32(self):
+        """Reads one big-endian signed 32-bit integer."""
+        raw_data = self._recvall(4)
+        if not raw_data:
+            return None
+        return struct.unpack('>i', raw_data)[0]
+
     def send_doubles(self, values):
         """Packs a list/tuple of floats into big-endian doubles and sends."""
         packed_data = struct.pack(f'>{len(values)}d', *values)
