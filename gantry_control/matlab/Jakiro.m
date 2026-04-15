@@ -63,7 +63,7 @@ classdef Jakiro < handle
             app.CC1 = CarriageApp(cc1_panel,ax);
             app.CC1.Car.origin = [5010, 0]; % parking position for carriage 1 (steps, 250 mm offset)
             app.CC1.Car.origin_mm = app.CC1.Car.origin * app.CC1.Car.step2mm;
-            app.CC1.Car.path_dx_max = 3800; % max x movement range (mm)
+            app.CC1.Car.path_dx_max = 4100; % max x movement range (mm)
             app.CC1.Car.motor_settings.ACC = 10000;
             app.CC1.Car.name = 'Front Carriage';
             app.CC1.Car.control_aoa = false;
@@ -76,13 +76,13 @@ classdef Jakiro < handle
             cc2_panel.Layout.Row = [1 2];
             app.CC2 = CarriageApp(cc2_panel,ax);
             app.CC2.Car.joystick_side = 'R';
-            app.CC2.Car.path_dx_max = 3500; % max x movement range (mm)
+            app.CC2.Car.path_dx_max = 3850; % max x movement range (mm)
             app.CC2.Car.motor_settings.ACC = 10000;
             app.CC2.Car.name = 'Back Carriage';
             app.CC2.Car.control_aoa = true;
             app.CC2.Car.path_CMD_INTERVAL = app.pathpath_tick_period_ms;
             app.CC2.Car.x_min_mm = 0;
-            app.CC2.Car.x_max_mm = 3500;
+            app.CC2.Car.x_max_mm = 3850;
             app.CC2.Car.y_min_mm = 0;
             app.CC2.Car.y_max_mm = 900;
             app.CC2.Car.boundary_margin_mm = 50;
@@ -176,7 +176,7 @@ classdef Jakiro < handle
             catch
                 v1 = 0.2;
                 v2 = 0.16;
-                episode_time_s = 20.0; % default fallback
+                episode_time_s = 35.0; % default fallback
                 rotation_step_deg = 2.0;
             end
             config.episode_time_ms = episode_time_s * 1000;
@@ -1259,6 +1259,7 @@ classdef Jakiro < handle
                 app.currentState = app.makeInitialRlState(start_x2, start_y2);
                 cc2_state_buffer = app.currentState(1:5,:);
                 is_done_cc1 = false;
+                cc1_complete_logged = false;
                 is_done = 0;
                 truncated = 0;
                 terminal_sent = false;
@@ -1295,9 +1296,17 @@ classdef Jakiro < handle
                     if ~is_done_cc1
                         try
                             is_done_cc1 = app.CC1.Car.pathTrackingTick(src, ev);
+                            if is_done_cc1 && ~cc1_complete_logged
+                                fprintf('[PathAgentTrain] Front path complete; continuing back-carriage control.\n');
+                                cc1_complete_logged = true;
+                            end
                         catch ME
                             warning(ME.identifier, '%s', ME.message);
                             is_done_cc1 = true;
+                            if ~cc1_complete_logged
+                                fprintf('[PathAgentTrain] Front path tracking stopped unexpectedly; continuing back-carriage control.\n');
+                                cc1_complete_logged = true;
+                            end
                         end
                     end
 
@@ -1418,7 +1427,7 @@ classdef Jakiro < handle
                         app.currentState = [cc2_state_buffer; bending_moments'];
                         fprintf('Episode %d, Step %d, geting action ...', ...
                             ep, num_agent_interactions);
-                        episode_done_flag = logical(is_done || is_done_cc1);
+                        episode_done_flag = logical(is_done);
                         prev_action = action;
                         try
                             action = app.net.stepRL(app.currentState(:)', reward, episode_done_flag, truncated);
@@ -1463,11 +1472,9 @@ classdef Jakiro < handle
                         pause(0.0005);
                     end
 
-                    if (truncated || is_done || is_done_cc1) && terminal_sent
+                    if (truncated || is_done) && terminal_sent
                         if truncated
                             fprintf('[PathAgentTrain] Episode truncated after %.2f s\n', elapsed_time_sec);
-                        elseif is_done_cc1 && ~is_done
-                            fprintf('[PathAgentTrain] Episode ended (path complete) after %.2f s\n', elapsed_time_sec);
                         else
                             fprintf('[PathAgentTrain] Episode ended (is_done) after %.2f s\n', elapsed_time_sec);
                         end

@@ -71,8 +71,8 @@ class SACV2PathblindConfig:
     # ------------------------------------------------------------------
     # Episode settings
     # ------------------------------------------------------------------
-    episode_time_ms: float = 20000.0
-    finish_line_mm: float = 3400.0
+    episode_time_ms: float = 35000.0
+    finish_line_mm: float = 3800.0
     xloc_start_mm: float = 200.0
     yloc_start_mm: float = 500.0
     start_on_path_initial_point: bool = True

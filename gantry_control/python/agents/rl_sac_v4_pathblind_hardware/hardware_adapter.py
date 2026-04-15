@@ -279,6 +279,7 @@ class HardwareTrainingEnv:
         self.sensor_history = np.zeros((1, *self.sensor_shape), dtype=np.float32)
         self.kinematics = np.zeros((1, self.kin_dim), dtype=np.float32)
         self.prev_y_velocity = 0.0
+        self.prev_heading_angle = 0.0
         self.episode_index = 0
         self._episode_array_start_x_mm = float(self.cfg.xloc_start_mm)
         self._episode_object_start_x_mm = float(self._episode_array_start_x_mm + self.cfg.initial_object_gap_mm)
@@ -326,16 +327,27 @@ class HardwareTrainingEnv:
         ))
         return limited_vy, requested_delta_angle_deg, applied_rotation_change_deg
 
-    def _make_kinematics(self, pose: HardwarePose, prev_y_vel: float) -> np.ndarray:
-        time_norm = float(pose.time_ms) / max(float(self.cfg.episode_time_ms), 1.0)
+    @staticmethod
+    def _heading_from_velocity(vx: float, vy: float, speed_floor: float = 1e-6) -> float:
+        if float(np.hypot(vx, vy)) <= float(speed_floor):
+            return 0.0
+        return float(np.arctan2(vy, vx))
+
+    @staticmethod
+    def _wrap_angle_delta(angle_now: float, angle_prev: float) -> float:
+        return float(np.arctan2(np.sin(angle_now - angle_prev), np.cos(angle_now - angle_prev)))
+
+    def _make_kinematics(self, pose: HardwarePose) -> np.ndarray:
+        heading_angle = self._heading_from_velocity(float(pose.vx_mm_per_ms), float(pose.vy_mm_per_ms))
+        prev_delta_heading_angle = self._wrap_angle_delta(heading_angle, self.prev_heading_angle)
         return np.array(
             [
                 float(pose.x_mm),
                 float(pose.y_mm),
                 float(pose.vx_mm_per_ms),
                 float(pose.vy_mm_per_ms),
-                float(prev_y_vel),
-                float(time_norm),
+                float(heading_angle),
+                float(prev_delta_heading_angle),
             ],
             dtype=np.float32,
         )
@@ -452,7 +464,11 @@ class HardwareTrainingEnv:
         self.sensor_history[0] = history
 
         self.prev_y_velocity = 0.0
-        self.kinematics[0] = self._make_kinematics(reset_out.pose, prev_y_vel=0.0)
+        self.prev_heading_angle = self._heading_from_velocity(
+            float(reset_out.pose.vx_mm_per_ms),
+            float(reset_out.pose.vy_mm_per_ms),
+        )
+        self.kinematics[0] = self._make_kinematics(reset_out.pose)
 
         self._episode_array_start_x_mm = float(reset_out.pose.x_mm)
         self._episode_object_start_x_mm = float(self._episode_array_start_x_mm + float(self.cfg.initial_object_gap_mm))
@@ -486,7 +502,8 @@ class HardwareTrainingEnv:
         self.sensor_history[0] = merged[-self.history_steps:]
 
         self.prev_y_velocity = cmd_vy
-        self.kinematics[0] = self._make_kinematics(step_out.pose, prev_y_vel=self.prev_y_velocity)
+        self.kinematics[0] = self._make_kinematics(step_out.pose)
+        self.prev_heading_angle = float(self.kinematics[0, 4])
 
         runtime_info = dict(step_out.info or {})
 

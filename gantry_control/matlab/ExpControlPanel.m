@@ -77,7 +77,7 @@ classdef ExpControlPanel < handle
             lbl3 = uilabel(obj.Grid,'Text','Episode Time (s):');
             lbl3.Layout.Row = 3; lbl3.Layout.Column = 1;
             % Col 2 (row 3) left empty for spacing
-            obj.EpisodeTimeField = uieditfield(obj.Grid,'numeric','Value',20.0);
+            obj.EpisodeTimeField = uieditfield(obj.Grid,'numeric','Value',35.0);
             obj.EpisodeTimeField.Layout.Row = 3; obj.EpisodeTimeField.Layout.Column = 3;
 
             % Row 4: Delay start

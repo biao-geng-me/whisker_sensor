@@ -4,11 +4,11 @@ classdef RandomPathGenerator
     % bounded step-to-step y deviations, and evaluates a spline on a dense x grid.
 
     properties
-        XRange = [0 4000]
-        YRange = [0 1000]
+        XRange = [0 3800]
+        YRange = [0 850]
         MinSeedPoints = 3
         MaxSeedPoints = 5
-        MaxSeedDeltaY = 250
+        MaxSeedDeltaY = 350
         SampleSpacing = 10
         MaxAttempts = 100
         Seed = []
@@ -167,10 +167,10 @@ classdef RandomPathGenerator
         function tf = validateGeneratedPath(xy, seedPoints, xRange, yRange, maxSeedDeltaY)
             % validateGeneratedPath Return true when the generated path meets constraints.
             if nargin < 3 || isempty(xRange)
-                xRange = [0 4000];
+                xRange = [0 3800];
             end
             if nargin < 4 || isempty(yRange)
-                yRange = [0 1000];
+                yRange = [0 850];
             end
             if nargin < 5 || isempty(maxSeedDeltaY)
                 maxSeedDeltaY = inf;

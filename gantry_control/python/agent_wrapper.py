@@ -292,6 +292,7 @@ class AgentWrapper:
             "resolved.n_rl_interval": self._summary_log_value(self.n_rl_interval),
             "resolved.n_ch_total": self._summary_log_value(self.n_ch_total),
             "resolved.action_semantics": "delta_angle",
+            "resolved.kin_features": "[x, y, vx, vy, heading_angle, prev_delta_heading_angle]",
             "resolved.min_warmup_episodes": self._summary_log_value(self._sac_min_warmup_episodes),
         }
         lines = ["[Agent] Resolved RL config:"] + [
@@ -305,6 +306,16 @@ class AgentWrapper:
             for key, value in state.items():
                 if torch.is_tensor(value):
                     state[key] = value.to(device)
+
+    @staticmethod
+    def _heading_from_velocity(vx: float, vy: float, speed_floor: float = 1e-6) -> float:
+        if float(np.hypot(vx, vy)) <= float(speed_floor):
+            return 0.0
+        return float(np.arctan2(vy, vx))
+
+    @staticmethod
+    def _wrap_angle_delta(angle_now: float, angle_prev: float) -> float:
+        return float(np.arctan2(np.sin(angle_now - angle_prev), np.cos(angle_now - angle_prev)))
 
     # ------------------------------------------------------------------
     # SAC train-mode internals
@@ -481,9 +492,23 @@ class AgentWrapper:
             sensor_flat = arr[:, 5:]
             new_frames = sensor_flat.reshape(self.n_rl_interval, 3, 3, cfg.num_signal_channels)
             last = arr[-1]
-            time_norm = float(last[0]) / max(float(cfg.episode_time_ms), 1.0)
+            heading_angle = self._heading_from_velocity(float(last[3]), float(last[4]))
+            prev_delta_heading_angle = 0.0
+            if arr.shape[0] > 1:
+                prev_vel = arr[:-1, 3:5]
+                prev_speeds = np.hypot(prev_vel[:, 0], prev_vel[:, 1])
+                valid_prev = np.flatnonzero(prev_speeds > 1e-6)
+                if valid_prev.size > 0:
+                    prev_heading_angle = self._heading_from_velocity(
+                        float(prev_vel[valid_prev[0], 0]),
+                        float(prev_vel[valid_prev[0], 1]),
+                    )
+                    prev_delta_heading_angle = self._wrap_angle_delta(
+                        heading_angle,
+                        prev_heading_angle,
+                    )
             kin_vec = np.array([[last[1], last[2], last[3], last[4],
-                                 self._sac_prev_vy, time_norm]], dtype=np.float32)
+                                 heading_angle, prev_delta_heading_angle]], dtype=np.float32)
             return new_frames, kin_vec
         except Exception as ex:
             logger.error(f"[Agent] Error parsing state: {ex}")
