@@ -1360,10 +1360,28 @@ classdef Jakiro < handle
                             end
                         end
 
-                        % Compute reward from lateral error of CC2 vs CC1's current path
+                        % Compute reward from lateral error of CC2 vs CC1's current path.
+                        % Use the measured front-carriage position when available so
+                        % random/curved paths do not rely on a straight-line x estimate.
                         x2 = cc2_state_buffer(2, end);  % latest CC2 x position (mm)
                         y2 = cc2_state_buffer(3, end);  % latest CC2 y position (mm)
-                        x2_gap = start_x + elapsed_time_sec*1000*v1 - x2;  % approximate object gap
+                        front_x_mm = NaN;
+                        sb1 = app.CC1.Car.state_buffer;
+                        n_valid1 = min(app.CC1.Car.state_buffer_count, size(sb1,1));
+                        if n_valid1 > 0
+                            sb1_valid = sb1(end-n_valid1+1:end,:);
+                            valid_rows1 = all(isfinite(sb1_valid(:,1:3)), 2);
+                            if any(valid_rows1)
+                                front_x_mm = sb1_valid(find(valid_rows1, 1, 'last'), 2);
+                            end
+                        end
+                        if ~isfinite(front_x_mm)
+                            front_x_mm = app.CC1.Car.real_loc(1);
+                        end
+                        if ~isfinite(front_x_mm)
+                            front_x_mm = start_x + elapsed_time_sec*1000*v1;
+                        end
+                        x2_gap = front_x_mm - x2;
 
                         % Closest point on discrete path
                         dists_sq = (pd.x - x2).^2 + (pd.y - y2).^2;
