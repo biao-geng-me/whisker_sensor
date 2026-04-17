@@ -64,6 +64,9 @@ classdef Jakiro < handle
             app.CC1.Car.origin = [5010, 0]; % parking position for carriage 1 (steps, 250 mm offset)
             app.CC1.Car.origin_mm = app.CC1.Car.origin * app.CC1.Car.step2mm;
             app.CC1.Car.path_dx_max = 4100; % max x movement range (mm)
+            app.CC1.Car.x_max_mm = 4100; % hard x boundary for interactive/manual control
+            app.CC1.Car.y_min_mm = 0; % hard y boundaries for interactive/manual control
+            app.CC1.Car.y_max_mm = 900;
             app.CC1.Car.motor_settings.ACC = 10000;
             app.CC1.Car.name = 'Front Carriage';
             app.CC1.Car.control_aoa = false;
@@ -176,8 +179,8 @@ classdef Jakiro < handle
             catch
                 v1 = 0.2;
                 v2 = 0.16;
-                episode_time_s = 35.0; % default fallback
-                rotation_step_deg = 2.0;
+                episode_time_s = 38.0; % default fallback
+                rotation_step_deg = 1.5;
             end
             config.episode_time_ms = episode_time_s * 1000;
             config.fixed_vx = v2;          % mm/ms — fixed forward speed for the RL-controlled back carriage
@@ -1409,6 +1412,7 @@ classdef Jakiro < handle
                         reward_corridor = 180;   % mm
                         terminate_corridor = 200; % mm
                         min_gap_mm = 25;          % mm
+                        finish_line_mm = 3800;    % mm
 
                         reward = max(-1.0, min(1.0, 1.0 - abs(signed_err)/reward_corridor));
 
@@ -1418,6 +1422,9 @@ classdef Jakiro < handle
                         end
                         if x2_gap < min_gap_mm
                             reward = reward - 2.0;
+                            is_done = 1;
+                        end
+                        if x2 >= finish_line_mm
                             is_done = 1;
                         end
 
@@ -1512,9 +1519,6 @@ classdef Jakiro < handle
                 end
 
                 if ep < max_episodes
-                    % Reposition carriages first so the model sync overlaps with settling
-                    settle = settle_delay_s;
-
                     % CC2 (back carriage): reset angle to 0, then start moving non-blocking
                     try 
                         for i=1:3
@@ -1535,8 +1539,7 @@ classdef Jakiro < handle
                         start_y - app.CC1.Car.origin_mm(2), 20, 1, true);
                     try stop(app.CC1.redrawTimer); catch; end
 
-                    % Sync with agent server; subtract elapsed sync time from settle
-                    t_sync_start = tic;
+                    % Sync with agent server while the carriages are returning.
                     reset_needed = false;
                     try
                         if ~isempty(app.net)
@@ -1547,15 +1550,8 @@ classdef Jakiro < handle
                         connection_lost = true;
                         break;
                     end
-                    sync_elapsed = toc(t_sync_start);
-
                     if reset_needed
-                        fprintf('[PathAgentTrain] Hardware reset requested. Extended settle.\n');
-                        settle = settle_delay_s * 2;
-                    end
-                    remaining_settle = settle - sync_elapsed;
-                    if remaining_settle > 0
-                        pause(remaining_settle);
+                        fprintf('[PathAgentTrain] Hardware reset requested.\n');
                     end
                 end
 
