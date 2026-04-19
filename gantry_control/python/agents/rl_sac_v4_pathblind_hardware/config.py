@@ -99,7 +99,7 @@ class SACV2PathblindConfig:
     # ------------------------------------------------------------------
     # SAC hyperparameters
     # ------------------------------------------------------------------
-    replay_size: int = 50_000
+    replay_size: int = 500_000
     batch_size: int = 128
     gamma: float = 0.99
     tau: float = 0.005
