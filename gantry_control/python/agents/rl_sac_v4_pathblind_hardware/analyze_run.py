@@ -12,6 +12,7 @@ from matplotlib.lines import Line2D
 
 
 COLORS = {
+    'y_boundary': 'tab:brown',
     'too_far': 'tab:red',
     'too_close': 'tab:orange',
     'time_limit': 'tab:blue',
@@ -64,8 +65,8 @@ def make_training_curves(train_rows: list[dict], outdir: Path):
     ax2.plot(steps, mean_lat, lw=2, color='tab:orange')
     ax2.axhline(180, ls='--', color='tab:orange', alpha=0.5)
     ax2.axhline(-180, ls='--', color='tab:orange', alpha=0.5)
-    ax2.axhline(300, ls='--', color='tab:red', alpha=0.5)
-    ax2.axhline(-300, ls='--', color='tab:red', alpha=0.5)
+    ax2.axhline(240, ls='--', color='tab:red', alpha=0.5)
+    ax2.axhline(-240, ls='--', color='tab:red', alpha=0.5)
     ax2.set_title('Mean Signed Lateral Error vs Env Steps')
     ax2.set_xlabel('Env steps')
     ax2.set_ylabel('Signed lateral error (mm)')
@@ -160,8 +161,8 @@ def make_episode_curves(episode_rows: list[dict], outdir: Path):
         ax2.scatter(idx, lat, color=COLORS.get(reason, 'tab:gray'), s=40)
     ax2.axhline(180, ls='--', color='tab:orange', alpha=0.5)
     ax2.axhline(-180, ls='--', color='tab:orange', alpha=0.5)
-    ax2.axhline(300, ls='--', color='tab:red', alpha=0.5)
-    ax2.axhline(-300, ls='--', color='tab:red', alpha=0.5)
+    ax2.axhline(240, ls='--', color='tab:red', alpha=0.5)
+    ax2.axhline(-240, ls='--', color='tab:red', alpha=0.5)
     ax2.plot(episode_idx, episode_lats, color='0.6', alpha=0.6)
     ax2.set_title('Episode-End Signed Lateral Error')
     ax2.set_xlabel('Episode index')

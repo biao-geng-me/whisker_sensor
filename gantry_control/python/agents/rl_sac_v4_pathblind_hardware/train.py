@@ -258,15 +258,34 @@ def _load_checkpoint(
     agent.q2_target.train()
 
     replay_path = checkpoint.get('replay_path')
-    rp = Path(replay_path) if replay_path else (output_dir / 'latest_replay.npz')
-    if rp.exists():
-        replay.load(str(rp))
-    else:
-        print(f'warning: replay file not found for resume: {rp}')
-        latest = output_dir / 'latest_replay.npz'
-        if rp != latest and latest.exists():
-            replay.load(str(latest))
-            print(f'warning: resumed replay from latest file: {latest}')
+    requested_replay = Path(replay_path) if replay_path else (output_dir / 'latest_replay.npz')
+    candidates = []
+    for candidate in [requested_replay, output_dir / 'latest_replay.npz']:
+        if candidate not in candidates:
+            candidates.append(candidate)
+    for candidate in sorted(output_dir.glob('replay_*.npz'), reverse=True):
+        if candidate not in candidates:
+            candidates.append(candidate)
+
+    replay_loaded_from = None
+    replay_errors = []
+    for candidate in candidates:
+        if not candidate.exists():
+            continue
+        try:
+            replay.load(str(candidate))
+            replay_loaded_from = candidate
+            break
+        except Exception as ex:
+            replay_errors.append(f'{candidate}: {ex}')
+            print(f'warning: replay load failed from {candidate}: {ex}')
+
+    if replay_loaded_from is None:
+        print('warning: checkpoint restored without replay; continuing with an empty replay buffer')
+        if replay_errors:
+            print('warning: replay load attempts: ' + ' | '.join(replay_errors))
+    elif replay_loaded_from != requested_replay:
+        print(f'warning: resumed replay from fallback file: {replay_loaded_from}')
 
     rng = checkpoint.get('rng')
     if rng:

@@ -2,7 +2,7 @@
 *.asv
 .vscode
 *.pyc
-gantry_control/matlab/paths/env1/
+gantry_control/matlab/paths/
 # gantry_control/python/agents/
 gantry_control/episode_trajectories/
 gantry_control/python/checkpoints*/

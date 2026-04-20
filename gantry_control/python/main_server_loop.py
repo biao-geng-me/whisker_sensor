@@ -32,6 +32,7 @@ except Exception:
 
 
 _TERM_COLORS = {
+    'y_boundary': 'tab:brown',
     'too_far': 'tab:red',
     'too_close': 'tab:orange',
     'time_limit': 'tab:blue',
@@ -76,7 +77,7 @@ class LivePlotter:
         self.ax_lat.set_xlabel('Episode')
         self.ax_lat.set_ylabel('Error (mm)')
         for level, color in [( 180, 'tab:orange'), (-180, 'tab:orange'),
-                              ( 200, 'tab:red'),    (-200, 'tab:red')]:
+                              ( 240, 'tab:red'),    (-240, 'tab:red')]:
             self.ax_lat.axhline(level, ls='--', color=color, alpha=0.5)
         self.ax_lat.grid(True, alpha=0.3)
 
@@ -170,6 +171,7 @@ def main():
     # Live training plot (train mode only, requires interactive display)
     live_plotter = None
     if config.get('mode') == 'train' and _matplotlib_ok:
+    #if False and config.get('mode') == 'train' and _matplotlib_ok:
         live_plotter = LivePlotter()
         if not live_plotter._ok:
             live_plotter = None
@@ -478,7 +480,9 @@ def main():
                     if episode_signed_laterals else 0.0
                 )
                 # Termination reason
-                if last_reward_info.get('too_far'):
+                if last_reward_info.get('y_boundary_hit'):
+                    term_reason = 'y_boundary'
+                elif last_reward_info.get('too_far'):
                     term_reason = 'too_far'
                 elif last_reward_info.get('too_close'):
                     term_reason = 'too_close'

@@ -61,7 +61,7 @@ classdef Jakiro < handle
             cc1_panel.Layout.Column = 1;
             cc1_panel.Layout.Row = [1 2];
             app.CC1 = CarriageApp(cc1_panel,ax);
-            app.CC1.Car.origin = [5010, 0]; % parking position for carriage 1 (steps, 250 mm offset)
+            app.CC1.Car.origin = [4008, 0]; % parking position for carriage 1 (steps, 200 mm offset)
             app.CC1.Car.origin_mm = app.CC1.Car.origin * app.CC1.Car.step2mm;
             app.CC1.Car.path_dx_max = 4100; % max x movement range (mm)
             app.CC1.Car.x_max_mm = 4100; % hard x boundary for interactive/manual control
@@ -1410,7 +1410,7 @@ classdef Jakiro < handle
                         signed_err = (x2 - pd.x(kp))*(-ty) + (y2 - pd.y(kp))*(tx);
 
                         reward_corridor = 180;   % mm
-                        terminate_corridor = 200; % mm
+                        terminate_corridor = 240; % mm
                         min_gap_mm = 25;          % mm
                         finish_line_mm = 3800;    % mm
 
@@ -1423,6 +1423,22 @@ classdef Jakiro < handle
                         if x2_gap < min_gap_mm
                             reward = reward - 2.0;
                             is_done = 1;
+                        end
+                        y_boundary_hit = false;
+                        boundary_margin = app.CC2.Car.boundary_margin_mm;
+                        if isfinite(app.CC2.Car.y_min_mm)
+                            y_boundary_hit = y_boundary_hit || (y2 <= app.CC2.Car.y_min_mm + boundary_margin);
+                        end
+                        if isfinite(app.CC2.Car.y_max_mm)
+                            y_boundary_hit = y_boundary_hit || (y2 >= app.CC2.Car.y_max_mm - boundary_margin);
+                        end
+                        if y_boundary_hit
+                            reward = reward - 2.0;
+                            is_done = 1;
+                            try
+                                app.CC2.Car.sendStopCommand();
+                            catch
+                            end
                         end
                         if x2 >= finish_line_mm
                             is_done = 1;

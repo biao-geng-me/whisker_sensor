@@ -66,7 +66,7 @@ class SACV2PathblindConfig:
     initial_object_gap_mm: float = 200.0
     min_object_x_gap_terminate_mm: float = 25.0
     reward_corridor_half_width_mm: float = 180.0
-    terminate_corridor_half_width_mm: float = 200.0
+    terminate_corridor_half_width_mm: float = 240.0
 
     # ------------------------------------------------------------------
     # Episode settings
@@ -99,7 +99,7 @@ class SACV2PathblindConfig:
     # ------------------------------------------------------------------
     # SAC hyperparameters
     # ------------------------------------------------------------------
-    replay_size: int = 500_000
+    replay_size: int = 200_000
     batch_size: int = 128
     gamma: float = 0.99
     tau: float = 0.005

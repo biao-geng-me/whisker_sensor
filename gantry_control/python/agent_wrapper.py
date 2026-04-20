@@ -386,6 +386,13 @@ class AgentWrapper:
         self._sac_min_gap_mm = float(cfg.min_object_x_gap_terminate_mm)
         self._sac_object_speed = float(cfg.object_tangential_speed_mm_per_ms)
         self._sac_initial_gap = float(cfg.initial_object_gap_mm)
+        self._sac_y_min_mm = self._finite_float_or_default(self.config.get("y_min_mm", 0.0), 0.0)
+        self._sac_y_max_mm = self._finite_float_or_default(self.config.get("y_max_mm", 900.0), 900.0)
+        self._sac_boundary_margin_mm = self._finite_float_or_default(
+            self.config.get("boundary_margin_mm", 50.0),
+            50.0,
+            min_value=0.0,
+        )
         self._sac_episode_start_x = 0.0  # set on reset
         self._sac_episode_object_speed = float(self._sac_object_speed)
         self._sac_episode_delay_ms = 0.0
@@ -700,11 +707,22 @@ class AgentWrapper:
             object_x = self._sac_episode_start_x + elapsed_ms * self._sac_episode_object_speed
             object_gap = object_x - x_mm
 
+            hit_y_min = bool(
+                np.isfinite(self._sac_y_min_mm)
+                and y_mm <= (self._sac_y_min_mm + self._sac_boundary_margin_mm)
+            )
+            hit_y_max = bool(
+                np.isfinite(self._sac_y_max_mm)
+                and y_mm >= (self._sac_y_max_mm - self._sac_boundary_margin_mm)
+            )
+            y_boundary_hit = bool(hit_y_min or hit_y_max)
             too_far = lateral > self._sac_terminate_corridor
             too_close = object_gap < self._sac_min_gap_mm
             finish_line_reached = x_mm >= float(self._sac_cfg.finish_line_mm)
 
-            done = too_far or too_close or finish_line_reached
+            done = too_far or too_close or finish_line_reached or y_boundary_hit
+            if y_boundary_hit:
+                reward -= 2.0
             if too_far:
                 reward -= 2.0
             if too_close:
@@ -717,6 +735,8 @@ class AgentWrapper:
                 'path_progress_mm': float(frame['s']),
                 'signed_lateral_error_mm': float(frame['signed_lateral_error']),
                 'object_x_gap_mm': float(object_gap),
+                'y_boundary_hit': y_boundary_hit,
+                'y_boundary_side': 'min' if hit_y_min else ('max' if hit_y_max else ''),
                 'too_far': too_far,
                 'too_close': too_close,
                 'finish_line_reached': bool(finish_line_reached),
@@ -822,14 +842,36 @@ class AgentWrapper:
             self._sac_agent.q1_target.train()
             self._sac_agent.q2_target.train()
 
-            # Restore replay
+            # Restore replay, tolerating old capacities and bad latest files.
             replay_path = checkpoint.get('replay_path')
-            rp = Path(replay_path) if replay_path else (checkpoint_path.parent / 'latest_replay.npz')
-            if rp.exists():
-                self._sac_replay.load(str(rp))
-            elif (checkpoint_path.parent / 'latest_replay.npz').exists():
-                self._sac_replay.load(str(checkpoint_path.parent / 'latest_replay.npz'))
-                logger.warning(f"[Agent] Replay not found at {rp}; loaded latest_replay.npz instead")
+            requested_replay = Path(replay_path) if replay_path else (checkpoint_path.parent / 'latest_replay.npz')
+            candidates = []
+            for candidate in [requested_replay, checkpoint_path.parent / 'latest_replay.npz']:
+                if candidate not in candidates:
+                    candidates.append(candidate)
+            for candidate in sorted(checkpoint_path.parent.glob('replay_*.npz'), reverse=True):
+                if candidate not in candidates:
+                    candidates.append(candidate)
+
+            replay_loaded_from = None
+            replay_errors = []
+            for candidate in candidates:
+                if not candidate.exists():
+                    continue
+                try:
+                    self._sac_replay.load(str(candidate))
+                    replay_loaded_from = candidate
+                    break
+                except Exception as ex:
+                    replay_errors.append(f"{candidate}: {ex}")
+                    logger.warning(f"[Agent] Replay load failed from {candidate}: {ex}")
+
+            if replay_loaded_from is None:
+                logger.warning("[Agent] Resume checkpoint loaded without replay; starting from an empty replay buffer")
+                if replay_errors:
+                    logger.warning("[Agent] Replay load attempts: " + " | ".join(replay_errors))
+            elif replay_loaded_from != requested_replay:
+                logger.warning(f"[Agent] Replay restored from fallback file: {replay_loaded_from}")
 
             # Restore counters
             counters = checkpoint.get('counters', {})

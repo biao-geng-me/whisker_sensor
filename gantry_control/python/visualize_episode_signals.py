@@ -14,6 +14,8 @@ from __future__ import annotations
 import argparse
 import csv
 from pathlib import Path
+import re
+import traceback
 
 import matplotlib
 
@@ -27,6 +29,7 @@ import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 EPISODE_TRAJ_DIR = REPO_ROOT / "episode_trajectories"
+SIGNALS_DIR = EPISODE_TRAJ_DIR / "signals"
 WHISKER_COUNT = 9
 
 
@@ -78,6 +81,24 @@ def parse_args() -> argparse.Namespace:
         default=1.5,
         help="Recent trajectory tail shown in the top panel.",
     )
+    parser.add_argument(
+        "--ensure-gif-in-signals",
+        action="store_true",
+        help=(
+            "Use episode_trajectories/signals as a GIF cache: if the matching GIF already exists "
+            "there, print its path and exit; otherwise render and save the GIF there."
+        ),
+    )
+    parser.add_argument(
+        "--ep",
+        type=int,
+        default=None,
+        help=(
+            "Render all trajectory files whose filename episode number matches this value "
+            "(for example --ep 39 matches *_ep0039.csv). Matching GIFs are written into "
+            "episode_trajectories/signals and existing ones are skipped."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -92,6 +113,26 @@ def resolve_traj_csv(traj_csv: str) -> Path:
     if not files:
         raise FileNotFoundError(f"No traj_*.csv files found under {EPISODE_TRAJ_DIR}")
     return files[-1]
+
+
+def extract_episode_number(path: Path) -> int | None:
+    match = re.search(r"_ep(\d+)$", path.stem)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def iter_traj_csvs(ep: int | None = None) -> list[Path]:
+    files = sorted(EPISODE_TRAJ_DIR.glob("traj_*.csv"))
+    if ep is not None:
+        files = [p for p in files if extract_episode_number(p) == ep]
+    if not files:
+        if ep is None:
+            raise FileNotFoundError(f"No traj_*.csv files found under {EPISODE_TRAJ_DIR}")
+        raise FileNotFoundError(
+            f"No traj_*.csv files with episode number {ep} found under {EPISODE_TRAJ_DIR}"
+        )
+    return files
 
 
 def resolve_path_csv(traj_csv: Path, path_csv: str) -> Path:
@@ -109,6 +150,10 @@ def resolve_path_csv(traj_csv: Path, path_csv: str) -> Path:
 
 def default_output_path(traj_csv: Path) -> Path:
     return traj_csv.with_name(traj_csv.name.replace("traj_", "signals_", 1)).with_suffix(".mp4")
+
+
+def default_signals_gif_path(traj_csv: Path) -> Path:
+    return SIGNALS_DIR / traj_csv.name.replace("traj_", "signals_", 1).replace(".csv", ".gif")
 
 
 def load_traj_table(path: Path) -> dict[str, np.ndarray]:
@@ -172,12 +217,7 @@ def pick_writer(output_path: Path, frame_rate: float):
     )
 
 
-def main() -> None:
-    args = parse_args()
-    traj_csv = resolve_traj_csv(args.traj_csv)
-    path_csv = resolve_path_csv(traj_csv, args.path_csv)
-    output_path = Path(args.output).expanduser().resolve() if args.output else default_output_path(traj_csv)
-
+def render_episode(args: argparse.Namespace, traj_csv: Path, path_csv: Path, output_path: Path) -> None:
     traj = load_traj_table(traj_csv)
     path_x, path_y = load_path_table(path_csv)
 
@@ -281,6 +321,60 @@ def main() -> None:
     print(f"Trajectory CSV: {traj_csv}")
     print(f"Path CSV: {path_csv}")
     print(f"Wrote: {output_path}")
+
+
+def ensure_gifs_in_signals(args: argparse.Namespace) -> None:
+    if args.path_csv or args.output:
+        raise ValueError("--path-csv and --output are only supported when rendering one specific trajectory.")
+
+    rendered = 0
+    skipped = 0
+    failed = 0
+
+    for traj_csv in iter_traj_csvs(args.ep):
+        output_path = default_signals_gif_path(traj_csv)
+        if output_path.exists():
+            print(f"Existing GIF: {output_path}")
+            skipped += 1
+            continue
+
+        try:
+            path_csv = resolve_path_csv(traj_csv, "")
+            render_episode(args, traj_csv, path_csv, output_path)
+            rendered += 1
+        except Exception as ex:
+            print(f"Failed: {traj_csv} -> {type(ex).__name__}: {ex}")
+            traceback.print_exc()
+            failed += 1
+
+    print(f"Signals cache summary: rendered={rendered} skipped={skipped} failed={failed}")
+
+
+def main() -> None:
+    args = parse_args()
+    if args.ep is not None:
+        if args.traj_csv:
+            raise ValueError("--ep cannot be combined with a positional traj_csv argument.")
+        ensure_gifs_in_signals(args)
+        return
+
+    if args.ensure_gif_in_signals and not args.traj_csv:
+        ensure_gifs_in_signals(args)
+        return
+
+    traj_csv = resolve_traj_csv(args.traj_csv)
+    path_csv = resolve_path_csv(traj_csv, args.path_csv)
+    if args.ensure_gif_in_signals:
+        output_path = default_signals_gif_path(traj_csv)
+        if output_path.exists():
+            print(f"Trajectory CSV: {traj_csv}")
+            print(f"Path CSV: {path_csv}")
+            print(f"Existing GIF: {output_path}")
+            return
+    else:
+        output_path = Path(args.output).expanduser().resolve() if args.output else default_output_path(traj_csv)
+
+    render_episode(args, traj_csv, path_csv, output_path)
 
 
 if __name__ == "__main__":
