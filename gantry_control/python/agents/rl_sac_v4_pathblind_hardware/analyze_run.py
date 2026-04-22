@@ -12,6 +12,7 @@ from matplotlib.lines import Line2D
 
 
 COLORS = {
+    'y_boundary': 'tab:brown',
     'too_far': 'tab:red',
     'too_close': 'tab:orange',
     'time_limit': 'tab:blue',
@@ -64,8 +65,8 @@ def make_training_curves(train_rows: list[dict], outdir: Path):
     ax2.plot(steps, mean_lat, lw=2, color='tab:orange')
     ax2.axhline(180, ls='--', color='tab:orange', alpha=0.5)
     ax2.axhline(-180, ls='--', color='tab:orange', alpha=0.5)
-    ax2.axhline(300, ls='--', color='tab:red', alpha=0.5)
-    ax2.axhline(-300, ls='--', color='tab:red', alpha=0.5)
+    ax2.axhline(240, ls='--', color='tab:red', alpha=0.5)
+    ax2.axhline(-240, ls='--', color='tab:red', alpha=0.5)
     ax2.set_title('Mean Signed Lateral Error vs Env Steps')
     ax2.set_xlabel('Env steps')
     ax2.set_ylabel('Signed lateral error (mm)')
@@ -91,10 +92,20 @@ def make_training_curves(train_rows: list[dict], outdir: Path):
 
 
 def make_loss_curves_log(train_rows: list[dict], outdir: Path):
-    actor_steps = [int(r['total_env_steps']) for r in train_rows if r['actor_loss'] not in ('', None)]
-    actor_loss = [float(r['actor_loss']) for r in train_rows if r['actor_loss'] not in ('', None)]
-    q1_loss = [float(r['q1_loss']) for r in train_rows if r['q1_loss'] not in ('', None)]
-    q2_loss = [float(r['q2_loss']) for r in train_rows if r['q2_loss'] not in ('', None)]
+    def _pick_metric(row: dict, primary: str, fallback: str):
+        value = row.get(primary, '')
+        if value in ('', None):
+            value = row.get(fallback, '')
+        return value
+
+    valid_rows = [
+        r for r in train_rows
+        if _pick_metric(r, 'actor_loss', 'actor_loss_last') not in ('', None)
+    ]
+    actor_steps = [int(r['total_env_steps']) for r in valid_rows]
+    actor_loss = [float(_pick_metric(r, 'actor_loss', 'actor_loss_last')) for r in valid_rows]
+    q1_loss = [float(_pick_metric(r, 'q1_loss', 'q1_loss_last')) for r in valid_rows]
+    q2_loss = [float(_pick_metric(r, 'q2_loss', 'q2_loss_last')) for r in valid_rows]
 
     q1_x, q1_y = ensure_positive(actor_steps, q1_loss)
     q2_x, q2_y = ensure_positive(actor_steps, q2_loss)
@@ -103,10 +114,10 @@ def make_loss_curves_log(train_rows: list[dict], outdir: Path):
 
     ax1 = plt.subplot(2, 1, 1)
     if q1_x:
-        ax1.semilogy(q1_x, q1_y, label='q1_loss')
+        ax1.semilogy(q1_x, q1_y, label='q1_loss_mean')
     if q2_x:
-        ax1.semilogy(q2_x, q2_y, label='q2_loss')
-    ax1.set_title('Critic Loss Curves (log scale)')
+        ax1.semilogy(q2_x, q2_y, label='q2_loss_mean')
+    ax1.set_title('Critic Loss Curves (episode-mean, log scale)')
     ax1.set_xlabel('Env steps')
     ax1.set_ylabel('Critic loss')
     ax1.grid(True, which='both', alpha=0.3)
@@ -114,10 +125,10 @@ def make_loss_curves_log(train_rows: list[dict], outdir: Path):
 
     ax2 = plt.subplot(2, 1, 2)
     if actor_steps:
-        ax2.plot(actor_steps, actor_loss, label='actor_loss')
+        ax2.plot(actor_steps, actor_loss, label='actor_loss_mean')
     ax2.set_yscale('symlog', linthresh=1e-2)
     ax2.axhline(0.0, color='0.5', ls='--', alpha=0.6)
-    ax2.set_title('Actor Loss Curve (symlog scale)')
+    ax2.set_title('Actor Loss Curve (episode-mean, symlog scale)')
     ax2.set_xlabel('Env steps')
     ax2.set_ylabel('Actor loss')
     ax2.grid(True, which='both', alpha=0.3)
@@ -150,8 +161,8 @@ def make_episode_curves(episode_rows: list[dict], outdir: Path):
         ax2.scatter(idx, lat, color=COLORS.get(reason, 'tab:gray'), s=40)
     ax2.axhline(180, ls='--', color='tab:orange', alpha=0.5)
     ax2.axhline(-180, ls='--', color='tab:orange', alpha=0.5)
-    ax2.axhline(300, ls='--', color='tab:red', alpha=0.5)
-    ax2.axhline(-300, ls='--', color='tab:red', alpha=0.5)
+    ax2.axhline(240, ls='--', color='tab:red', alpha=0.5)
+    ax2.axhline(-240, ls='--', color='tab:red', alpha=0.5)
     ax2.plot(episode_idx, episode_lats, color='0.6', alpha=0.6)
     ax2.set_title('Episode-End Signed Lateral Error')
     ax2.set_xlabel('Episode index')

@@ -32,11 +32,20 @@ except Exception:
 
 
 _TERM_COLORS = {
+    'y_boundary': 'tab:brown',
     'too_far': 'tab:red',
     'too_close': 'tab:orange',
     'time_limit': 'tab:blue',
     'done': 'tab:olive',
 }
+
+
+def _optional_meta_float(value):
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    return value if np.isfinite(value) else None
 
 
 class LivePlotter:
@@ -68,7 +77,7 @@ class LivePlotter:
         self.ax_lat.set_xlabel('Episode')
         self.ax_lat.set_ylabel('Error (mm)')
         for level, color in [( 180, 'tab:orange'), (-180, 'tab:orange'),
-                              ( 300, 'tab:red'),    (-300, 'tab:red')]:
+                              ( 240, 'tab:red'),    (-240, 'tab:red')]:
             self.ax_lat.axhline(level, ls='--', color=color, alpha=0.5)
         self.ax_lat.grid(True, alpha=0.3)
 
@@ -162,6 +171,7 @@ def main():
     # Live training plot (train mode only, requires interactive display)
     live_plotter = None
     if config.get('mode') == 'train' and _matplotlib_ok:
+    #if False and config.get('mode') == 'train' and _matplotlib_ok:
         live_plotter = LivePlotter()
         if not live_plotter._ok:
             live_plotter = None
@@ -181,7 +191,9 @@ def main():
     obs_var_names = make_obs_var_names(num_whiskers)
     # Total received per step = states + 1 reward + 1 done flag + 1 truncated flag
     step_msg_size = state_dim + 3 
+    start_msg_size = state_dim + 5  # state + path index + front start x + object speed + delay + rotation-step limit
     record_trajectory = config.get("record_trajectory", False)  # Optional trajectory recording
+    use_random_paths = bool(config.get("use_random_paths", False))
 
     # Trajectory output directory (episode_trajectories/ relative to this script)
     traj_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'episode_trajectories')
@@ -190,6 +202,8 @@ def main():
     # Per-episode trajectory buffer: list of observation rows using obs_var_names
     episode_trajectory = []
     episode_step = 0
+    episode_timestamp = None
+    episode_path_xy = None
     
     # Latency tracking
     step_latencies = []  # Track latency for each step in current episode
@@ -243,6 +257,8 @@ def main():
             send_times = []
             episode_trajectory = []
             episode_step = 0
+            episode_timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+            episode_path_xy = None
             episode_rewards = []
             episode_signed_laterals = []
             last_signed_lateral = 0.0
@@ -251,18 +267,61 @@ def main():
             last_truncated_flag = False
             logger.info(f"\n[Episode {episode_num}] STARTED")
             
-            logger.debug(f"[Episode {episode_num}] Waiting for initial state data (expecting {step_msg_size} doubles)...")
-            initial_data = net.receive_doubles(step_msg_size)
+            logger.debug(f"[Episode {episode_num}] Waiting for initial state data (expecting {start_msg_size} doubles)...")
+            initial_data = net.receive_doubles(start_msg_size)
             logger.debug(f"[Episode {episode_num}] Received initial data, shape: {len(initial_data)}")
             
             initial_state = initial_data[0:state_dim]
+            raw_path_index = _optional_meta_float(initial_data[state_dim])
+            episode_meta = {
+                'path_index': int(round(raw_path_index)) if raw_path_index is not None else None,
+                'front_start_x_mm': _optional_meta_float(initial_data[state_dim + 1]),
+                'object_speed_mm_per_ms': _optional_meta_float(initial_data[state_dim + 2]),
+                'delay_ms': _optional_meta_float(initial_data[state_dim + 3]),
+                'rotation_change_limit_deg_per_control_step': _optional_meta_float(initial_data[state_dim + 4]),
+            }
+
+            path_point_count = net.receive_int32()
+            if path_point_count is None:
+                logger.error(f"[Episode {episode_num}] Missing episode path length from MATLAB.")
+                break
+            if path_point_count < 0:
+                logger.warning(
+                    f"[Episode {episode_num}] Invalid negative path point count {path_point_count}; ignoring episode path."
+                )
+                path_point_count = 0
+
+            logger.debug(f"[Episode {episode_num}] Episode path point count: {path_point_count}")
+            if use_random_paths and path_point_count == 0:
+                logger.warning(f"[Episode {episode_num}] Random-path mode is enabled, but MATLAB sent an empty episode path.")
+
+            if path_point_count > 0:
+                path_flat = net.receive_doubles(path_point_count * 2)
+                if path_flat is None:
+                    logger.error(f"[Episode {episode_num}] Failed to receive episode path data.")
+                    break
+                episode_path_xy = np.asarray(path_flat, dtype=np.float64).reshape(path_point_count, 2)
+                episode_meta['path_xy'] = episode_path_xy.tolist()
+
+                path_csv_path = os.path.join(
+                    traj_dir,
+                    f'path_{episode_timestamp}_ep{episode_num:04d}.csv',
+                )
+                with open(path_csv_path, 'w', newline='') as f:
+                    writer = csv.writer(f)
+                    writer.writerow(['x_mm', 'y_mm'])
+                    writer.writerows(episode_path_xy.tolist())
+                logger.info(
+                    f"[Episode {episode_num}] Path saved: {path_csv_path} ({path_point_count} rows)"
+                )
+
             logger.debug(f"[Episode {episode_num}] Extracted initial state, shape: {len(initial_state)}")
             logger.debug(f"[Episode {episode_num}] First 5 state values: {initial_state[:5] if len(initial_state) >= 5 else initial_state}")
             
             # Reset agent memory and get first action
             try:
                 logger.debug(f"[Episode {episode_num}] Calling agent.reset()...")
-                action = agent.reset(initial_state)
+                action = agent.reset(initial_state, episode_meta=episode_meta)
                 logger.debug(f"[Episode {episode_num}] agent.reset() returned, action type: {type(action)}")
                 
                 if action is None:
@@ -301,16 +360,19 @@ def main():
             done = step_data[state_dim + 1]
             truncated = step_data[state_dim + 2]
 
-            # Server-side reward replaces MATLAB reward when path data is available.
-            # Done/truncated signals still come from MATLAB to keep the protocol in sync.
+            reward = matlab_reward
+            reward_info = {}
+
+            # MATLAB remains the source of truth for training reward by default.
+            # The synchronized server-side path model is still useful for
+            # diagnostics and future bring-up when explicitly enabled.
             if agent.use_sac_train and agent._sac_current_path_data is not None:
-                reward, _, reward_info = agent.compute_reward(state)
+                server_reward, _, reward_info = agent.compute_reward(state)
                 last_signed_lateral = float(reward_info.get('signed_lateral_error_mm', 0.0))
                 episode_signed_laterals.append(last_signed_lateral)
                 last_reward_info = reward_info
-            else:
-                reward = matlab_reward
-                reward_info = {}
+                if agent.reward_source == 'server':
+                    reward = server_reward
 
             episode_rewards.append(reward)
             last_done = done
@@ -380,7 +442,7 @@ def main():
             logger.info(f"[Episode {episode_num}] Episode ended. Saving trajectory and running update...")
 
             if episode_trajectory:
-                ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+                ts = episode_timestamp or datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
                 csv_path = os.path.join(traj_dir, f'traj_{ts}_ep{episode_num:04d}.csv')
                 fieldnames = obs_var_names
                 with open(csv_path, 'w', newline='') as f:
@@ -418,7 +480,9 @@ def main():
                     if episode_signed_laterals else 0.0
                 )
                 # Termination reason
-                if last_reward_info.get('too_far'):
+                if last_reward_info.get('y_boundary_hit'):
+                    term_reason = 'y_boundary'
+                elif last_reward_info.get('too_far'):
                     term_reason = 'too_far'
                 elif last_reward_info.get('too_close'):
                     term_reason = 'too_close'
@@ -436,6 +500,10 @@ def main():
                     'q1_loss': str(sac_m.get('q1_loss', '')),
                     'q2_loss': str(sac_m.get('q2_loss', '')),
                     'alpha': str(sac_m.get('alpha', '')),
+                    'actor_loss_last': str(sac_m.get('actor_loss_last', '')),
+                    'q1_loss_last': str(sac_m.get('q1_loss_last', '')),
+                    'q2_loss_last': str(sac_m.get('q2_loss_last', '')),
+                    'alpha_last': str(sac_m.get('alpha_last', '')),
                     'episode_return': f'{ep_return:.6f}',
                 }
                 ep_row = {

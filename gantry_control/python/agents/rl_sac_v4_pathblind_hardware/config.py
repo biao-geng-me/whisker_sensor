@@ -52,6 +52,7 @@ class SACV2PathblindConfig:
     # ------------------------------------------------------------------
     fixed_x_speed_mm_per_ms: float = 0.16
     y_speed_limit_mm_per_ms: float = 0.15
+    rotation_change_limit_deg_per_control_step: float = 1.5
     vel_max_mm_per_ms: float = 0.4
 
     # ------------------------------------------------------------------
@@ -65,13 +66,13 @@ class SACV2PathblindConfig:
     initial_object_gap_mm: float = 200.0
     min_object_x_gap_terminate_mm: float = 25.0
     reward_corridor_half_width_mm: float = 180.0
-    terminate_corridor_half_width_mm: float = 300.0
+    terminate_corridor_half_width_mm: float = 240.0
 
     # ------------------------------------------------------------------
     # Episode settings
     # ------------------------------------------------------------------
-    episode_time_ms: float = 20000.0
-    finish_line_mm: float = 3400.0
+    episode_time_ms: float = 38000.0
+    finish_line_mm: float = 3800.0
     xloc_start_mm: float = 200.0
     yloc_start_mm: float = 500.0
     start_on_path_initial_point: bool = True
@@ -98,7 +99,7 @@ class SACV2PathblindConfig:
     # ------------------------------------------------------------------
     # SAC hyperparameters
     # ------------------------------------------------------------------
-    replay_size: int = 50_000
+    replay_size: int = 200_000
     batch_size: int = 128
     gamma: float = 0.99
     tau: float = 0.005

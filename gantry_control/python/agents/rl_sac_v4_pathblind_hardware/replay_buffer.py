@@ -10,6 +10,10 @@ fancy prioritization or memory compression yet.
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+import tempfile
+
 import numpy as np
 import torch
 
@@ -103,32 +107,111 @@ class ReplayBuffer:
 
     # Persist replay buffer to disk for resume/debug.
     def save(self, path: str):
-        """Save replay contents and pointers to a NumPy archive."""
-        np.savez(
-            path,
-            sensor=self.sensor,
-            kin=self.kin,
-            actions=self.actions,
-            rewards=self.rewards,
-            next_sensor=self.next_sensor,
-            next_kin=self.next_kin,
-            dones=self.dones,
-            ptr=np.array([self.ptr], dtype=np.int64),
-            size=np.array([self.size], dtype=np.int64),
-        )
+        """Save replay contents and pointers to a NumPy archive atomically."""
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=target.parent, suffix='.npz', delete=False) as handle:
+                tmp_path = Path(handle.name)
+            np.savez(
+                tmp_path,
+                sensor=self.sensor,
+                kin=self.kin,
+                actions=self.actions,
+                rewards=self.rewards,
+                next_sensor=self.next_sensor,
+                next_kin=self.next_kin,
+                dones=self.dones,
+                ptr=np.array([self.ptr], dtype=np.int64),
+                size=np.array([self.size], dtype=np.int64),
+            )
+            os.replace(tmp_path, target)
+        finally:
+            if tmp_path is not None and tmp_path.exists():
+                tmp_path.unlink()
 
     # Restore replay buffer from disk for resume.
     def load(self, path: str):
-        """Load replay contents from a NumPy archive."""
+        """Load replay contents from a NumPy archive.
+
+        The on-disk archive may have been created with a different replay
+        capacity. When that happens, load the newest transitions that fit in the
+        current buffer rather than failing on a shape mismatch.
+        """
         data = np.load(path)
-        if data['sensor'].shape != self.sensor.shape:
-            raise ValueError('Replay buffer shape mismatch; cannot resume with different capacity or shapes.')
-        self.sensor[:] = data['sensor']
-        self.kin[:] = data['kin']
-        self.actions[:] = data['actions']
-        self.rewards[:] = data['rewards']
-        self.next_sensor[:] = data['next_sensor']
-        self.next_kin[:] = data['next_kin']
-        self.dones[:] = data['dones']
-        self.ptr = int(data['ptr'][0])
-        self.size = int(data['size'][0])
+        stored_sensor = data['sensor']
+        stored_kin = data['kin']
+        stored_actions = data['actions']
+        stored_rewards = data['rewards']
+        stored_next_sensor = data['next_sensor']
+        stored_next_kin = data['next_kin']
+        stored_dones = data['dones']
+
+        expected_shapes = {
+            'sensor': self.sensor.shape[1:],
+            'kin': self.kin.shape[1:],
+            'actions': self.actions.shape[1:],
+            'rewards': self.rewards.shape[1:],
+            'next_sensor': self.next_sensor.shape[1:],
+            'next_kin': self.next_kin.shape[1:],
+            'dones': self.dones.shape[1:],
+        }
+        actual_shapes = {
+            'sensor': stored_sensor.shape[1:],
+            'kin': stored_kin.shape[1:],
+            'actions': stored_actions.shape[1:],
+            'rewards': stored_rewards.shape[1:],
+            'next_sensor': stored_next_sensor.shape[1:],
+            'next_kin': stored_next_kin.shape[1:],
+            'dones': stored_dones.shape[1:],
+        }
+        mismatches = [
+            key for key in expected_shapes
+            if actual_shapes[key] != expected_shapes[key]
+        ]
+        if mismatches:
+            details = ', '.join(
+                f'{key}: stored={actual_shapes[key]} current={expected_shapes[key]}'
+                for key in mismatches
+            )
+            raise ValueError(f'Replay buffer feature shape mismatch: {details}')
+
+        stored_capacity = int(stored_sensor.shape[0])
+        stored_size = max(0, min(int(data['size'][0]), stored_capacity))
+        stored_ptr = int(data['ptr'][0]) % max(stored_capacity, 1)
+
+        # Reset first so partially loaded state never leaks through.
+        self.sensor.fill(0.0)
+        self.kin.fill(0.0)
+        self.actions.fill(0.0)
+        self.rewards.fill(0.0)
+        self.next_sensor.fill(0.0)
+        self.next_kin.fill(0.0)
+        self.dones.fill(0.0)
+
+        if stored_size <= 0:
+            self.ptr = 0
+            self.size = 0
+            return
+
+        if stored_size < stored_capacity:
+            ordered_idx = np.arange(stored_size, dtype=np.int64)
+        else:
+            ordered_idx = np.concatenate([
+                np.arange(stored_ptr, stored_capacity, dtype=np.int64),
+                np.arange(0, stored_ptr, dtype=np.int64),
+            ])
+
+        load_count = min(stored_size, self.capacity)
+        take_idx = ordered_idx[-load_count:]
+
+        self.sensor[:load_count] = stored_sensor[take_idx]
+        self.kin[:load_count] = stored_kin[take_idx]
+        self.actions[:load_count] = stored_actions[take_idx]
+        self.rewards[:load_count] = stored_rewards[take_idx]
+        self.next_sensor[:load_count] = stored_next_sensor[take_idx]
+        self.next_kin[:load_count] = stored_next_kin[take_idx]
+        self.dones[:load_count] = stored_dones[take_idx]
+        self.ptr = load_count % self.capacity
+        self.size = load_count
