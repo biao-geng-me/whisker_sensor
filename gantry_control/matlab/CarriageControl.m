@@ -101,6 +101,9 @@ classdef CarriageControl < handle
         y_min_mm = -Inf
         y_max_mm = Inf
         boundary_margin_mm = 20    % margin (mm) near boundary to start blocking motion
+
+        peer = []                  % reference to peer CarriageControl (set by Jakiro for two-carriage modes)
+        carriage_gap_min_mm = 250  % minimum allowed gap to peer carriage (mm)
     end
 
     properties
@@ -446,7 +449,8 @@ classdef CarriageControl < handle
 
                 % enforce movement boundaries (zero velocity component if at/near boundary)
                 [obj.vx_current, obj.vy_current] = obj.limit_velocity_by_bounds(obj.vx_current, obj.vy_current);
-                
+                [obj.vx_current, obj.vy_current] = obj.limit_velocity_by_carriage(obj.vx_current, obj.vy_current);
+
                 % compose commands
                 if xdir ~= 0
                     cmd_x = sprintf('VEL%d',obj.vx_current);
@@ -636,7 +640,8 @@ classdef CarriageControl < handle
 
                 % enforce movement boundaries (zero velocity component if at/near boundary)
                 [obj.vx_current, obj.vy_current] = obj.limit_velocity_by_bounds(obj.vx_current, obj.vy_current);
-                
+                [obj.vx_current, obj.vy_current] = obj.limit_velocity_by_carriage(obj.vx_current, obj.vy_current);
+
                 % compose commands
                 if xdir ~= 0
                     cmd_x = sprintf('VEL%d',obj.vx_current);
@@ -841,6 +846,7 @@ classdef CarriageControl < handle
 
             % enforce movement boundaries for path tracking
             [obj.vx_current, obj.vy_current] = obj.limit_velocity_by_bounds(obj.vx_current, obj.vy_current);
+            [obj.vx_current, obj.vy_current] = obj.limit_velocity_by_carriage(obj.vx_current, obj.vy_current);
 
             % compose velocity commands (simple direct set)
             cmd_x = sprintf('VEL%d',round(obj.vx_current));
@@ -1185,6 +1191,42 @@ classdef CarriageControl < handle
 
             % If velocities were zeroed, also update cruise/current values to keep UI consistent
             % (callers assign returned values back into obj.vx_current / obj.vy_current)
+        end
+
+        function [vx_out, vy_out] = limit_velocity_by_carriage(obj, vx_in, vy_in)
+            % limit_velocity_by_carriage Smoothly scales X closing velocity toward peer
+            % velocity as the brake distance consumes the available gap.
+            % Uses alpha = gap_available/brake_dist to blend continuously between
+            % commanded and peer velocity, avoiding the decel/accel oscillation that
+            % a hard binary clip produces.
+            % Y axes are independent rails and are never modified.
+            vx_out = vx_in;
+            vy_out = vy_in;
+
+            if isempty(obj.peer) || isempty(obj.peer.real_loc) || isempty(obj.peer.real_vel)
+                return
+            end
+
+            vx_mm    = vx_in * obj.step2mm;
+            acc_mm   = obj.motor_settings.ACC * obj.step2mm;
+            dx       = obj.peer.real_loc(1) - obj.real_loc(1); % positive = peer is ahead (+x)
+            other_vx = obj.peer.real_vel(1);                   % mm/s
+
+            % Closing velocity (positive = gap decreasing)
+            v_close = sign(dx) * (vx_mm - other_vx);
+
+            if v_close > 0
+                gap_available = abs(dx) - obj.carriage_gap_min_mm;
+                if gap_available <= 0
+                    alpha = 0;
+                else
+                    brake_dist = v_close^2 / (2 * acc_mm);
+                    alpha = min(1, gap_available / brake_dist);
+                end
+                % Blend: alpha=1 -> no limiting; alpha=0 -> match peer exactly
+                new_vx_mm = other_vx + alpha * (vx_mm - other_vx);
+                vx_out = round(new_vx_mm / obj.step2mm);
+            end
         end
 
         function sendStopCommand(obj)

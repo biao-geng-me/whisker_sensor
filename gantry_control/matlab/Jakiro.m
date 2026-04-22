@@ -94,6 +94,9 @@ classdef Jakiro < handle
             app.CC2.CarView.mark.DisplayName = 'Back Carriage';
             app.CC2.CarView.mark.Marker = 's';
 
+            % Inter-carriage velocity limiting
+            app.CC1.Car.peer = app.CC2.Car;
+            app.CC2.Car.peer = app.CC1.Car;
 
             % Data acquisition
             wa_panel = uipanel(uigl);
