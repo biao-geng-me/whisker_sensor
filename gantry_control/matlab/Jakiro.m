@@ -647,7 +647,7 @@ classdef Jakiro < handle
         function onPathPath(app, ~, ~)
             % coordinate the two carriages using parameters from ExpPanel (formerly StartExperiment)
             try
-                [v1,v2,delay_s,run_tag,~] = app.ExpPanel.getParameters();
+                [v1,v2,delay_s,run_tag,episode_time_s] = app.ExpPanel.getParameters();
             catch
                 warning('Failed to read experiment parameters.');
                 return
@@ -740,9 +740,15 @@ classdef Jakiro < handle
                     break;
                 end
 
+                % stop condition: episode time exceeded
+                elapsed = toc(t0);
+                if elapsed > episode_time_s
+                    fprintf('Episode time %.1f s exceeded, stopping.\n', elapsed);
+                    break;
+                end
+
                 % schedule next tick using tic/toc to reduce drift
                 next_time = n * period;
-                elapsed = toc(t0);
 
                 fprintf('PathPath Tick %d: elapsed total=%.3f s, frame=%.1f ms, avg FPS=%.1f\n',...
                  n, elapsed, toc(t1)*1000, n/elapsed);
