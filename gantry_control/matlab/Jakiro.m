@@ -50,7 +50,7 @@ classdef Jakiro < handle
             app.UIFigure.CloseRequestFcn = @(src,evt) app.onFigureClose(src,evt);
             app.GridLayout = uigridlayout(app.UIFigure,[3 3]);
             uigl = app.GridLayout;
-            uigl.RowHeight = {320,240,420};
+            uigl.RowHeight = {260,300,420};
 
             ax = create_ax(parent=uigl);
             ax.Layout.Column = [1 3];
