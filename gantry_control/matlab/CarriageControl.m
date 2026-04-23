@@ -1122,6 +1122,13 @@ classdef CarriageControl < handle
                 obj.sendStopCommand();
                 fprintf('User interrupt: Sent immediate stop command to controller.\n');
                 interrupted = true;
+                try % drain queued key-repeat events so next move isn't immediately cancelled
+                    for i = 1:20
+                        ks = read(obj.kb);
+                        if ~ks.keys('q'), break; end
+                    end
+                catch
+                end
             end
         end
 
