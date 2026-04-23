@@ -1030,7 +1030,8 @@ classdef wavi < handle
             tag = obj.sanitize_tag(tag);
             keepMask = obj.darr >= startTime & obj.darr <= endTime;
             if ~any(keepMask)
-                error('wavi:write_buffer_to_file', 'No buffered samples found in the requested time range.');
+                warning('wavi:write_buffer_to_file', 'No buffered samples found in the requested time range.');
+                return
             end
 
             fullpath = obj.build_datalog_filepath(startTime, tag);
