@@ -8,10 +8,13 @@ classdef NetworkClient < handle
         inStream    % java.io.DataInputStream
         
         % Protocol Headers (Must match Python)
-        CMD_START    = int8(1);
-        CMD_STEP     = int8(2);
-        CMD_END_SYNC = int8(3);
-        CMD_SHUTDOWN = int8(4);
+        CMD_START     = int8(1);
+        CMD_STEP      = int8(2);
+        CMD_END_SYNC  = int8(3);
+        CMD_SHUTDOWN  = int8(4);
+        CMD_VIZ_START = int8(5);
+        CMD_VIZ_FRAME = int8(6);
+        CMD_VIZ_END   = int8(7);
         
         stateDim
         actionDim
@@ -194,8 +197,43 @@ classdef NetworkClient < handle
             fprintf('  Std:  %.2f ms\n', std(latencies));
         end
         
+        function ok = sendVizStart(obj, state)
+            % Sends CMD_VIZ_START (0x05) with state data. Fire-and-forget, no ACK.
+            ok = false;
+            try
+                obj.outStream.writeByte(obj.CMD_VIZ_START);
+                obj.sendDoubles(state);
+                obj.outStream.flush();
+                ok = true;
+            catch
+            end
+        end
+
+        function ok = sendVizFrame(obj, state)
+            % Sends CMD_VIZ_FRAME (0x06) with state data. Fire-and-forget, no ACK.
+            ok = false;
+            try
+                obj.outStream.writeByte(obj.CMD_VIZ_FRAME);
+                obj.sendDoubles(state);
+                obj.outStream.flush();
+                ok = true;
+            catch
+            end
+        end
+
+        function ok = sendVizEnd(obj)
+            % Sends CMD_VIZ_END (0x07). Fire-and-forget, no ACK.
+            ok = false;
+            try
+                obj.outStream.writeByte(obj.CMD_VIZ_END);
+                obj.outStream.flush();
+                ok = true;
+            catch
+            end
+        end
+
     end
-    
+
     methods (Access = private)
         % --- Helper Methods for Java I/O ---
         

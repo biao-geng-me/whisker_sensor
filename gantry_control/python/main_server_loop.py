@@ -112,6 +112,9 @@ CMD_START    = 0x01
 CMD_STEP     = 0x02
 CMD_END_SYNC = 0x03
 CMD_SHUTDOWN = 0x04
+CMD_VIZ_START = 0x05
+CMD_VIZ_FRAME = 0x06
+CMD_VIZ_END   = 0x07
 
 def setup_logging():
     """Configure logging to file and console."""
@@ -145,6 +148,41 @@ def setup_logging():
     logger.info(f"Logging initialized. Log file: {log_file}")
     return logger
 
+def run_viz_mode(net, config, logger):
+    """Viz-only server loop: receives episode-framed state streams, no action output."""
+    n_rl_interval = config.get("n_rl_interval", 4)
+    n_ch_total = config.get("n_ch_total", 23)
+    state_dim = config.get("state_dim", n_rl_interval * n_ch_total)
+    episode_num = 0
+    logger.info("[VIZ] Visualization mode started. Waiting for episode data...")
+    while True:
+        net.set_timeout(10 * 60)
+        header = net.receive_header()
+        if header is None:
+            logger.error("[VIZ] MATLAB disconnected unexpectedly.")
+            break
+        if header == CMD_VIZ_START:
+            episode_num += 1
+            state = net.receive_doubles(state_dim)
+            logger.info(
+                f"[VIZ] Episode {episode_num} started."
+                + (f" x={state[1]:.1f} y={state[2]:.1f}" if state and len(state) >= 3 else "")
+            )
+            # TODO: initialize episode visualization
+        elif header == CMD_VIZ_FRAME:
+            net.set_timeout(1)
+            state = net.receive_doubles(state_dim)
+            # TODO: update live visualization with state
+        elif header == CMD_VIZ_END:
+            logger.info(f"[VIZ] Episode {episode_num} ended.")
+            # TODO: finalize episode visualization
+        elif header == CMD_SHUTDOWN:
+            logger.info("[VIZ] Shutdown command received.")
+            break
+        else:
+            logger.warning(f"[VIZ] Unknown header: 0x{header:02x}")
+
+
 def main():
     logger = setup_logging()
     logger.info("=== Robotics DRL Server Starting ===")
@@ -165,7 +203,16 @@ def main():
         
     logger.info(f"[PHASE 1] Configuration received: Mode = {config.get('mode')}")
     logger.debug(f"[PHASE 1] Full config: {config}")
-    
+
+    if config.get('mode') == 'viz':
+        net.send_string("READY")
+        logger.info("[PHASE 1] Sent READY to MATLAB (viz mode)")
+        run_viz_mode(net, config, logger)
+        logger.info("=== Shutting Down ===")
+        net.close()
+        logger.info("Server shut down complete.")
+        return
+
     agent = AgentWrapper(config)
 
     # Live training plot (train mode only, requires interactive display)

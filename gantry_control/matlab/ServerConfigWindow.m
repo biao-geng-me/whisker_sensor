@@ -58,7 +58,7 @@ classdef ServerConfigWindow < handle
 
             lblMode = uilabel(obj.Grid, 'Text', 'Mode');
             lblMode.Layout.Row = 1;
-            obj.ModeDropdown = uidropdown(obj.Grid, 'Items', {'infer', 'train'}, ...
+            obj.ModeDropdown = uidropdown(obj.Grid, 'Items', {'infer', 'train', 'viz'}, ...
                 'Value', obj.readDefault(defaults, 'mode', 'train'));
             obj.ModeDropdown.Layout.Row = 1;
             obj.ModeDropdown.Layout.Column = [2 3];

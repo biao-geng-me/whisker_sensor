@@ -717,6 +717,18 @@ classdef Jakiro < handle
             n = 0;
             app.run_start_time = datetime('now');
             t0 = tic;
+
+            % Viz episode start
+            if ~isempty(app.net)
+                try
+                    if ~app.net.sendVizStart(app.buildVizFrame())
+                        app.net = [];
+                    end
+                catch
+                    app.net = [];
+                end
+            end
+
             % Main loop: build src/event and call pathTrackingTick(app,src,event)
             while true
                 t1 = tic;
@@ -756,6 +768,14 @@ classdef Jakiro < handle
                 % busy-wait the final few ms to reduce jitter
                 while toc(t0) < next_time
                     pause(0.0005); % yield briefly to keep UI responsive, NOTE pause <=1ms triggers higher resolution OS timer.
+                end
+            end
+
+            % Viz episode end
+            if ~isempty(app.net)
+                try
+                    app.net.sendVizEnd();
+                catch
                 end
             end
 
@@ -825,6 +845,17 @@ classdef Jakiro < handle
             app.CC2.hArrow.Visible = 'on';
             app.CC2.Car.cmd_npoll = 0; % reset poll counter
 
+            % Viz episode start
+            if ~isempty(app.net)
+                try
+                    if ~app.net.sendVizStart(app.buildVizFrame())
+                        app.net = [];
+                    end
+                catch
+                    app.net = [];
+                end
+            end
+
             is_done_cc1 = false; % track when CC1 finishes path tracking
             while true
                 t1 = tic;
@@ -863,11 +894,22 @@ classdef Jakiro < handle
                 end
 
                 % data acquisition
+                new_samples_ph = [];
                 try
                     if ~isempty(app.WA.s)
-                        app.WA.read_update_tick();
+                        if ~isempty(app.net)
+                            new_samples_ph = app.WA.rl_read_update_tick();
+                        else
+                            app.WA.read_update_tick();
+                        end
                     end
                 catch
+                end
+                if ~isempty(app.net) && ~isempty(new_samples_ph)
+                    viz_state = app.buildVizFrame(new_samples_ph);
+                    if ~app.net.sendVizFrame(viz_state)
+                        app.net = [];
+                    end
                 end
 
                 % update visuals periodically
@@ -887,6 +929,14 @@ classdef Jakiro < handle
                 % busy-wait with sleep to reduce jitter
                 while toc(t0) < next_time
                     pause(0.0005);
+                end
+            end
+
+            % Viz episode end
+            if ~isempty(app.net)
+                try
+                    app.net.sendVizEnd();
+                catch
                 end
             end
 
@@ -1800,12 +1850,22 @@ classdef Jakiro < handle
                 app.cc2_done = app.CC2.Car.pathTrackingTick(src,event);
             end
 
-            % app.WA.read_serial_data(app.WA.ns_read, app.WA.ns_fill);
+            new_samples_pp = [];
             try
                 if ~isempty(app.WA.s)
-                    app.WA.read_update_tick();
+                    if ~isempty(app.net)
+                        new_samples_pp = app.WA.rl_read_update_tick();
+                    else
+                        app.WA.read_update_tick();
+                    end
                 end
             catch
+            end
+            if ~isempty(app.net) && ~isempty(new_samples_pp)
+                viz_state = app.buildVizFrame(new_samples_pp);
+                if ~app.net.sendVizFrame(viz_state)
+                    app.net = [];
+                end
             end
 
             if mod(src.TasksExecuted,app.pathpath_redraw_interval)==0
@@ -1824,6 +1884,43 @@ classdef Jakiro < handle
                 catch
                 end
             end
+        end
+
+        function frame = buildVizFrame(app, new_samples)
+            % Build an n_rl_interval-frame state in the same layout as PathAgentPre/Train.
+            % new_samples is optional (omit or pass [] for episode-start frames).
+            n_q      = app.n_rl_interval;
+            dt_q_ms  = 1000 / app.wa_Fs;
+            t_query  = (-(n_q-1):0) * dt_q_ms; % ms, oldest→newest, newest=0
+
+            cc2_state_buf      = zeros(5, n_q);
+            cc2_state_buf(1,:) = t_query;
+
+            sb      = app.CC2.Car.state_buffer;
+            n_valid = min(app.CC2.Car.state_buffer_count, size(sb, 1));
+            if n_valid > 0
+                sb_valid = sb(end-n_valid+1:end, :);
+                t_rel    = sb_valid(:,1) - sb_valid(end,1);
+                [t_rel_u, iu] = unique(t_rel, 'stable');
+                state_u = sb_valid(iu, 2:5);
+                if isscalar(t_rel_u)
+                    cc2_state_buf(2:5,:) = repmat(state_u(1,:)', 1, n_q);
+                else
+                    state_q = interp1(t_rel_u, state_u, t_query, 'linear', 0);
+                    cc2_state_buf(2:5,:) = state_q';
+                end
+            end
+
+            if nargin >= 2 && ~isempty(new_samples)
+                bending_moments = app.signal_to_bending_moment.convertSamples( ...
+                    new_samples, reorderToSimulation=true)'; % convertSamples returns n_q×18; transpose to 18×n_q
+            else
+                bending_moments = zeros(app.n_ch_total - 5, n_q);
+            end
+
+            % n_ch_total × n_rl_interval; flatten column-major to match currentState(:)' in agent modes.
+            state_mat = [cc2_state_buf; bending_moments];
+            frame = state_mat(:)';
         end
     end
 end

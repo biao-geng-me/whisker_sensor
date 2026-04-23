@@ -74,6 +74,10 @@ class ConnectionManager:
         packed_data = struct.pack(f'>{len(values)}d', *values)
         self.conn.sendall(packed_data)
 
+    def send_ack(self):
+        """Sends a single 0x00 byte as acknowledgment."""
+        self.conn.sendall(struct.pack('>B', 0x00))
+
     def set_timeout(self, timeout):
         """Dynamically update the receive timeout."""
         if self.conn:
