@@ -1289,7 +1289,7 @@ classdef CarriageControl < handle
                     end
                 end
                 n_buffer_check = n_buffer_check + 1;
-                pause(0.001); %
+                % pause(0.001); % even this is too much given multiple checks are needed due to OS serial buffer timing.
                 if toc(tStart)>1
                     fprintf('NumBytesAvailable from controller: %d\n',obj.s.NumBytesAvailable);
                     error('Controller communication timed out while getting motor positions.');

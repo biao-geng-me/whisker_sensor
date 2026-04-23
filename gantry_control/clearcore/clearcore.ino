@@ -41,7 +41,7 @@
 // Specifies which motor to move.
 // Options are: ConnectorM0, ConnectorM1, ConnectorM2, or ConnectorM3.
 // Note: generic stepper motors (non-ClearPath) can only be connected to M0
-#define HAS_AOA 1
+#define HAS_AOA 0
 #define IS_AOA_GENERIC 0
 
 #if IS_AOA_GENERIC
@@ -57,9 +57,10 @@
 // Per-axis sign flips. Set to 1 or -1 depending on motor installation.
 // If a motor is installed reversed relative to the controller's coordinate
 // convention, set the corresponding SIGN to -1 to invert direction in firmware.
-#define LONG_AXIS_SIGN 1 // -1 for front carriage,  1 for back carriage
+#define LONG_AXIS_SIGN -1 // -1 for front carriage,  1 for back carriage
 #define SHORT_AXIS_SIGN 1
 #define AOA_SIGN -1
+#define LAST_CMD_SUSTAIN_MS 250 // compensate for host command timing jitter
  
 // Select the baud rate to match the target serial device
 #define baudRate 2000000
@@ -232,7 +233,7 @@ void loop() {
         update_cmd_from_serial();
         input_check_count = 0;
     }
-    else if (input_check_count * STEADY_CYCLE_TIME < 50) {
+    else if (input_check_count * STEADY_CYCLE_TIME < LAST_CMD_SUSTAIN_MS) {
         command_fields[0] = "PRE";
         command_fields[1] = "PRE";
         command_fields[2] = "PRE";
