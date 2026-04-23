@@ -3,9 +3,9 @@
 % set portname and baudrate to match your setup, then run this script while the microcontroller is sending data.
 
 clc; clear
-clear all; % clear persistent variables in printLine
+clear all; clear printLine; % clear persistent variables in printLine
 
-portname = "COM18";
+portname = "COM5";
 baudrate = 2000000;
 
 % clear if already connected
@@ -15,23 +15,25 @@ if ~isempty(s)
 end
 
 s = serialport(portname, baudrate);
-flush(s);
 
 % Shared state via persistent or appdata - use guidata-style via base workspace
 setappdata(0, 'serialLog', []);
 setappdata(0, 'serialDone', false);
 
 % config call back
-% configureCallback(s, "terminator", @(src,evt) printLine(src,evt)); % for clearcore controller use terminator
-nbytes_per_sample = 18 * 4 + 4 + 1; % 18 float32 + 1 float32 marker + 1 char ('\n') % use byte count for sensor arduino
-align_data_read(s, nbytes_per_sample);
-configureCallback(s, "byte",nbytes_per_sample, @(src,evt) printLine(src,evt)); 
+configureCallback(s, "terminator", @(src,evt) printLine(src,evt)); % for clearcore controller use terminator
+% nbytes_per_sample = 18 * 4 + 4 + 1; % 18 float32 + 1 float32 marker + 1 char ('\n') % use byte count for sensor arduino
+% align_data_read(s, nbytes_per_sample);
+% configureCallback(s, "byte",nbytes_per_sample, @(src,evt) printLine(src,evt)); 
 
 % Wait until collection is done
 disp("Collecting data...");
+flush(s);
+count =[];
 while ~getappdata(0, 'serialDone')
     pause(0.1);
 end
+delete(s);
 
 % Retrieve log and plot
 log = getappdata(0, 'serialLog');
@@ -58,7 +60,8 @@ end
 
 % serial call back
 function printLine(src, ~)
-    persistent count startTime
+    global count
+    persistent startTime
     N = 500;         % number of lines to collect
     T = 10;          % fallback timeout in seconds
 
