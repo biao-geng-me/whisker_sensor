@@ -388,6 +388,7 @@ classdef CarriageApp < handle
             end
 
             period = app.Car.path_CMD_INTERVAL/1000; % seconds
+            fprintf('Starting path tracking with command interval %d ms (%.2f Hz)\n', app.Car.path_CMD_INTERVAL, 1/period);
             t0 = tic;
             n = 0;
             app.hArrow.Visible = 'on';
@@ -413,16 +414,16 @@ classdef CarriageApp < handle
                 if is_done
                     break;
                 end
-                if mod(n,round(50/app.Car.path_CMD_INTERVAL))==0
-                    app.update_view(); % keep UI responsive every 50 ms
+                if mod(n,round(200/app.Car.path_CMD_INTERVAL))==0
+                    app.update_view(); % keep UI responsive every 200 ms
                 end
 
                 % schedule next tick using tic/toc to reduce drift
                 next_time = n * period;
                 elapsed = toc(t0);
-
-                fprintf('Tick %d: elapsed total=%.3f s, frame=%.1f ms, avg FPS=%d\n', n, elapsed, toc(t1)*1000, round(n/elapsed));
-                
+                if mod(n,round(100/app.Car.path_CMD_INTERVAL))==0
+                    fprintf('Tick %d: elapsed total=%.3f s, frame=%.1f ms, avg FPS=%d\n', n, elapsed, toc(t1)*1000, round(n/elapsed));
+                end
                 % busy-wait the final few ms to reduce jitter
                 while toc(t0) < next_time
                     pause(0.0005); % yield briefly to keep UI responsive, NOTE pause <=1ms triggers higher resolution OS timer.

@@ -1258,29 +1258,37 @@ classdef CarriageControl < handle
             tStart = tic;
             position_received = false;
             nlines_received = 0;
+            n_buffer_check = 0;
             obj.prev_pos = obj.current_pos;
             % flush(obj.s); % clear any stale data, timing of this inconistent, do it outside
             while ~position_received
-                while obj.s.NumBytesAvailable>0
-
+                nlines_in_batch = 0;
+                while obj.s.NumBytesAvailable>30
+                    % tic
                     txt = readline(obj.s);
+                    % fprintf('Time to read line: %.3f s\n', toc);
                     fprintf(obj.ser_log_file,'%s\n',txt);
+                    % tic
                     if contains(txt,'current position:')
                         nlines_received = nlines_received + 1;
+                        nlines_in_batch = nlines_in_batch + 1;
                         obj.current_pos = sscanf(txt,'\tcurrent position: [%d,%d,%d,%d],%d.')'; % sscanf returns column vector
                         position_received = true;
                     end
+                    % fprintf('Time to process line: %.3f s\n', toc);
                     if nlines_received>200
                         error(['Too many data in serial buffer.' newline ...
                                'Ensure to flush the buffer first and keep up command rate with the microcontroller.']);
                     end
                 end
-                % pause(0.005); % busy wait 
+                n_buffer_check = n_buffer_check + 1;
+                pause(0.001); %
                 if toc(tStart)>1
                     fprintf('NumBytesAvailable from controller: %d\n',obj.s.NumBytesAvailable);
                     error('Controller communication timed out while getting motor positions.');
                 end
             end
+            % fprintf('Time to update status from controller: %.3f s (%d pos lines, %d in last batch, %d buffer checks)\n', toc(tStart), nlines_received, nlines_in_batch, n_buffer_check);
             
             obj.controller_time1 = obj.controller_time2;
             obj.controller_time2 = obj.current_pos(5);
