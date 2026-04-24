@@ -2,6 +2,7 @@
 *.asv
 .vscode
 *.pyc
+.claude/
 serialport_received.dat
 gantry_control/matlab/paths/
 # gantry_control/python/agents/

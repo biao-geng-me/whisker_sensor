@@ -1891,15 +1891,17 @@ classdef Jakiro < handle
             % new_samples is optional (omit or pass [] for episode-start frames).
             n_q      = app.n_rl_interval;
             dt_q_ms  = 1000 / app.wa_Fs;
-            t_query  = (-(n_q-1):0) * dt_q_ms; % ms, oldest→newest, newest=0
+            t_query  = (-(n_q-1):0) * dt_q_ms; % ms offsets, oldest→newest
 
             cc2_state_buf      = zeros(5, n_q);
-            cc2_state_buf(1,:) = t_query;
+            cc2_state_buf(1,:) = t_query; % fallback: relative only
 
             sb      = app.CC2.Car.state_buffer;
             n_valid = min(app.CC2.Car.state_buffer_count, size(sb, 1));
             if n_valid > 0
                 sb_valid = sb(end-n_valid+1:end, :);
+                % Use absolute controller time so Python can compute episode-relative elapsed time
+                cc2_state_buf(1,:) = sb_valid(end,1) + t_query;
                 t_rel    = sb_valid(:,1) - sb_valid(end,1);
                 [t_rel_u, iu] = unique(t_rel, 'stable');
                 state_u = sb_valid(iu, 2:5);

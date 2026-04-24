@@ -150,10 +150,14 @@ def setup_logging():
 
 def run_viz_mode(net, config, logger):
     """Viz-only server loop: receives episode-framed state streams, no action output."""
+    from live_viz import VizProcess
+
     n_rl_interval = config.get("n_rl_interval", 4)
     n_ch_total = config.get("n_ch_total", 23)
     state_dim = config.get("state_dim", n_rl_interval * n_ch_total)
     episode_num = 0
+
+    viz = VizProcess(config)
     logger.info("[VIZ] Visualization mode started. Waiting for episode data...")
     while True:
         net.set_timeout(10 * 60)
@@ -164,19 +168,21 @@ def run_viz_mode(net, config, logger):
         if header == CMD_VIZ_START:
             episode_num += 1
             state = net.receive_doubles(state_dim)
+            path_xy = config.get("path_data", [[]])[0] if config.get("path_data") else []
+            viz.start_episode(list(state), path_xy)
             logger.info(
                 f"[VIZ] Episode {episode_num} started."
                 + (f" x={state[1]:.1f} y={state[2]:.1f}" if state and len(state) >= 3 else "")
             )
-            # TODO: initialize episode visualization
         elif header == CMD_VIZ_FRAME:
             net.set_timeout(1)
             state = net.receive_doubles(state_dim)
-            # TODO: update live visualization with state
+            viz.update_frame(list(state))
         elif header == CMD_VIZ_END:
+            viz.end_episode()
             logger.info(f"[VIZ] Episode {episode_num} ended.")
-            # TODO: finalize episode visualization
         elif header == CMD_SHUTDOWN:
+            viz.shutdown()
             logger.info("[VIZ] Shutdown command received.")
             break
         else:
