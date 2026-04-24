@@ -234,6 +234,16 @@ def main():
 
     net.send_string("READY")
     logger.info("[PHASE 1] Sent READY to MATLAB")
+
+    viz = None
+    logger.info(f"[VIZ] visualize flag: {config.get('visualize')}")
+    if config.get('visualize'):
+        try:
+            from live_viz import VizProcess
+            viz = VizProcess(config)
+            logger.info("[VIZ] Live visualization window started.")
+        except Exception as _viz_ex:
+            logger.warning(f"[VIZ] Could not start visualization: {_viz_ex}")
     
     # Variables derived from config
     state_dim = config.get("state_dim")
@@ -387,7 +397,7 @@ def main():
                 net.send_doubles(action)
                 logger.debug(f"[Episode {episode_num}] net.send_doubles() completed successfully")
                 logger.info(f"[Episode {episode_num}] First action sent: {action}")
-                
+
             except Exception as e:
                 logger.error(f"[Episode {episode_num}] Error during agent.reset(): {e}", exc_info=True)
                 logger.error(f"[Episode {episode_num}] Attempting to send zero action as fallback...")
@@ -396,6 +406,11 @@ def main():
                     logger.error(f"[Episode {episode_num}] Fallback action sent")
                 except Exception as e2:
                     logger.error(f"[Episode {episode_num}] Fallback action send FAILED: {e2}", exc_info=True)
+
+            if viz is not None:
+                path_xy = episode_meta.get('path_xy') or []
+                viz.start_episode(list(initial_state), path_xy)
+                logger.info(f"[VIZ] Episode {episode_num} started in viz window.")
             
         elif header == CMD_STEP:
             net.set_timeout(1)
@@ -464,6 +479,9 @@ def main():
                 for obs_row in state_mat:
                     episode_trajectory.append(dict(zip(obs_var_names, obs_row.tolist())))
 
+            if viz is not None and not episode_done:
+                viz.update_frame(list(state))
+
             # Time: send action back to MATLAB
             send_start = time.perf_counter()
             if (not episode_done) and action is not None:
@@ -503,7 +521,10 @@ def main():
                     writer.writeheader()
                     writer.writerows(episode_trajectory)
                 logger.info(f"[Episode {episode_num}] Trajectory saved: {csv_path} ({len(episode_trajectory)} rows)")
-            
+            # make episode ready for review
+            if viz is not None:
+                viz.end_episode()
+
             # Print detailed latency statistics for this episode
             if step_latencies:
                 import statistics
@@ -596,6 +617,8 @@ def main():
         elif header == CMD_SHUTDOWN:
             # 0x04: Teardown
             logger.info("Shutdown command received from MATLAB.")
+            if viz is not None:
+                viz.shutdown()
             # Save final checkpoint before exiting
             if agent.use_sac_train:
                 ckpt = agent.save_checkpoint(episode_num, agent._sac_total_env_steps)

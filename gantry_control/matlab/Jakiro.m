@@ -164,7 +164,7 @@ classdef Jakiro < handle
             use_random_paths = isfield(userConfig, 'use_random_paths') && logical(userConfig.use_random_paths);
 
             config.mode = userConfig.mode;
-            config.hpc_port = userConfig.hpc_port;
+            config.hpc_port = app.agent_server_hpc_port;
             config.n_rl_interval = app.n_rl_interval;
             config.n_ch_total = app.n_ch_total;
             config.state_dim = STATE_DIM;
@@ -176,6 +176,7 @@ classdef Jakiro < handle
             config.record_trajectory = logical(userConfig.record_trajectory);
             config.use_random_paths = use_random_paths;
             config.policy_package_dir = userConfig.policy_package_dir;
+            config.visualize = isfield(userConfig, 'visualize') && logical(userConfig.visualize);
             % Parameters used by the Python agent for observation normalisation and action scaling
             try
                 [v1,v2,~,~,episode_time_s,~,rotation_step_deg] = app.ExpPanel.getParameters();
@@ -436,7 +437,7 @@ classdef Jakiro < handle
             end
 
             app.agent_server_mode = userConfig.mode;
-            app.agent_server_hpc_port = userConfig.hpc_port;
+            app.agent_server_hpc_port = app.agent_server_hpc_port; % hpc_port no longer in UI; kept as property default (5555)
             app.agent_server_max_episodes = userConfig.max_episodes;
             app.agent_server_record_trajectory = logical(userConfig.record_trajectory);
             app.agent_server_use_random_paths = isfield(userConfig, 'use_random_paths') && logical(userConfig.use_random_paths);

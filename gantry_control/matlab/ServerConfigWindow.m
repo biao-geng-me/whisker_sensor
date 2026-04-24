@@ -7,7 +7,7 @@ classdef ServerConfigWindow < handle
 
         ModeDropdown
         EpisodesField
-        HpcPortField
+        VisualizeCheck
         RecordTrajectoryCheck
         UseRandomPathsCheck
         PolicyDropdown
@@ -71,13 +71,11 @@ classdef ServerConfigWindow < handle
             obj.EpisodesField.Layout.Row = 2;
             obj.EpisodesField.Layout.Column = [2 3];
 
-            lblHpc = uilabel(obj.Grid, 'Text', 'HPC port');
-            lblHpc.Layout.Row = 3;
-            obj.HpcPortField = uieditfield(obj.Grid, 'numeric', ...
-                'Value', obj.readDefault(defaults, 'hpc_port', 5555), ...
-                'RoundFractionalValues', 'on', 'LowerLimit', 1, 'UpperLimit', 65535);
-            obj.HpcPortField.Layout.Row = 3;
-            obj.HpcPortField.Layout.Column = [2 3];
+            obj.VisualizeCheck = uicheckbox(obj.Grid, ...
+                'Text', 'Live visualization', ...
+                'Value', obj.readDefault(defaults, 'visualize', false));
+            obj.VisualizeCheck.Layout.Row = 3;
+            obj.VisualizeCheck.Layout.Column = [1 3];
 
             lblPolicy = uilabel(obj.Grid, 'Text', 'Policy package');
             lblPolicy.Layout.Row = 4;
@@ -289,7 +287,7 @@ classdef ServerConfigWindow < handle
             config = struct();
             config.mode = char(string(obj.ModeDropdown.Value));
             config.max_episodes = max(1, round(double(obj.EpisodesField.Value)));
-            config.hpc_port = max(1, min(65535, round(double(obj.HpcPortField.Value))));
+            config.visualize = logical(obj.VisualizeCheck.Value);
             config.record_trajectory = logical(obj.RecordTrajectoryCheck.Value);
             config.use_random_paths = logical(obj.UseRandomPathsCheck.Value);
             config.policy_package_dir = char(string(obj.PolicyDropdown.Value));
