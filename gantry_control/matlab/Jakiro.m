@@ -1314,12 +1314,15 @@ classdef Jakiro < handle
                 % Settle pause
                 pause(settle_delay_s);
 
-                % DAQ: align after carriage movement
+                % DAQ: align and reset offset after carriage movement
                 try
                     app.WA.tag = sprintf('%s_PathAgentTrain-%s_front=%.2f_rlvx=%.2f_rotstep=%.1f_delay=%.1f_ep%03d', ...
                         run_tag, pathtag1, v1, v2, rotation_step_deg, delay_s, ep);
                     app.WA.align_data_read();
-                catch
+                    app.WA.average_signal_as_offset(round(app.WA.Fs));
+                    app.WA.reset_data_buffers();
+                catch me
+                    error('DataAcquisitionError:SetupFailed', 'Error during data acquisition reset: %s', me.message);
                 end
 
                 app.currentState = app.makeInitialRlState(start_x2, start_y2);
