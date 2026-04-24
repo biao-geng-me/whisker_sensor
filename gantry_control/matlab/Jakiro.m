@@ -653,17 +653,6 @@ classdef Jakiro < handle
                 return
             end
 
-            % prepare daq first
-            try
-                if ~isempty(app.WA.s)
-                    % app.WA.is_recording = true;
-                    % app.WA.init_datalog_file();
-                    app.WA.align_data_read();
-                    app.WA.average_signal_as_offset(round(app.WA.Fs));
-                    app.WA.reset_data_buffers();
-                end
-            catch
-            end
             
             % set velocities
             app.CC1.Car.vel_max = round(v1*1000/app.CC1.Car.step2mm);
@@ -710,10 +699,22 @@ classdef Jakiro < handle
             app.CC2.hArrow.Visible = 'on';
             
             pause(settle_delay_s); % allow time for water to settle after carriage movement before starting
-            if ~isempty(app.WA.s)
-                app.WA.tag = sprintf('%s_%s-v1=%.2f_%s-v2=%.2f_delay=%.1f',run_tag,pathtag1,v1,pathtag2,v2,delay_s);
-                app.WA.align_data_read(); % clear samples during carriage movement before starting
+            % prepare daq
+            try
+                if ~isempty(app.WA.s)
+                    % app.WA.is_recording = true;
+                    % app.WA.init_datalog_file();
+                    app.WA.reset_data_buffers();
+                    app.WA.align_data_read();
+                    app.WA.average_signal_as_offset(round(app.WA.Fs));
+                    app.WA.tag = sprintf('%s_%s-v1=%.2f_%s-v2=%.2f_delay=%.1f',run_tag,pathtag1,v1,pathtag2,v2,delay_s);
+                end
+            catch
             end
+            % if ~isempty(app.WA.s)
+            %     app.WA.tag = sprintf('%s_%s-v1=%.2f_%s-v2=%.2f_delay=%.1f',run_tag,pathtag1,v1,pathtag2,v2,delay_s);
+            %     app.WA.align_data_read(); % clear samples during carriage movement before starting
+            % end
 
             n = 0;
             app.run_start_time = datetime('now');
