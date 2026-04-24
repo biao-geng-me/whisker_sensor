@@ -647,7 +647,7 @@ classdef Jakiro < handle
         function onPathPath(app, ~, ~)
             % coordinate the two carriages using parameters from ExpPanel (formerly StartExperiment)
             try
-                [v1,v2,delay_s,run_tag,episode_time_s] = app.ExpPanel.getParameters();
+                [v1,v2,delay_s,run_tag,episode_time_s,settle_delay_s] = app.ExpPanel.getParameters();
             catch
                 warning('Failed to read experiment parameters.');
                 return
@@ -708,7 +708,8 @@ classdef Jakiro < handle
             period = app.pathpath_tick_period_ms/1000; % seconds
             app.CC1.hArrow.Visible = 'on';
             app.CC2.hArrow.Visible = 'on';
-                
+            
+            pause(settle_delay_s); % allow time for water to settle after carriage movement before starting
             if ~isempty(app.WA.s)
                 app.WA.tag = sprintf('%s_%s-v1=%.2f_%s-v2=%.2f_delay=%.1f',run_tag,pathtag1,v1,pathtag2,v2,delay_s);
                 app.WA.align_data_read(); % clear samples during carriage movement before starting
@@ -798,7 +799,7 @@ classdef Jakiro < handle
             % Both run in the same blocking loop to avoid timer jitter
             
             try
-                [v1,v2,delay_s,run_tag,episode_time_s] = app.ExpPanel.getParameters();
+                [v1,v2,delay_s,run_tag,episode_time_s,settle_delay_s] = app.ExpPanel.getParameters();
             catch
                 warning('Failed to read experiment parameters.');
                 return
@@ -822,6 +823,7 @@ classdef Jakiro < handle
             app.CC2.Car.poll_gamepad = 1;
             app.CC2.Car.poll_keyboard = 1;
 
+            pause(settle_delay_s); % allow time for water to settle
             % prepare daq
             try
                 if ~isempty(app.WA.s)
