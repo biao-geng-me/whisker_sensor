@@ -269,6 +269,10 @@ class VizWindow:
         self._ingest_state(state)
         self._draw_frame(len(self._frames) - 1)
 
+    def ingest_only(self, state: list[float]):
+        """Ingest state into buffers without redrawing (for batch updates)."""
+        self._ingest_state(state)
+
     def update_frame(self, state: list[float]):
         self._ingest_state(state)
         self._draw_frame(len(self._frames) - 1)
@@ -481,15 +485,15 @@ def _viz_worker(q: mp.Queue, config: dict):
     import matplotlib.pyplot as plt
 
     while True:
-        last_frame: dict | None = None
+        pending_frames: list = []
         try:
             while True:
                 msg  = q.get_nowait()
                 kind = msg.get("type")
                 if kind == "frame":
-                    last_frame = msg
+                    pending_frames.append(msg["state"])
                 elif kind == "start":
-                    last_frame = None
+                    pending_frames.clear()
                     viz.start_episode(msg["state"], msg.get("path_xy"))
                 elif kind == "end":
                     viz.end_episode()
@@ -499,8 +503,11 @@ def _viz_worker(q: mp.Queue, config: dict):
         except _queue_mod.Empty:
             pass
 
-        if last_frame is not None:
-            viz.update_frame(last_frame["state"])
+        # Ingest every queued frame so no data is lost; redraw only once.
+        if pending_frames:
+            for state in pending_frames[:-1]:
+                viz.ingest_only(state)
+            viz.update_frame(pending_frames[-1])
 
         try:
             plt.pause(_PAUSE_S)
