@@ -21,16 +21,6 @@ try:
 except Exception:
     _plt = None
 
-_analyze_ok = False
-try:
-    from agents.rl_sac_v4_pathblind_hardware.analyze_run import (
-        make_training_curves, make_loss_curves_log, make_episode_curves,
-    )
-    _analyze_ok = True
-except Exception:
-    pass
-
-
 _TERM_COLORS = {
     'y_boundary': 'tab:brown',
     'too_far': 'tab:red',
@@ -221,16 +211,8 @@ def main():
 
     agent = AgentWrapper(config)
 
-    # Live training plot (train mode only, requires interactive display)
+    # Live training plot moved to convergence_viz subprocess (ConvergenceVizProcess).
     live_plotter = None
-    if config.get('mode') == 'train' and _matplotlib_ok:
-    #if False and config.get('mode') == 'train' and _matplotlib_ok:
-        live_plotter = LivePlotter()
-        if not live_plotter._ok:
-            live_plotter = None
-            logger.warning('[LivePlotter] Could not open interactive window; live plots disabled.')
-        else:
-            logger.info('[LivePlotter] Live training plot window opened.')
 
     net.send_string("READY")
     logger.info("[PHASE 1] Sent READY to MATLAB")
@@ -275,12 +257,12 @@ def main():
     send_times = []
     episode_num = 0
 
-    # Convergence logging (train mode): in-memory rows + CSV output
+    # Convergence logging (train mode): subprocess owns CSV writing and PNG rendering
     output_dir_str = config.get('output_dir', '')
     ckpt_output_dir = Path(output_dir_str) if output_dir_str else None
     train_log_rows: list[dict] = []
     episode_log_rows: list[dict] = []
-    # Pre-load existing logs if resuming
+    # Pre-load existing logs if resuming (passed to subprocess as initial state)
     if ckpt_output_dir and ckpt_output_dir.is_dir():
         for fname, target in [('train_log.csv', train_log_rows), ('episode_log.csv', episode_log_rows)]:
             p = ckpt_output_dir / fname
@@ -289,6 +271,19 @@ def main():
                     target.extend(csv.DictReader(f))
         if train_log_rows:
             logger.info(f"[Convergence] Loaded {len(train_log_rows)} existing rows from {ckpt_output_dir}")
+
+    conv_viz = None
+    if ckpt_output_dir and agent.use_sac_train:
+        try:
+            from convergence_viz import ConvergenceVizProcess
+            conv_viz = ConvergenceVizProcess(
+                ckpt_output_dir,
+                initial_train_rows=train_log_rows,
+                initial_episode_rows=episode_log_rows,
+            )
+            logger.info("[Convergence] Visualization subprocess started.")
+        except Exception as _cv_ex:
+            logger.warning(f"[Convergence] Could not start viz subprocess: {_cv_ex}")
 
     # Per-episode reward / lateral tracking (reset in CMD_START)
     episode_rewards: list[float] = []
@@ -553,7 +548,6 @@ def main():
                     sum(episode_signed_laterals) / len(episode_signed_laterals)
                     if episode_signed_laterals else 0.0
                 )
-                # Termination reason
                 if last_reward_info.get('y_boundary_hit'):
                     term_reason = 'y_boundary'
                 elif last_reward_info.get('too_far'):
@@ -585,27 +579,10 @@ def main():
                     'signed_lateral_error_mm': f'{last_signed_lateral:.4f}',
                     'termination_reason': term_reason,
                 }
-                train_log_rows.append(train_row)
                 episode_log_rows.append(ep_row)
-
-                try:
-                    ckpt_output_dir.mkdir(parents=True, exist_ok=True)
-                    _write_log_csv(ckpt_output_dir / 'train_log.csv', train_log_rows,
-                                   list(train_row.keys()))
-                    _write_log_csv(ckpt_output_dir / 'episode_log.csv', episode_log_rows,
-                                   list(ep_row.keys()))
-                    if _analyze_ok and len(train_log_rows) >= 1:
-                        make_training_curves(train_log_rows, ckpt_output_dir)
-                        make_loss_curves_log(train_log_rows, ckpt_output_dir)
-                    if _analyze_ok and len(episode_log_rows) >= 2:
-                        make_episode_curves(episode_log_rows, ckpt_output_dir)
-                    logger.debug(f"[Episode {episode_num}] Convergence logs updated")
-                except Exception as log_ex:
-                    logger.warning(f"[Episode {episode_num}] Convergence logging failed: {log_ex}")
-
-                # Update live plot window
-                if live_plotter is not None:
-                    live_plotter.update(episode_log_rows)
+                if conv_viz is not None:
+                    conv_viz.update(train_row, ep_row)
+                    logger.debug(f"[Episode {episode_num}] Convergence data sent to viz subprocess")
 
             if needs_reset:
                 logger.info(f"[Episode {episode_num}] Agent requested reset")
@@ -619,6 +596,8 @@ def main():
             logger.info("Shutdown command received from MATLAB.")
             if viz is not None:
                 viz.shutdown()
+            if conv_viz is not None:
+                conv_viz.shutdown()
             # Save final checkpoint before exiting
             if agent.use_sac_train:
                 ckpt = agent.save_checkpoint(episode_num, agent._sac_total_env_steps)
@@ -633,14 +612,6 @@ def main():
     logger.info("=== Shutting Down ===")
     net.close()
     logger.info("Server shut down complete.")
-
-def _write_log_csv(path: Path, rows: list, fieldnames: list):
-    """Rewrite a log CSV from in-memory rows."""
-    with path.open('w', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
-
 
 def make_obs_var_names(num_whiskers: int) -> list[str]:
     return ['t', 'x', 'y', 'x_vel', 'y_vel'] + [

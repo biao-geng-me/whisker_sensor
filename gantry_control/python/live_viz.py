@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import multiprocessing as mp
 import queue as _queue_mod
+import time
 
 import numpy as np
 
@@ -44,12 +45,17 @@ def _choose_signal_limit(frames: list[np.ndarray], n_ch_total: int) -> float:
 class VizWindow:
     """Interactive matplotlib figure. Must be created inside the viz subprocess."""
 
-    def __init__(self, config: dict):
-        import matplotlib
-        matplotlib.use("TkAgg")
-        import matplotlib.pyplot as plt
-        self._plt = plt
+    def __init__(self, config: dict, _agg_mode: bool = False):
+        self._agg_mode = _agg_mode
+        if _agg_mode:
+            self._plt = None   # pyplot not used in Agg mode
+        else:
+            import matplotlib
+            matplotlib.use("TkAgg")
+            import matplotlib.pyplot as plt
+            self._plt = plt
 
+        self._config = config
         self._n_rl = config.get("n_rl_interval", 4)
         self._n_ch = config.get("n_ch_total", 23)
         self._path_xy_default = (config.get("path_data") or [[]])[0]
@@ -70,6 +76,15 @@ class VizWindow:
         self._xrange_ax     = None
         self._ylim_slider   = None
         self._ylim_ax       = None
+        self._export_btn    = None
+        self._export_btn_ax = None
+        self._exporting:       bool  = False
+        self._current_path_xy: list  = []
+        self._n_rl_cfg  = self._n_rl
+        self._n_ch_cfg  = self._n_ch
+        self._export_timer = None
+        self._ep_cache: dict | None = None
+        self._episode_num: int = 0
 
         self._build_figure()
 
@@ -83,11 +98,18 @@ class VizWindow:
         import matplotlib.cm as cm
         import matplotlib.colors as mcolors
 
-        self._fig = plt.figure(figsize=(18, 10), dpi=100)
-        try:
-            self._fig.canvas.manager.set_window_title("Live Sensor Visualization")
-        except Exception:
-            pass
+        if self._agg_mode:
+            from matplotlib.figure import Figure
+            from matplotlib.backends.backend_agg import FigureCanvasAgg
+            _dpi = self._config.get('_export_dpi', 72)
+            self._fig = Figure(figsize=(18, 10), dpi=_dpi)
+            FigureCanvasAgg(self._fig)   # attach Agg canvas without touching pyplot
+        else:
+            self._fig = plt.figure(figsize=(18, 10), dpi=100)
+            try:
+                self._fig.canvas.manager.set_window_title("Live Sensor Visualization")
+            except Exception:
+                pass
 
         gs = GridSpec(4, 3, figure=self._fig,
                       height_ratios=[2, 1, 1, 1],
@@ -95,9 +117,8 @@ class VizWindow:
 
         # ── trajectory panel ─────────────────────────────────────────────────
         ax_t = self._fig.add_subplot(gs[0, 0:2])
-        ax_t.set_title("Trajectory", fontsize=9)
-        ax_t.set_xlabel("X (mm)", fontsize=8)
-        ax_t.set_ylabel("Y (mm)", fontsize=8)
+        ax_t.set_xlabel("X (mm)", fontsize=9)
+        ax_t.set_ylabel("Y (mm)", fontsize=9)
         ax_t.set_xlim([-500, 4500])
         ax_t.set_ylim([-300, 1200])
         ax_t.set_aspect("equal", adjustable="box")
@@ -107,7 +128,7 @@ class VizWindow:
         ax_t.xaxis.set_label_position("top")
         ax_t.yaxis.tick_right()
         ax_t.yaxis.set_label_position("right")
-        ax_t.tick_params(labelsize=7)
+        ax_t.tick_params(labelsize=9)
         ax_t.add_patch(Rectangle((0, 0), 3800, 850,
                                   fill=False, edgecolor="red", linewidth=1.5))
         self._path_line, = ax_t.plot([], [], color="0.55", linestyle="--",
@@ -184,17 +205,17 @@ class VizWindow:
 
             ax = self._fig.add_subplot(gs[grid_row, grid_col])
             ax.grid(True, alpha=0.2)
-            ax.tick_params(labelsize=6)
+            ax.tick_params(labelsize=9)
 
             if grid_row == 3:
-                ax.set_xlabel("Time (s)", fontsize=7)
+                ax.set_xlabel("Time (s)", fontsize=9)
             else:
                 ax.tick_params(labelbottom=False)
             if grid_col == 0:
-                ax.set_ylabel("Moment", fontsize=7)
+                ax.set_ylabel("Moment", fontsize=9)
 
             ax.text(0.02, 0.93, f"W{wn}",
-                    transform=ax.transAxes, fontsize=8, fontweight="bold",
+                    transform=ax.transAxes, fontsize=9, fontweight="bold",
                     va="top", ha="left",
                     bbox={"facecolor": "white", "edgecolor": "none",
                           "alpha": 0.7, "pad": 1})
@@ -204,7 +225,7 @@ class VizWindow:
             cur  = ax.axvline(0.0, color="k", linestyle=":", linewidth=0.8)
 
             if pi == 0:
-                ax.legend(loc="upper right", fontsize=6)
+                ax.legend(loc="upper right", fontsize=9)
 
             trans = blended_transform_factory(ax.transData, ax.transAxes)
             vt = ax.text(0.0, 0.96, "", transform=trans, fontsize=9,
@@ -219,11 +240,12 @@ class VizWindow:
             self._val_texts.append(vt)
 
         self._fig.subplots_adjust(bottom=0.05)
-        self._fig.canvas.mpl_connect("button_press_event",  self._on_press)
-        self._fig.canvas.mpl_connect("button_release_event", self._on_release)
-        self._fig.canvas.mpl_connect("motion_notify_event",  self._on_motion)
-        plt.show(block=False)
-        plt.pause(0.05)
+        if not self._agg_mode:
+            self._fig.canvas.mpl_connect("button_press_event",  self._on_press)
+            self._fig.canvas.mpl_connect("button_release_event", self._on_release)
+            self._fig.canvas.mpl_connect("motion_notify_event",  self._on_motion)
+            plt.show(block=False)
+            plt.pause(0.05)
 
     # ── public API ────────────────────────────────────────────────────────────
 
@@ -235,12 +257,18 @@ class VizWindow:
         self._t0_ms         = None
         self._signal_limit  = None
         self._episode_ended = False
+        self._ep_cache      = None
+        self._episode_num  += 1
 
         for ax in self._ax_w:
             ax.set_autoscaley_on(True)
             ax.relim()
 
-        for ax_attr in ('_slider_ax', '_xrange_ax', '_ylim_ax'):
+        # Keep export button/timer alive if a background export is still running.
+        axes_to_clear = ['_slider_ax', '_xrange_ax', '_ylim_ax']
+        if not self._exporting:
+            axes_to_clear.append('_export_btn_ax')
+        for ax_attr in axes_to_clear:
             ax = getattr(self, ax_attr, None)
             if ax is not None:
                 try:
@@ -249,6 +277,14 @@ class VizWindow:
                     pass
                 setattr(self, ax_attr, None)
         self._slider = self._xrange_slider = self._ylim_slider = None
+        if not self._exporting:
+            self._export_btn = None
+            if self._export_timer is not None:
+                try:
+                    self._export_timer.stop()
+                except Exception:
+                    pass
+                self._export_timer = None
         self._fig.subplots_adjust(bottom=0.05)
 
         for line in (self._full_traj_line, self._traj_line, self._tail_line):
@@ -260,6 +296,7 @@ class VizWindow:
             self._val_texts[i].set_text("")
 
         raw_path = path_xy if path_xy else self._path_xy_default
+        self._current_path_xy = raw_path
         if raw_path:
             self._path_line.set_data([p[0] for p in raw_path],
                                       [p[1] for p in raw_path])
@@ -298,11 +335,16 @@ class VizWindow:
         from matplotlib.widgets import Slider, RangeSlider
 
         # frame navigation slider (full width, very bottom)
-        self._slider_ax = self._fig.add_axes([0.10, 0.01, 0.80, 0.018])
+        self._slider_ax = self._fig.add_axes([0.10, 0.01, 0.62, 0.018])
         n = max(1, len(self._frames) - 1)
         self._slider = Slider(self._slider_ax, "Frame", 0, n,
                               valinit=n, valstep=1)
         self._slider.on_changed(lambda v: self._draw_frame(int(round(v))))
+
+        from matplotlib.widgets import Button
+        self._export_btn_ax = self._fig.add_axes([0.80, 0.005, 0.10, 0.030])
+        self._export_btn = Button(self._export_btn_ax, "Export MP4")
+        self._export_btn.on_clicked(self._on_export)
 
         # force layout so get_position() is accurate
         self._fig.canvas.draw()
@@ -351,8 +393,21 @@ class VizWindow:
             return
         frame_idx = max(0, min(frame_idx, len(self._frames) - 1))
 
-        x_arr  = np.array(self._x_buf[:frame_idx + 1])
-        y_arr  = np.array(self._y_buf[:frame_idx + 1])
+        # Build episode cache once after episode ends (avoids O(N²) array allocs)
+        if self._episode_ended and self._ep_cache is None:
+            self._ep_cache = {
+                'x':  np.array(self._x_buf),
+                'y':  np.array(self._y_buf),
+                't':  np.array(self._t_buf),
+                'f':  np.array(self._frames),
+            }
+
+        if self._ep_cache is not None:
+            x_arr = self._ep_cache['x'][:frame_idx + 1]
+            y_arr = self._ep_cache['y'][:frame_idx + 1]
+        else:
+            x_arr = np.array(self._x_buf[:frame_idx + 1])
+            y_arr = np.array(self._y_buf[:frame_idx + 1])
         t_now  = self._t_buf[frame_idx] if self._t_buf else 0.0
         frame  = self._frames[frame_idx]
 
@@ -390,8 +445,9 @@ class VizWindow:
 
         # ── signal traces ─────────────────────────────────────────────────────
         if self._episode_ended:
-            t_win    = np.array(self._t_buf)
-            data_arr = np.array(self._frames)
+            # Use cached arrays — O(1) slices instead of O(N) allocations
+            t_win    = self._ep_cache['t']
+            data_arr = self._ep_cache['f']
             mask     = np.ones(len(t_win), dtype=bool)
         else:
             t_arr_all = np.array(self._t_buf[:frame_idx + 1])
@@ -429,7 +485,146 @@ class VizWindow:
             else:
                 self._val_texts[pi].set_text("")
 
+        if not self._agg_mode:
+            self._fig.canvas.draw_idle()
+
+    def render_to_file(self, out_path: str, fps: float = 20.0, progress_q=None):
+        """Render all buffered frames to a video file (Agg mode, blocking)."""
+        import matplotlib.animation as anim_mod
+        n_frames = len(self._frames)
+        t_total  = self._t_buf[-1] if self._t_buf else 1.0
+        dt_frame = t_total / max(n_frames - 1, 1)
+        stride   = max(1, round(1.0 / (fps * dt_frame)))
+        indices  = list(range(0, n_frames, stride))
+        total    = len(indices)
+        counter  = [0]
+        report_every = max(1, total // 40)  # ~40 progress updates
+
+        def _update(frame_idx):
+            self._draw_frame(frame_idx)
+            counter[0] += 1
+            if progress_q is not None and counter[0] % report_every == 0:
+                pct = min(99, int(100 * counter[0] / total))
+                try:
+                    progress_q.put_nowait({'type': 'progress', 'pct': pct})
+                except Exception:
+                    pass
+            return []
+
+        # Explicit draw so Agg has a valid initial frame
+        self._fig.canvas.draw()
+
+        ani = anim_mod.FuncAnimation(self._fig, _update, frames=indices,
+                                     blit=False, repeat=False,
+                                     interval=1000.0 / fps)
+
+        out_path = str(out_path)
+        if anim_mod.writers.is_available("ffmpeg"):
+            writer = anim_mod.FFMpegWriter(fps=fps, codec="libx264", bitrate=1800)
+        else:
+            out_path = out_path.replace(".mp4", ".gif")
+            writer   = anim_mod.PillowWriter(fps=fps)
+            print("[Export] ffmpeg not found on PATH — saving as GIF (much slower). "
+                  "Add ffmpeg to PATH for fast MP4 export.")
+
+        ani.save(out_path, writer=writer)
+        try:
+            ani.event_source.stop()
+        except Exception:
+            pass
+        if self._plt is not None:
+            self._plt.close(self._fig)
+        return out_path
+
+    def _on_export(self, _event):
+        """Spawn a background process to render the episode to MP4."""
+        if not self._frames or self._export_btn is None or self._exporting:
+            return
+
+        import datetime
+        from pathlib import Path
+
+        import threading
+        import queue as _stdlib_queue
+
+        self._exporting = True
+        traj_dir = Path(__file__).resolve().parent.parent / "episode_trajectories"
+        traj_dir.mkdir(parents=True, exist_ok=True)
+        ts       = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+        out_path = str(traj_dir / f"viz_{ts}_ep{self._episode_num:04d}.mp4")
+
+        progress_q = _stdlib_queue.Queue()
+        data = {
+            'n_rl':         self._n_rl,
+            'n_ch':         self._n_ch,
+            'x_buf':        list(self._x_buf),
+            'y_buf':        list(self._y_buf),
+            't_buf':        list(self._t_buf),
+            'frames':       [f.tolist() for f in self._frames],
+            'signal_limit': float(self._signal_limit or 1.0),
+            'path_xy':      list(self._current_path_xy),
+            'out_path':     out_path,
+            'fps':          10.0,
+            'progress_q':   progress_q,
+        }
+
+        thread = threading.Thread(target=_export_worker, args=(data,), daemon=True)
+        thread.start()
+
+        self._export_btn.label.set_text("0%  Exporting…")
         self._fig.canvas.draw_idle()
+        self._start_export_poll(progress_q, thread)
+
+    def _start_export_poll(self, progress_q, thread):
+        """Start a matplotlib timer that polls export progress and updates the button."""
+        import queue as _stdlib_queue
+        if self._export_timer is not None:
+            try:
+                self._export_timer.stop()
+            except Exception:
+                pass
+
+        timer = self._fig.canvas.new_timer(interval=300)
+
+        def _poll():
+            drained_final = False
+            while True:
+                try:
+                    msg = progress_q.get_nowait()
+                except _stdlib_queue.Empty:
+                    break
+                kind = msg.get('type')
+                if kind == 'progress':
+                    pct = msg.get('pct', 0)
+                    if self._export_btn is not None:
+                        self._export_btn.label.set_text(f"{pct}%  Exporting…")
+                elif kind == 'done':
+                    if self._export_btn is not None:
+                        self._export_btn.label.set_text("Exported ✓")
+                    timer.stop()
+                    self._exporting = False
+                    drained_final = True
+                elif kind == 'error':
+                    if self._export_btn is not None:
+                        self._export_btn.label.set_text(f"Failed: {msg.get('msg','')[:28]}")
+                    timer.stop()
+                    self._exporting = False
+                    drained_final = True
+
+            # Thread finished without sending a final message
+            if not drained_final and not thread.is_alive() and progress_q.empty():
+                if self._export_btn is not None:
+                    lbl = self._export_btn.label.get_text()
+                    if 'Exporting' in lbl:
+                        self._export_btn.label.set_text("Export done")
+                timer.stop()
+                self._exporting = False
+
+            self._fig.canvas.draw_idle()
+
+        timer.add_callback(_poll)
+        timer.start()
+        self._export_timer = timer
 
     def _on_xrange(self, val):
         lo, hi = val
@@ -473,6 +668,68 @@ class VizWindow:
             self._navigate_to(event)
 
 
+# ── export worker (headless background process) ───────────────────────────────
+
+def _export_worker(data: dict):
+    """Render episode data to a video file using Agg backend (no GUI)."""
+    progress_q = data.get('progress_q')
+
+    def _report(msg: dict):
+        if progress_q is not None:
+            try:
+                progress_q.put_nowait(msg)
+            except Exception:
+                pass
+
+    try:
+        minimal_config = {
+            'n_rl_interval': data['n_rl'],
+            'n_ch_total':    data['n_ch'],
+            '_export_dpi':   72,
+        }
+        win = VizWindow(minimal_config, _agg_mode=True)
+
+        win._x_buf          = data['x_buf']
+        win._y_buf          = data['y_buf']
+        win._t_buf          = data['t_buf']
+        win._frames         = [np.array(f, dtype=np.float64) for f in data['frames']]
+        win._signal_limit   = float(data['signal_limit'])
+        win._episode_ended  = True
+
+        path_xy = data.get('path_xy') or []
+        if path_xy:
+            win._path_line.set_data([p[0] for p in path_xy],
+                                     [p[1] for p in path_xy])
+        win._full_traj_line.set_data(win._x_buf, win._y_buf)
+
+        # Pre-build cache so _draw_frame never allocates during rendering
+        win._ep_cache = {
+            'x': np.array(win._x_buf),
+            'y': np.array(win._y_buf),
+            't': np.array(win._t_buf),
+            'f': np.array(win._frames),
+        }
+
+        lim     = win._signal_limit
+        t_total = win._t_buf[-1] if win._t_buf else 1.0
+        for ax in win._ax_w:
+            ax.set_autoscaley_on(False)
+            ax.set_ylim(-lim, lim)
+            ax.set_xlim(0.0, t_total)
+
+        saved_path = win.render_to_file(
+            data['out_path'],
+            fps=float(data.get('fps', 20.0)),
+            progress_q=progress_q,
+        )
+        print(f"[Export] Saved: {saved_path}")
+        _report({'type': 'done', 'path': saved_path})
+
+    except Exception as ex:
+        print(f"[Export] Failed: {ex}")
+        _report({'type': 'error', 'msg': str(ex)})
+
+
 # ── subprocess worker ─────────────────────────────────────────────────────────
 
 def _viz_worker(q: mp.Queue, config: dict):
@@ -510,7 +767,8 @@ def _viz_worker(q: mp.Queue, config: dict):
             viz.update_frame(pending_frames[-1])
 
         try:
-            plt.pause(_PAUSE_S)
+            viz._fig.canvas.flush_events()
+            time.sleep(_PAUSE_S)
         except Exception:
             break
 
