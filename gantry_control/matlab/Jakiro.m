@@ -1403,7 +1403,7 @@ classdef Jakiro < handle
                             end
                             action(1) = v2;
                             action(2) = vy_agent;
-                            first_agent_step = false;
+                            % first_agent_step = false;
                             fprintf('[PathAgentTrain] Handoff: vx_pt=%.4f vy_pt=%.4f heading_deg=%.2f -> vy_agent=%.4f\n', ...
                                 vx_pt, vy_pt, rad2deg(atan2(vy_pt, vx_pt)), vy_agent);
                         end
@@ -1539,6 +1539,7 @@ classdef Jakiro < handle
                         prev_action = action;
                         try
                             action = app.net.stepRL(app.currentState(:)', reward, episode_done_flag, truncated, app.CC1.Car.real_loc(1:2));
+                            first_agent_step = false; % cancel the handoff override
                         catch ME
                             handleAgentConnectionFailure(app, ...
                                 sprintf('PathAgentTrain episode %d step %d', ep, num_agent_interactions), ME);
