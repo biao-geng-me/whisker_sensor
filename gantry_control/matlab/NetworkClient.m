@@ -15,7 +15,11 @@ classdef NetworkClient < handle
         CMD_VIZ_START = int8(5);
         CMD_VIZ_FRAME = int8(6);
         CMD_VIZ_END   = int8(7);
-        
+
+        % Extra aux doubles appended after every message payload (must match Python N_VIZ_AUX).
+        % Currently: [cc1_x_mm, cc1_y_mm]. Extend here for future viz channels.
+        N_VIZ_AUX = int32(2);
+
         stateDim
         actionDim
         startEpisodeTimeoutMs = 30000
@@ -62,13 +66,12 @@ classdef NetworkClient < handle
             fprintf('[Network] Configuration accepted by Server.\n');
         end
         
-        function action = startEpisode(obj, initialState, episodeMeta, episodePathXY)
+        function action = startEpisode(obj, initialState, episodeMeta, episodePathXY, cc1_xy)
             % Sends State A (0x01) and the initial state, receives first action.
-            % episodeMeta is optional and can be a struct with fields:
-            % path_index, front_start_x_mm, object_speed_mm_per_ms, delay_ms,
-            % rotation_change_limit_deg_per_control_step
-            % or a numeric vector in the same order.
-            % episodePathXY is optional Nx2 path data for the current episode.
+            % cc1_xy: optional [x_mm, y_mm] of front carriage — N_VIZ_AUX aux doubles appended after path.
+            if nargin < 5 || isempty(cc1_xy)
+                cc1_xy = [0, 0];
+            end
             if nargin < 3 || isempty(episodeMeta)
                 metaValues = nan(1, 5);
             elseif isstruct(episodeMeta)
@@ -114,17 +117,21 @@ classdef NetworkClient < handle
             if ~isempty(pathXY)
                 obj.sendDoubles(pathXY.');
             end
+            obj.sendDoubles(double(cc1_xy(1:2)));  % N_VIZ_AUX aux doubles after path
             obj.outStream.flush();
-            
+
             action = obj.receiveDoubles(obj.actionDim, obj.startEpisodeTimeoutMs);
         end
         
-        function action = stepRL(obj, state, reward, done, truncated)
-            % Sends State B (0x02) control loop data, receives action
+        function action = stepRL(obj, state, reward, done, truncated, cc1_xy)
+            % Sends State B (0x02) control loop data, receives action.
+            % cc1_xy: optional [x_mm, y_mm] of front carriage — N_VIZ_AUX aux doubles appended.
+            if nargin < 6 || isempty(cc1_xy)
+                cc1_xy = [0, 0];
+            end
             obj.outStream.writeByte(obj.CMD_STEP);
-            
-            % Package state, reward, and done flag
-            payload = [state(:)', reward, done, truncated];
+            % payload: state + reward + done + truncated + N_VIZ_AUX aux doubles
+            payload = [state(:)', reward, done, truncated, double(cc1_xy(1:2))];
             obj.sendDoubles(payload);
             obj.outStream.flush();
             
@@ -197,24 +204,26 @@ classdef NetworkClient < handle
             fprintf('  Std:  %.2f ms\n', std(latencies));
         end
         
-        function ok = sendVizStart(obj, state)
-            % Sends CMD_VIZ_START (0x05) with state data. Fire-and-forget, no ACK.
+        function ok = sendVizStart(obj, state, cc1_xy)
+            % Sends CMD_VIZ_START (0x05) with state + N_VIZ_AUX aux doubles. Fire-and-forget.
+            if nargin < 3 || isempty(cc1_xy), cc1_xy = [0, 0]; end
             ok = false;
             try
                 obj.outStream.writeByte(obj.CMD_VIZ_START);
-                obj.sendDoubles(state);
+                obj.sendDoubles([state(:)', double(cc1_xy(1:2))]);
                 obj.outStream.flush();
                 ok = true;
             catch
             end
         end
 
-        function ok = sendVizFrame(obj, state)
-            % Sends CMD_VIZ_FRAME (0x06) with state data. Fire-and-forget, no ACK.
+        function ok = sendVizFrame(obj, state, cc1_xy)
+            % Sends CMD_VIZ_FRAME (0x06) with state + N_VIZ_AUX aux doubles. Fire-and-forget.
+            if nargin < 3 || isempty(cc1_xy), cc1_xy = [0, 0]; end
             ok = false;
             try
                 obj.outStream.writeByte(obj.CMD_VIZ_FRAME);
-                obj.sendDoubles(state);
+                obj.sendDoubles([state(:)', double(cc1_xy(1:2))]);
                 obj.outStream.flush();
                 ok = true;
             catch

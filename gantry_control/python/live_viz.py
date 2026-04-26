@@ -80,6 +80,8 @@ class VizWindow:
         self._export_btn_ax = None
         self._exporting:       bool  = False
         self._current_path_xy: list  = []
+        self._cc1_x_buf: list[float] = []
+        self._cc1_y_buf: list[float] = []
         self._n_rl_cfg  = self._n_rl
         self._n_ch_cfg  = self._n_ch
         self._export_timer = None
@@ -93,7 +95,7 @@ class VizWindow:
     def _build_figure(self):
         plt = self._plt
         from matplotlib.gridspec import GridSpec
-        from matplotlib.patches import Rectangle, Ellipse
+        from matplotlib.patches import Rectangle, Ellipse, Circle
         from matplotlib.transforms import blended_transform_factory, Affine2D
         import matplotlib.cm as cm
         import matplotlib.colors as mcolors
@@ -146,6 +148,13 @@ class VizWindow:
                                           facecolor="tab:orange", alpha=0.55,
                                           edgecolor="k", linewidth=1.5, zorder=4)
         ax_t.add_patch(self._carriage_patch)
+
+        # CC1 (front carriage): 4 cm diameter circle (radius=20 mm in data coords)
+        self._cc1_patch = Circle((0, 0), radius=_CARRIAGE_SZ_MM,
+                                  facecolor="tab:red", alpha=0.6,
+                                  edgecolor="k", linewidth=1.2, zorder=5)
+        ax_t.add_patch(self._cc1_patch)
+
         self._Affine2D = Affine2D
 
         self._info_text = ax_t.text(
@@ -249,11 +258,14 @@ class VizWindow:
 
     # ── public API ────────────────────────────────────────────────────────────
 
-    def start_episode(self, state: list[float], path_xy: list | None = None):
+    def start_episode(self, state: list[float], path_xy: list | None = None,
+                      cc1_x: float = 0.0, cc1_y: float = 0.0):
         self._x_buf.clear()
         self._y_buf.clear()
         self._t_buf.clear()
         self._frames.clear()
+        self._cc1_x_buf.clear()
+        self._cc1_y_buf.clear()
         self._t0_ms         = None
         self._signal_limit  = None
         self._episode_ended = False
@@ -303,15 +315,15 @@ class VizWindow:
         else:
             self._path_line.set_data([], [])
 
-        self._ingest_state(state)
+        self._ingest_state(state, cc1_x, cc1_y)
         self._draw_frame(len(self._frames) - 1)
 
-    def ingest_only(self, state: list[float]):
+    def ingest_only(self, state: list[float], cc1_x: float = 0.0, cc1_y: float = 0.0):
         """Ingest state into buffers without redrawing (for batch updates)."""
-        self._ingest_state(state)
+        self._ingest_state(state, cc1_x, cc1_y)
 
-    def update_frame(self, state: list[float]):
-        self._ingest_state(state)
+    def update_frame(self, state: list[float], cc1_x: float = 0.0, cc1_y: float = 0.0):
+        self._ingest_state(state, cc1_x, cc1_y)
         self._draw_frame(len(self._frames) - 1)
 
     def end_episode(self):
@@ -376,7 +388,7 @@ class VizWindow:
 
     # ── internal helpers ──────────────────────────────────────────────────────
 
-    def _ingest_state(self, state: list[float]):
+    def _ingest_state(self, state: list[float], cc1_x: float = 0.0, cc1_y: float = 0.0):
         """Append all n_rl_interval rows from a viz frame to the buffers."""
         mat = np.array(state, dtype=np.float64).reshape(self._n_rl, self._n_ch)
         for row in mat:
@@ -387,6 +399,8 @@ class VizWindow:
             self._x_buf.append(float(row[1]))
             self._y_buf.append(float(row[2]))
             self._frames.append(row)
+            self._cc1_x_buf.append(float(cc1_x))
+            self._cc1_y_buf.append(float(cc1_y))
 
     def _draw_frame(self, frame_idx: int):
         if not self._frames:
@@ -396,10 +410,12 @@ class VizWindow:
         # Build episode cache once after episode ends (avoids O(N²) array allocs)
         if self._episode_ended and self._ep_cache is None:
             self._ep_cache = {
-                'x':  np.array(self._x_buf),
-                'y':  np.array(self._y_buf),
-                't':  np.array(self._t_buf),
-                'f':  np.array(self._frames),
+                'x':    np.array(self._x_buf),
+                'y':    np.array(self._y_buf),
+                't':    np.array(self._t_buf),
+                'f':    np.array(self._frames),
+                'cc1x': np.array(self._cc1_x_buf),
+                'cc1y': np.array(self._cc1_y_buf),
             }
 
         if self._ep_cache is not None:
@@ -424,6 +440,18 @@ class VizWindow:
                    .translate(x_arr[-1], y_arr[-1])
                    + self._ax_traj.transData)
         self._carriage_patch.set_transform(t_patch)
+
+        # CC1 circle — positioned at current CC1 location
+        if self._ep_cache is not None:
+            cc1_x_now = float(self._ep_cache['cc1x'][frame_idx])
+            cc1_y_now = float(self._ep_cache['cc1y'][frame_idx])
+        elif self._cc1_x_buf:
+            cc1_x_now = self._cc1_x_buf[min(frame_idx, len(self._cc1_x_buf) - 1)]
+            cc1_y_now = self._cc1_y_buf[min(frame_idx, len(self._cc1_y_buf) - 1)]
+        else:
+            cc1_x_now, cc1_y_now = 0.0, 0.0
+        self._cc1_patch.set_transform(
+            self._Affine2D().translate(cc1_x_now, cc1_y_now) + self._ax_traj.transData)
 
         self._info_text.set_text(
             f"t={t_now:.1f}s  x={x_arr[-1]:.0f}mm  y={y_arr[-1]:.0f}mm"
@@ -563,6 +591,8 @@ class VizWindow:
             'frames':       [f.tolist() for f in self._frames],
             'signal_limit': float(self._signal_limit or 1.0),
             'path_xy':      list(self._current_path_xy),
+            'cc1_x_buf':    list(self._cc1_x_buf),
+            'cc1_y_buf':    list(self._cc1_y_buf),
             'out_path':     out_path,
             'fps':          10.0,
             'progress_q':   progress_q,
@@ -693,6 +723,8 @@ def _export_worker(data: dict):
         win._y_buf          = data['y_buf']
         win._t_buf          = data['t_buf']
         win._frames         = [np.array(f, dtype=np.float64) for f in data['frames']]
+        win._cc1_x_buf      = data.get('cc1_x_buf', [0.0] * len(data['x_buf']))
+        win._cc1_y_buf      = data.get('cc1_y_buf', [0.0] * len(data['y_buf']))
         win._signal_limit   = float(data['signal_limit'])
         win._episode_ended  = True
 
@@ -704,10 +736,12 @@ def _export_worker(data: dict):
 
         # Pre-build cache so _draw_frame never allocates during rendering
         win._ep_cache = {
-            'x': np.array(win._x_buf),
-            'y': np.array(win._y_buf),
-            't': np.array(win._t_buf),
-            'f': np.array(win._frames),
+            'x':    np.array(win._x_buf),
+            'y':    np.array(win._y_buf),
+            't':    np.array(win._t_buf),
+            'f':    np.array(win._frames),
+            'cc1x': np.array(win._cc1_x_buf),
+            'cc1y': np.array(win._cc1_y_buf),
         }
 
         lim     = win._signal_limit
@@ -748,10 +782,11 @@ def _viz_worker(q: mp.Queue, config: dict):
                 msg  = q.get_nowait()
                 kind = msg.get("type")
                 if kind == "frame":
-                    pending_frames.append(msg["state"])
+                    pending_frames.append(msg)
                 elif kind == "start":
                     pending_frames.clear()
-                    viz.start_episode(msg["state"], msg.get("path_xy"))
+                    viz.start_episode(msg["state"], msg.get("path_xy"),
+                                      msg.get("cc1_x", 0.0), msg.get("cc1_y", 0.0))
                 elif kind == "end":
                     viz.end_episode()
                 elif kind == "shutdown":
@@ -762,9 +797,10 @@ def _viz_worker(q: mp.Queue, config: dict):
 
         # Ingest every queued frame so no data is lost; redraw only once.
         if pending_frames:
-            for state in pending_frames[:-1]:
-                viz.ingest_only(state)
-            viz.update_frame(pending_frames[-1])
+            for msg in pending_frames[:-1]:
+                viz.ingest_only(msg["state"], msg.get("cc1_x", 0.0), msg.get("cc1_y", 0.0))
+            last = pending_frames[-1]
+            viz.update_frame(last["state"], last.get("cc1_x", 0.0), last.get("cc1_y", 0.0))
 
         try:
             viz._fig.canvas.flush_events()
@@ -783,15 +819,17 @@ class VizProcess:
         self._proc = mp.Process(target=_viz_worker, args=(self._q, config), daemon=True)
         self._proc.start()
 
-    def start_episode(self, state: list[float], path_xy: list | None = None):
+    def start_episode(self, state: list[float], path_xy: list | None = None,
+                      cc1_x: float = 0.0, cc1_y: float = 0.0):
         try:
-            self._q.put_nowait({"type": "start", "state": state, "path_xy": path_xy or []})
+            self._q.put_nowait({"type": "start", "state": state, "path_xy": path_xy or [],
+                                "cc1_x": cc1_x, "cc1_y": cc1_y})
         except _queue_mod.Full:
             pass
 
-    def update_frame(self, state: list[float]):
+    def update_frame(self, state: list[float], cc1_x: float = 0.0, cc1_y: float = 0.0):
         try:
-            self._q.put_nowait({"type": "frame", "state": state})
+            self._q.put_nowait({"type": "frame", "state": state, "cc1_x": cc1_x, "cc1_y": cc1_y})
         except _queue_mod.Full:
             pass
 

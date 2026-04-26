@@ -724,7 +724,7 @@ classdef Jakiro < handle
             % Viz episode start
             if ~isempty(app.net)
                 try
-                    if ~app.net.sendVizStart(app.buildVizFrame())
+                    if ~app.net.sendVizStart(app.buildVizFrame(), app.CC1.Car.real_loc(1:2))
                         app.net = [];
                     end
                 catch
@@ -852,7 +852,7 @@ classdef Jakiro < handle
             % Viz episode start
             if ~isempty(app.net)
                 try
-                    if ~app.net.sendVizStart(app.buildVizFrame())
+                    if ~app.net.sendVizStart(app.buildVizFrame(), app.CC1.Car.real_loc(1:2))
                         app.net = [];
                     end
                 catch
@@ -911,7 +911,7 @@ classdef Jakiro < handle
                 end
                 if ~isempty(app.net) && ~isempty(new_samples_ph)
                     viz_state = app.buildVizFrame(new_samples_ph);
-                    if ~app.net.sendVizFrame(viz_state)
+                    if ~app.net.sendVizFrame(viz_state, app.CC1.Car.real_loc(1:2))
                         app.net = [];
                     end
                 end
@@ -1050,7 +1050,7 @@ classdef Jakiro < handle
                 action = app.net.startEpisode( ...
                     app.currentState(:)', ...
                     app.makeEpisodeStartMeta(episodePath.path_index, start_x, v1, delay_s, rotation_step_deg), ...
-                    episodePath.xy); % get initial action from agent
+                    episodePath.xy, app.CC1.Car.real_loc(1:2));
             catch ME
                 handleAgentConnectionFailure(app, 'PathAgentPre startEpisode', ME);
                 return
@@ -1162,7 +1162,7 @@ classdef Jakiro < handle
                     app.currentState = [cc2_state_buffer; bending_moments']; % 5 rows of carriage state + 18 rows of daq data, each with n_rl_interval columns
                     % send state to agent and receive action
                     try
-                        action = app.net.stepRL(app.currentState(:)', reward, is_done, truncated); % flatten state to 1D array for sending to agent
+                        action = app.net.stepRL(app.currentState(:)', reward, is_done, truncated, app.CC1.Car.real_loc(1:2));
                     catch ME
                         handleAgentConnectionFailure(app, sprintf('PathAgentPre step %d', num_agent_interactions), ME);
                         connection_lost = true;
@@ -1341,7 +1341,7 @@ classdef Jakiro < handle
                     action = app.net.startEpisode( ...
                         app.currentState(:)', ...
                         app.makeEpisodeStartMeta(path_idx, start_x, v1, delay_s, rotation_step_deg), ...
-                        episodePath.xy);
+                        episodePath.xy, app.CC1.Car.real_loc(1:2));
                 catch ME
                     handleAgentConnectionFailure(app, sprintf('PathAgentTrain episode %d startEpisode', ep), ME);
                     connection_lost = true;
@@ -1538,7 +1538,7 @@ classdef Jakiro < handle
                         episode_done_flag = logical(is_done);
                         prev_action = action;
                         try
-                            action = app.net.stepRL(app.currentState(:)', reward, episode_done_flag, truncated);
+                            action = app.net.stepRL(app.currentState(:)', reward, episode_done_flag, truncated, app.CC1.Car.real_loc(1:2));
                         catch ME
                             handleAgentConnectionFailure(app, ...
                                 sprintf('PathAgentTrain episode %d step %d', ep, num_agent_interactions), ME);
@@ -1889,7 +1889,7 @@ classdef Jakiro < handle
             end
             if ~isempty(app.net) && ~isempty(new_samples_pp)
                 viz_state = app.buildVizFrame(new_samples_pp);
-                if ~app.net.sendVizFrame(viz_state)
+                if ~app.net.sendVizFrame(viz_state, app.CC1.Car.real_loc(1:2))
                     app.net = [];
                 end
             end

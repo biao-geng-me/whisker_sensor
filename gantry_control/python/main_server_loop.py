@@ -143,9 +143,10 @@ def run_viz_mode(net, config, logger):
     from live_viz import VizProcess
 
     n_rl_interval = config.get("n_rl_interval", 4)
-    n_ch_total = config.get("n_ch_total", 23)
-    state_dim = config.get("state_dim", n_rl_interval * n_ch_total)
-    episode_num = 0
+    n_ch_total    = config.get("n_ch_total", 23)
+    state_dim     = config.get("state_dim", n_rl_interval * n_ch_total)
+    N_VIZ_AUX     = 2  # must match MATLAB N_VIZ_AUX: [cc1_x_mm, cc1_y_mm]
+    episode_num   = 0
 
     viz = VizProcess(config)
     logger.info("[VIZ] Visualization mode started. Waiting for episode data...")
@@ -157,17 +158,21 @@ def run_viz_mode(net, config, logger):
             break
         if header == CMD_VIZ_START:
             episode_num += 1
-            state = net.receive_doubles(state_dim)
+            raw   = net.receive_doubles(state_dim + N_VIZ_AUX)
+            state = raw[:state_dim]
+            cc1_x, cc1_y = raw[state_dim], raw[state_dim + 1]
             path_xy = config.get("path_data", [[]])[0] if config.get("path_data") else []
-            viz.start_episode(list(state), path_xy)
+            viz.start_episode(list(state), path_xy, cc1_x, cc1_y)
             logger.info(
                 f"[VIZ] Episode {episode_num} started."
                 + (f" x={state[1]:.1f} y={state[2]:.1f}" if state and len(state) >= 3 else "")
             )
         elif header == CMD_VIZ_FRAME:
             net.set_timeout(1)
-            state = net.receive_doubles(state_dim)
-            viz.update_frame(list(state))
+            raw   = net.receive_doubles(state_dim + N_VIZ_AUX)
+            state = raw[:state_dim]
+            cc1_x, cc1_y = raw[state_dim], raw[state_dim + 1]
+            viz.update_frame(list(state), cc1_x, cc1_y)
         elif header == CMD_VIZ_END:
             viz.end_episode()
             logger.info(f"[VIZ] Episode {episode_num} ended.")
@@ -235,8 +240,11 @@ def main():
     num_whiskers = config.get("num_whiskers", (n_ch_total - 5)//2)  # Assuming first 5 are t, x, y, x_vel, y_vel
     obs_var_names = make_obs_var_names(num_whiskers)
     # Total received per step = states + 1 reward + 1 done flag + 1 truncated flag
-    step_msg_size = state_dim + 3 
-    start_msg_size = state_dim + 5  # state + path index + front start x + object speed + delay + rotation-step limit
+    # Extra aux doubles appended after every message payload (must match MATLAB N_VIZ_AUX).
+    # Currently: [cc1_x_mm, cc1_y_mm]. Extend here for future viz channels.
+    N_VIZ_AUX     = 2
+    step_msg_size  = state_dim + 3 + N_VIZ_AUX
+    start_msg_size = state_dim + 5  # state + 5 meta; aux is read separately after path block
     record_trajectory = config.get("record_trajectory", False)  # Optional trajectory recording
     use_random_paths = bool(config.get("use_random_paths", False))
 
@@ -373,6 +381,11 @@ def main():
                     f"[Episode {episode_num}] Path saved: {path_csv_path} ({path_point_count} rows)"
                 )
 
+            # Read N_VIZ_AUX aux doubles appended after the path block
+            cc1_aux = net.receive_doubles(N_VIZ_AUX)
+            cc1_x_ep = cc1_aux[0] if cc1_aux else 0.0
+            cc1_y_ep = cc1_aux[1] if cc1_aux and len(cc1_aux) > 1 else 0.0
+
             logger.debug(f"[Episode {episode_num}] Extracted initial state, shape: {len(initial_state)}")
             logger.debug(f"[Episode {episode_num}] First 5 state values: {initial_state[:5] if len(initial_state) >= 5 else initial_state}")
             
@@ -404,7 +417,7 @@ def main():
 
             if viz is not None:
                 path_xy = episode_meta.get('path_xy') or []
-                viz.start_episode(list(initial_state), path_xy)
+                viz.start_episode(list(initial_state), path_xy, cc1_x_ep, cc1_y_ep)
                 logger.info(f"[VIZ] Episode {episode_num} started in viz window.")
             
         elif header == CMD_STEP:
@@ -422,6 +435,8 @@ def main():
             matlab_reward = step_data[state_dim]
             done = step_data[state_dim + 1]
             truncated = step_data[state_dim + 2]
+            cc1_x = step_data[state_dim + 3]   # aux: CC1 x position (mm)
+            cc1_y = step_data[state_dim + 4]   # aux: CC1 y position (mm)
 
             reward = matlab_reward
             reward_info = {}
@@ -475,7 +490,7 @@ def main():
                     episode_trajectory.append(dict(zip(obs_var_names, obs_row.tolist())))
 
             if viz is not None and not episode_done:
-                viz.update_frame(list(state))
+                viz.update_frame(list(state), cc1_x, cc1_y)
 
             # Time: send action back to MATLAB
             send_start = time.perf_counter()
