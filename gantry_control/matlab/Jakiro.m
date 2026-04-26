@@ -1334,6 +1334,7 @@ classdef Jakiro < handle
                 terminal_sent = false;
                 num_agent_interactions = 0;
                 reward = 0;
+                first_agent_step = true;
 
                 app.run_start_time = datetime('now');
                 try
@@ -1388,6 +1389,24 @@ classdef Jakiro < handle
 
                     % CC2: path tracking during delay, then agent control
                     if elapsed_time_sec > delay_s
+                        if first_agent_step
+                            % Preserve heading direction from path tracking, projected
+                            % onto the agent's fixed vx. atan2 is unit-agnostic so
+                            % real_vel (mm/s) and v2 (mm/ms) mix correctly here.
+                            vx_pt = app.CC2.Car.real_vel(1);
+                            vy_pt = app.CC2.Car.real_vel(2);
+                            if abs(vx_pt) > 1e-9
+                                heading_rad = atan2(vy_pt, vx_pt);
+                                vy_agent = v2 * tan(heading_rad);
+                            else
+                                vy_agent = 0;
+                            end
+                            action(1) = v2;
+                            action(2) = vy_agent;
+                            first_agent_step = false;
+                            fprintf('[PathAgentTrain] Handoff: vx_pt=%.4f vy_pt=%.4f heading_deg=%.2f -> vy_agent=%.4f\n', ...
+                                vx_pt, vy_pt, rad2deg(atan2(vy_pt, vx_pt)), vy_agent);
+                        end
                         vx_in = round(action(1)*1000/app.CC2.Car.step2mm);
                         vy_in = round(action(2)*1000/app.CC2.Car.step2mm);
                         try

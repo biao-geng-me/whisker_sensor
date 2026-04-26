@@ -88,20 +88,27 @@ class AgentWrapper:
         """Clears trajectory memory and resets episode state for a new episode."""
         logger.debug("[Agent] reset() called")
         self.trajectory = []
-        
+
         logger.debug("[Agent] Resetting policy...")
         if self.use_object_policy:
             logger.debug("[Agent] Calling policy.reset()...")
             self.policy.reset()
             logger.debug("[Agent] policy.reset() complete")
-        
+
         logger.debug("[Agent] Resetting SAC train mode state...")
         if self.use_sac_train:
             self._sac_begin_episode(initial_state, episode_meta=episode_meta)
-        
+
         logger.debug("[Agent] Computing first action...")
         action = self._compute_action(initial_state)
         logger.debug(f"[Agent] reset() computed action: {action}")
+
+        # Mark that the next _sac_act() call is the first real agent step (after
+        # any path-tracking delay), so _sac_prev_vy can be seeded from the
+        # actual hardware velocity rather than the episode-start zero.
+        if self.use_sac_train:
+            self._sac_is_first_step = True
+
         return action
 
     def step(self, state, reward, done, truncated, record=True):
@@ -427,6 +434,7 @@ class AgentWrapper:
         logger.debug("[Agent] Clearing SAC sensor history and state...")
         self._sac_sensor_history[:] = 0.0
         self._sac_prev_vy = 0.0
+        self._sac_is_first_step = False  # set True by reset() after initial action
         self._sac_prev_sensor = None
         self._sac_prev_kin = None
         self._sac_prev_action = None
@@ -551,10 +559,31 @@ class AgentWrapper:
     def _sac_act(self, state):
         try:
             logger.debug("[Agent._sac_act] Starting SAC action computation")
-            
+
             logger.debug("[Agent._sac_act] Parsing state...")
             new_frames, kin_vec = self._sac_parse_state(state)
             logger.debug(f"[Agent._sac_act] new_frames shape: {new_frames.shape}, kin_vec shape: {kin_vec.shape}")
+
+            # On the first real agent step (after any path-tracking delay), seed
+            # _sac_prev_vy by preserving the heading angle from path tracking,
+            # projected onto the agent's fixed vx. Direct vy copy would be wrong
+            # because path-tracking vx may differ from the agent's fixed vx.
+            if getattr(self, '_sac_is_first_step', False):
+                vx_pt = float(kin_vec[0, 2])
+                vy_pt = float(kin_vec[0, 3])
+                if abs(vx_pt) > 1e-9:
+                    heading = float(np.arctan2(vy_pt, vx_pt))
+                    scaled_vy = float(self._sac_fixed_vx * np.tan(heading))
+                else:
+                    scaled_vy = 0.0
+                self._sac_prev_vy = float(np.clip(scaled_vy, -self._sac_y_speed_limit, self._sac_y_speed_limit))
+                self._sac_is_first_step = False
+                logger.info(
+                    "[Agent._sac_act] Handoff: vx_pt=%.4f vy_pt=%.4f heading_deg=%.2f -> _sac_prev_vy=%.4f",
+                    vx_pt, vy_pt,
+                    float(np.rad2deg(np.arctan2(vy_pt, vx_pt))) if abs(vx_pt) > 1e-9 else 0.0,
+                    self._sac_prev_vy,
+                )
             
             logger.debug("[Agent._sac_act] Rolling history...")
             self._sac_roll_history(new_frames)
