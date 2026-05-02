@@ -8,7 +8,7 @@ addpath(fileparts(mfilename('fullpath')));
 % k = 1/0.533;
 
 k = 3;
-nL = 7;
+nL = 20;
 start_phase = 180; % undulation phase. 180 to start from saddle plane
 nzl = 50;  % number of elements per wavelength
 neq1 = 10; % number of elements along the narrow aspect
@@ -19,13 +19,22 @@ neq2 = neq1; % number of elements along the wide aspect, set to the same value f
                         "start_phase", start_phase,...
                         "nzl", nzl,...
                         "neq1", neq1,...
-                        "neq2",neq2);
+                        "neq2",neq2,...
+                        "include_handle", true,...
+                        "handle_length", 10,...
+                        "handle_diameter", 2.5,...
+                        "transition_length", 1);
 
 % Translate
 % co = co + [15 15 0];
 
 fname = sprintf('whisker_%dL_%3.1fX',nL,k);
-stlwrite_([fname '.stl'],f,co);
+TR = triangulation(f,co);
+try
+    stlwrite(TR,[fname '.stl']);
+catch
+    stlwrite([fname '.stl'],TR);
+end
 
 % optionally write Tecplot format
 write_S3_mesh('whisker.plt',co,f,["x","y","z"],fname);

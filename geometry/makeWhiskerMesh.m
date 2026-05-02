@@ -30,6 +30,10 @@ function [co,f] = makeWhiskerMesh(options)
         options.neq2 = 5 % # of elements in wide side
         options.scale = 1
         options.start_phase = 0
+        options.include_handle = false
+        options.handle_diameter = 2.5
+        options.handle_length = 10
+        options.transition_length = 1.5
     end
 
     A = mean([options.a options.k]); % mean major
@@ -62,7 +66,7 @@ function [co,f] = makeWhiskerMesh(options)
     nez = round((lambda)/dz)*nwave; % # of elements in z
     npz = nez+1;
     dz = (Ze-Zs)/nez;
-    co = zeros(npz*npq, 3);
+    co_whisker = zeros(npz*npq, 3);
 
     for j=1:npz
         z = Zs + (j-1)*dz;
@@ -77,41 +81,60 @@ function [co,f] = makeWhiskerMesh(options)
         x(:,2) = m*sin(q);
         x(:,3) = z;
 
-        x = rotate_mesh(x,[0 1 0],alpha,[0 0 z]);
+        % x = rotate_mesh(x,[0 1 0],alpha,[0 0 z]);
 
-        co((j-1)*npq+1:j*npq,:) = x;
+        co_whisker((j-1)*npq+1:j*npq,:) = x;
     end 
 
-    % 
-    ne_tot = neq*nez*2 + neq*2;
+    co_whisker = co_whisker * options.scale;
+
+    % Optional handle uses two circular sections: base and transition ring.
+    if options.include_handle
+        r_handle = options.handle_diameter/2;
+        z_whisker_start = co_whisker(1,3);
+        z_handle_transition = z_whisker_start - options.transition_length;
+        z_handle_base = z_handle_transition - options.handle_length;
+
+        xh1 = zeros(npq,3);
+        xh1(:,1) = r_handle*cos(q);
+        xh1(:,2) = r_handle*sin(q);
+        xh1(:,3) = z_handle_base;
+        % xh1 = rotate_mesh(xh1,[0 1 0],alpha,[0 0 z_handle_base]);
+
+        xh2 = zeros(npq,3);
+        xh2(:,1) = r_handle*cos(q);
+        xh2(:,2) = r_handle*sin(q);
+        xh2(:,3) = z_handle_transition;
+        % xh2 = rotate_mesh(xh2,[0 1 0],alpha,[0 0 z_handle_transition]);
+
+        co = [xh1; xh2; co_whisker];
+    else
+        co = co_whisker;
+    end
+
+    nring = size(co,1)/neq;
+    ne_tot = neq*(nring-1)*2 + neq*2;
     f = zeros(ne_tot,3);
 
     nc = 0;
-    for i=1:nez
-    for j=1:neq-1
-        ip1 = (i-1)*neq+j;
-        ip2 = ip1+1;
-        ip3 = ip1+neq;
-        ip4 = ip3+1;
+    for i = 1:nring-1
+    for j = 1:neq
+        j2 = mod(j,neq)+1;
+        ip1 = (i-1)*neq + j;
+        ip2 = (i-1)*neq + j2;
+        ip3 = i*neq + j;
+        ip4 = i*neq + j2;
         nc = nc + 1;
-        f(nc,:)=[ip1,ip2,ip3];
-        nc = nc+1;
-        f(nc,:)=[ip2,ip4,ip3];
+        f(nc,:) = [ip1,ip2,ip3];
+        nc = nc + 1;
+        f(nc,:) = [ip2,ip4,ip3];
     end
-    ip1=ip2;
-    ip3=ip4;
-    ip2 = (i-1)*neq+1;
-    ip4 = ip2+neq;
-    nc = nc + 1;
-    f(nc,:)=[ip1,ip2,ip3];
-    nc = nc+1;
-    f(nc,:)=[ip2,ip4,ip3];
     end
 
     % caps at two ends
     % create two center points
 
-    co = [co; 0 0 co(1,3); 0 0 co(end,3)] * options.scale;
+    co = [co; 0 0 co(1,3); 0 0 co(end,3)];
 
     for i = 1:neq-1
         nc=nc+1;
@@ -124,14 +147,15 @@ function [co,f] = makeWhiskerMesh(options)
     f(nc,:) = [ip1 1 neq];
 
     %
+    last_ring_start = (nring-1)*neq + 1;
     for i = 1:neq-1
         nc=nc+1;
         ip1 = size(co,1);
-        ip2 = nez*neq+i;
-        ip3 = nez*neq+i+1;
+        ip2 = last_ring_start + i - 1;
+        ip3 = last_ring_start + i;
         f(nc,:) = [ip1 ip2 ip3];
     end
     nc = nc + 1;
-    f(nc,:) = [ip1 nez*neq+neq nez*neq+1];
+    f(nc,:) = [ip1 last_ring_start+neq-1 last_ring_start];
 
 end
