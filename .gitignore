@@ -1,5 +1,8 @@
 *.fig
 *.asv
+*.stl
+*.plt
+*.lay
 .vscode
 *.pyc
 .claude/
