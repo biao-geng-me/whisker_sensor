@@ -47,7 +47,7 @@ CMD_RESET = 0x0011
 CMD_STANDBY = 0x0022
 CMD_WAKEUP = 0x0033
 CMD_LOCK = 0x0555
-CMD_UNLOCK = 0x0655
+CMD_UNLOCK = 0x0666
 CMD_NULL = 0x0000
 
 REG_ID = 0x00
@@ -56,8 +56,8 @@ REG_CLOCK = 0x03
 REG_GAIN1 = 0x04
 
 # ADS131M04 oversampling values used by the previous code:
-# OSR setting 2 = 4000 SPS when CLKIN = 8.192 MHz.
-ADC_OSR_SETTING = 2
+# OSR field 011 (=3) -> decimation 1024 -> 4000 SPS at CLKIN = 8.192 MHz.
+ADC_OSR_SETTING = 3
 
 
 def setup_logging() -> logging.Logger:
@@ -129,9 +129,28 @@ class ADS131M04Logger:
                 "  sudo pigpiod"
             )
 
-        self.pi.hardware_clock(cfg.GPIO_CLKIN, cfg.ADC_CLOCK_HZ)
-        log.info("Started ADC CLKIN on GPIO%d at %.3f MHz",
-                 cfg.GPIO_CLKIN, cfg.ADC_CLOCK_HZ / 1e6)
+        rc = self.pi.hardware_clock(cfg.GPIO_CLKIN, cfg.ADC_CLOCK_HZ)
+        if rc != 0:
+            raise RuntimeError(
+                f"pigpio.hardware_clock(GPIO{cfg.GPIO_CLKIN}, {cfg.ADC_CLOCK_HZ} Hz) "
+                f"failed with rc={rc}. Without CLKIN the ADS131M04 never produces "
+                f"conversions, so DRDY will never assert."
+            )
+
+        # Verify GPIO actually entered an ALT-function (clock-output) mode.
+        # pigpio mode codes: 0=INPUT, 1=OUTPUT, 2=ALT5, 3=ALT4, 4=ALT0, 5=ALT1, 6=ALT2, 7=ALT3.
+        # On the Pi, GPIO4 must be in ALT0 for the GPCLK0 output to drive the pin.
+        mode = self.pi.get_mode(cfg.GPIO_CLKIN)
+        mode_names = {0: "INPUT", 1: "OUTPUT", 2: "ALT5", 3: "ALT4",
+                      4: "ALT0", 5: "ALT1", 6: "ALT2", 7: "ALT3"}
+        log.info("Started ADC CLKIN on GPIO%d at %.3f MHz (pigpio mode=%s)",
+                 cfg.GPIO_CLKIN, cfg.ADC_CLOCK_HZ / 1e6,
+                 mode_names.get(mode, f"unknown({mode})"))
+        if mode != 4:
+            log.warning("GPIO%d is in mode %s, not ALT0 — the clock output is NOT being "
+                        "driven onto the pin. Check that GPIO%d is not claimed by another "
+                        "overlay (e.g. dtoverlay=w1-gpio in /boot/firmware/config.txt).",
+                        cfg.GPIO_CLKIN, mode_names.get(mode, str(mode)), cfg.GPIO_CLKIN)
 
     def stop_pigpio_clock(self) -> None:
         if self.pi is not None and self.pi.connected:
@@ -187,7 +206,8 @@ class ADS131M04Logger:
 
     def setup_all(self) -> None:
         self.start_pigpio_clock()
-        time.sleep(0.1)
+        # Give CLKIN time to stabilise before the ADC is poked.
+        time.sleep(0.25)
         self.setup_gpio()
         self.open_spi()
         self.init_adc()
@@ -218,20 +238,20 @@ class ADS131M04Logger:
     def read_register(self, reg: int) -> int:
         # ADS131M04 commands are 16-bit command + 8-bit padding in a 24-bit word.
         # Use the same two-frame read style that worked previously.
-        cmd = 0x2000 | ((reg & 0x1F) << 7)
+        cmd = 0xA000 | ((reg & 0x3F) << 7)
         payload1 = [(cmd >> 8) & 0xFF, cmd & 0xFF, 0x00] + [0x00] * (cfg.FRAME_BYTES - 3)
         self.spi_transfer(payload1)
 
         payload2 = [0x00] * cfg.FRAME_BYTES
         response = self.spi_transfer(payload2)
 
-        # Register response appears in the first channel/data word position in the existing setup.
-        if len(response) >= 5:
-            return (response[3] << 8) | response[4]
+        # Register response appears in the first output word of the following frame.
+        if len(response) >= 2:
+            return (response[0] << 8) | response[1]
         return 0
 
     def write_register(self, reg: int, value: int) -> None:
-        cmd = 0x6000 | ((reg & 0x1F) << 7)
+        cmd = 0x6000 | ((reg & 0x3F) << 7)
         payload = [
             (cmd >> 8) & 0xFF, cmd & 0xFF, 0x00,
             (value >> 8) & 0xFF, value & 0xFF, 0x00,
@@ -280,14 +300,80 @@ class ADS131M04Logger:
 
         return True
 
+    def read_status_word(self) -> int:
+        resp = self.send_command(CMD_NULL)
+        if len(resp) >= 2:
+            return (resp[0] << 8) | resp[1]
+        return 0
+
+    def configure_adc_registers(self) -> None:
+        self.send_command(CMD_UNLOCK)
+
+        # CLOCK register: enable all 4 channels (bits 11..8), OSR field (bits 4..2),
+        # PWR=10 high-resolution (bits 1..0). 0x0F0E with OSR=011 -> 4000 SPS @ 8.192 MHz.
+        ch_en_mask = 0b1111 << 8
+        osr_field = (ADC_OSR_SETTING & 0b111) << 2
+        pwr_hr = 0b10
+        clock_val = ch_en_mask | osr_field | pwr_hr
+        self.write_register(REG_CLOCK, clock_val)
+
+        # MODE: preserve reset default (WLENGTH=01 -> 24-bit words, TIMEOUT enabled).
+        self.write_register(REG_MODE, 0x0510)
+
+        # GAIN1: all gains x1
+        self.write_register(REG_GAIN1, 0x0000)
+
+        self.send_command(CMD_LOCK)
+
     def init_adc(self) -> None:
         """Initialize ADC without aborting on unreliable ID read."""
         log.info("Initializing ADS131M04...")
 
-        # Wake SPI/ADC framing
-        for _ in range(3):
-            self.send_command(CMD_NULL)
-            time.sleep(0.01)
+        status_words = []
+        if cfg.ADC_RESET_ON_INIT:
+            # Issue RESET first thing so the chip is in a known state regardless of any
+            # leftover SPI framing from a previous run.
+            self.send_command(CMD_RESET)
+            time.sleep(0.05)
+
+            # The first NULL frames after reset are a cheap probe for whether SPI is alive,
+            # but on this PCB the response can be unstable and DRDY may stay high after RESET.
+            for _ in range(3):
+                status = self.read_status_word()
+                status_words.append(status)
+                time.sleep(0.005)
+            status_text = ", ".join(f"0x{word:04X}" for word in status_words)
+            log.info("Post-RESET NULL status probes: %s", status_text)
+            if any(word in (0x0000, 0xFFFF) for word in status_words):
+                log.warning("At least one post-RESET status probe was 0x0000/0xFFFF; check CS, MISO, power, and CLKIN wiring.")
+
+            if not self.wait_drdy(timeout_s=0.25):
+                raise RuntimeError(
+                    f"DRDY did not assert after CMD_RESET. Current DRDY={GPIO.input(cfg.GPIO_DRDY)}, "
+                    f"post-RESET status probes={status_text}. "
+                    f"This board is known to wedge after SPI reset; power-cycle the ADC and set "
+                    f"ADC_RESET_ON_INIT = False for normal logging."
+                )
+
+            log.info("DRDY asserted after CMD_RESET.")
+        else:
+            log.info("Skipping CMD_RESET on this PCB; using WAKEUP/no-reset init path.")
+            self.send_command(CMD_WAKEUP)
+            time.sleep(0.02)
+            for _ in range(3):
+                status = self.read_status_word()
+                status_words.append(status)
+                time.sleep(0.005)
+            status_text = ", ".join(f"0x{word:04X}" for word in status_words)
+            log.info("Initial NULL status probes without RESET: %s", status_text)
+            if GPIO.input(cfg.GPIO_DRDY):
+                log.warning(
+                    "DRDY is still high during no-reset startup (status probes=%s). "
+                    "Continuing with register configuration and letting the first frame read decide whether conversions are flowing.",
+                    status_text,
+                )
+            else:
+                log.info("DRDY already low on no-reset startup.")
 
         dev_id = self.read_register(REG_ID)
         if dev_id == 0 or dev_id == 0xFFFF:
@@ -296,26 +382,7 @@ class ADS131M04Logger:
         else:
             log.info("ADS131M04 ID read: %s", hex(dev_id))
 
-        self.send_command(CMD_RESET)
-        time.sleep(0.005)
-
-        if not self.wait_drdy(timeout_s=0.5):
-            drdy = GPIO.input(cfg.GPIO_DRDY)
-            raise RuntimeError(f"DRDY did not assert after RESET. Current DRDY={drdy}")
-
-        self.send_command(CMD_UNLOCK)
-
-        # CLOCK register: enable all 4 channels, OSR setting = 2 -> 4000 SPS at 8.192 MHz.
-        clock_val = (0b1111 << 3) | ADC_OSR_SETTING
-        self.write_register(REG_CLOCK, clock_val)
-
-        # MODE: default 24-bit words
-        self.write_register(REG_MODE, 0x0000)
-
-        # GAIN1: all gains x1
-        self.write_register(REG_GAIN1, 0x0000)
-
-        self.send_command(CMD_LOCK)
+        self.configure_adc_registers()
         log.info("ADC initialized: OSR setting=%d, nominal SPS=4000", ADC_OSR_SETTING)
 
     # -------------------------

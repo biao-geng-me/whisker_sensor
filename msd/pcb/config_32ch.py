@@ -40,6 +40,10 @@ SPI_SPEED_HZ = 4_000_000
 # External master clock supplied to ADS131M04 CLKIN
 ADC_CLOCK_HZ = 8_192_000
 
+# On this PCB, sending CMD_RESET can leave DRDY stuck high until the ADC is power-cycled.
+# Keep reset-based init available for bench diagnostics, but do not use it in normal logging.
+ADC_RESET_ON_INIT = False
+
 # MUX address pins: bit0, bit1, bit2
 MUX1_PINS = [17, 22, 23]  # SELA_1, SELB_1, SELC_1
 MUX2_PINS = [24, 25, 26]  # SELA_2, SELB_2, SELC_2
