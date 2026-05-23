@@ -137,7 +137,11 @@ classdef wavi < handle
             obj.s = [];
             obj.is_standalone = is_standalone;
             if isempty(ui_parent)
-                obj.UIFigure = uifigure('Name','Wavi','Position',[600 400 350  250],'Resize','off','WindowStyle','modal');
+                % WindowStyle='alwaysontop' keeps wavi visible above other MATLAB windows
+                % without blocking input to them (which 'modal' does — clicks on the
+                % command window and plot figures get ignored while a modal uifigure
+                % is open). Use 'normal' if you don't want the always-on-top behavior.
+                obj.UIFigure = uifigure('Name','Wavi','Position',[600 400 350  250],'Resize','off','WindowStyle','alwaysontop');
                 obj.ui_parent = obj.UIFigure;
             else
                 obj.ui_parent = ui_parent;
@@ -210,7 +214,7 @@ classdef wavi < handle
             obj.baudrate = options.baudrate;
             
             obj.nch = obj.nsensor*2;
-            obj.nbytes_per_sample = obj.nch * 4 + 4 + 1; % nch float32 + 1 float32 marker + 1 char ('\n')
+            obj.nbytes_per_sample = obj.nch * 4 + 4 + 2; % nch float32 + 1 float32 marker + 2 chars ('\r\n' from Serial.println())
 
             if isempty(options.ch_map)
                 obj.ch_map = 1:obj.nch;
@@ -656,7 +660,11 @@ classdef wavi < handle
             obj.reset_data_buffers();
 
             % period = floor(obj.ns_read / obj.Fs*1000)/1000/3; % seconds between timer callbacks
-            period = 0.005; % use a fast rate since it's non-blocking
+            % Aim for ~2x the sample-batch arrival rate. Going much faster wastes
+            % main-thread time on no-op polls, which is harmless over serialport
+            % but starves the UI over tcpclient (each read/readline has real
+            % per-call overhead via Java DataInputStream).
+            period = max(0.005, 0.5 * obj.ns_read / obj.Fs);
             if ~isempty(obj.readTimer) && isvalid(obj.readTimer)
                 stop(obj.readTimer);
                 delete(obj.readTimer);
@@ -856,14 +864,20 @@ classdef wavi < handle
             obj.darr(1:end-ns_read) = obj.darr(ns_read+1:end);
             buff = zeros(ns_read,obj.nch);
 
-            % read serial port
-            % tic
-            for j=1:ns_read
-                buff(j,:) = read(obj.s,obj.nch,'single');
-                readline(obj.s);
-                read(obj.s,1,'single');
+            % Bulk read all bytes for ns_read samples in one transport call,
+            % then parse locally. Per-call overhead in tcpclient (each read or
+            % readline goes through Java DataInputStream) is large enough that
+            % the original 3*ns_read calls per tick starve MATLAB's main UI
+            % thread. serialport is fast enough either way, so the bulk path
+            % is unconditional.
+            sample_bytes = obj.nbytes_per_sample;     % nch*4 floats + '\r\n' + marker
+            float_bytes  = obj.nch * 4;
+            raw = read(obj.s, ns_read * sample_bytes, 'uint8');
+            raw = uint8(raw(:));
+            for j = 1:ns_read
+                base = (j-1) * sample_bytes;
+                buff(j,:) = typecast(raw(base+1 : base+float_bytes), 'single');
             end
-            % t_read = toc;
             
             % put new data in
             buff = buff(:,obj.ch_map);
@@ -982,14 +996,21 @@ classdef wavi < handle
         end
 
         function update_visuals(obj)
-            
+
             obj.line_fig.update(obj.darr,obj.sig,obj.V0,obj.scale)
 
             obj.do_fft();
             obj.fft_fig.update(obj.fft_map_3d);
             obj.spec_fig.update(obj.spec_data);
 
-            % drawnow limitrate
+            % Cap rendering to ~20 fps and let MATLAB process pending UI
+            % events (mouse, keyboard, window moves). Without this, the
+            % timer callback runs back-to-back with no chance for the main
+            % thread to service the legacy figure windows or the command
+            % window. wavi's own UI is a uifigure (separate rendering) so
+            % it stays responsive either way, which is why only the figures
+            % and command window freeze.
+            drawnow limitrate
         end
 
         function init_datalog_file(obj)
