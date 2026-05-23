@@ -123,6 +123,10 @@ classdef wavi < handle
                 % it should be done on >=6 new samples, otherwise the data will eventually become constants
                 options.baudrate = 2000000;
                 options.fft_avg_window = 5; % seconds for moving average in fft amplitude bar plot
+                % transport selection: 'serial' (direct USB to Arduino) or 'tcp' (through rpi/daq_bridge.py)
+                options.transport (1,:) char {mustBeMember(options.transport,{'serial','tcp'})} = 'serial';
+                options.tcp_host (1,:) char = '';
+                options.tcp_port (1,1) double {mustBeInteger,mustBePositive} = 5555;
             end
 
             % if isempty(s)
@@ -259,8 +263,13 @@ classdef wavi < handle
             obj.SerialPanel = uipanel(obj.gl,'Title','Sensor array');
             obj.SerialPanel.Layout.Row = 1;
             obj.SerialPanel.Layout.Column = 1;
-            obj.SerialApp = SerialPortApp(obj.SerialPanel);
-            obj.SerialApp.baudrate = obj.baudrate;
+            if strcmp(options.transport,'tcp')
+                obj.SerialApp = TcpClientApp(obj.SerialPanel);
+                obj.SerialApp.setEndpoint(options.tcp_host, options.tcp_port);
+            else
+                obj.SerialApp = SerialPortApp(obj.SerialPanel);
+                obj.SerialApp.baudrate = obj.baudrate;
+            end
             addlistener(obj.SerialApp,'SerialConnected',@(src,evt) obj.onSerialConnected(src,evt));
             % listen for serial disconnect to cleanup resources
             try
