@@ -63,51 +63,52 @@ The Pi 4B is too weak for VS Code Remote-SSH agent work, so we edit on the PC an
 
 Both push `rpi/` and the Python parts of `hx711_array/` (excluding `*.ino`) as subdirectories of `~/whisker_sensor/` on the Pi (override with `--dest` / `-Dest`). The `scp` path re-copies everything every time; rsync only sends diffs. Either is fast enough for these small folders.
 
-## Phase 2 — wifi hotspot mode (next)
+## Phase 2 — wifi hotspot mode
 
-Goal: untether the field setup from a router. Pi becomes its own wifi AP; the PC/laptop joins the Pi's SSID and reaches the bridge directly. No code changes — `daq_bridge.py` already binds `0.0.0.0`, so it accepts clients from any interface. Phase 2 is OS-level config only.
+Goal: untether the field setup from any router. The Pi becomes its own wifi AP; the PC/laptop joins the Pi's SSID and reaches the bridge directly. No code change to `daq_bridge.py` — it already binds `0.0.0.0`, so it accepts clients from any interface. Phase 2 is OS-level config only, driven by two small scripts.
 
 ### The Pi 4B wifi constraint
 
 The built-in BCM4345 chip can do AP mode, but **AP + STA (station/client) on the same chip is unreliable**. Two practical layouts:
 
-- **Mode switch** (simpler, recommended first): toggle the Pi between "client" (joins an existing wifi for internet/dev) and "hotspot" (broadcasts its own SSID, no internet). A script under [`scripts/`](scripts/) flips between two `nmcli` connection profiles. Keep using ethernet for code sync during dev.
-- **USB wifi dongle** (more flexible): `wlan0` (built-in) is permanently the AP; the dongle is your station for internet. ~$15. Worth it once mode-switching gets annoying.
+- **Mode switch** (recommended first): toggle the Pi between "client" (joins an existing wifi for internet/dev) and "hotspot" (broadcasts its own SSID, no internet). `net_mode.sh` does this in one command. Keep using ethernet for code sync during dev.
+- **USB wifi dongle** (more flexible): `wlan0` (built-in) is permanently the AP; the dongle becomes a second interface (`wlan1`) running as a station for internet. ~$15. Worth it once mode-switching gets annoying.
 
-### Hotspot recipe (Raspberry Pi OS Bookworm and later — NetworkManager)
+### Setup (one-time, requires NetworkManager)
+
+Raspberry Pi OS Bookworm (Oct 2023) and later use NetworkManager by default — nothing to install. On older releases, the [setup script](scripts/setup_hotspot.sh) prints install instructions when it can't find `nmcli`.
 
 ```bash
-sudo nmcli con add type wifi ifname wlan0 con-name whisker-ap ssid 'whisker-ap'
-sudo nmcli con modify whisker-ap \
-    802-11-wireless.mode ap \
-    802-11-wireless.band bg \
-    ipv4.method shared \
-    wifi-sec.key-mgmt wpa-psk \
-    wifi-sec.psk '<password>'
-sudo nmcli con up whisker-ap
+# Default SSID is whisker-ap; pass another as $1 if you want a different name.
+sudo ./rpi/scripts/setup_hotspot.sh             # prompts for password
+# or non-interactive:
+sudo WIFI_PSK='<password>' ./rpi/scripts/setup_hotspot.sh
 ```
 
-`ipv4.method shared` makes NetworkManager run dnsmasq for DHCP automatically. Default AP gateway is **`10.42.0.1`** — that's the address the MATLAB client uses in field mode:
+This creates a NetworkManager connection profile for the AP. `ipv4.method shared` makes NM run dnsmasq for DHCP automatically. The AP gateway IP defaults to **`10.42.0.1`** — that's what MATLAB connects to in field mode.
+
+### Switching modes
+
+```bash
+sudo ./rpi/scripts/net_mode.sh hotspot   # bring up AP, drop internet
+sudo ./rpi/scripts/net_mode.sh client    # bring AP down, NM rejoins known wifi
+./rpi/scripts/net_mode.sh status         # show current wlan0 state and IP
+```
+
+In hotspot mode, MATLAB connects with:
 
 ```matlab
 wavi(transport='tcp', tcp_host='10.42.0.1', tcp_port=5555, nsensor=9)
 ```
 
-To switch back to client mode:
-
-```bash
-sudo nmcli con down whisker-ap
-sudo nmcli con up <your-home-wifi-profile-name>
-```
-
-A `rpi/scripts/net_mode.sh {client|hotspot}` wrapper will land alongside `sync.sh` to make this one command. (Older Pi OS releases — Bullseye/Buster — would need a hand-rolled `hostapd.conf` + `dnsmasq.conf` + `dhcpcd.conf`; upgrade to Bookworm if you can.)
+For dev, **keep ethernet plugged in** while you toggle hotspot on — sync and SSH continue to work over wired even when wlan0 is in AP mode and has no internet.
 
 ### Expected range (Pi 4B built-in antenna)
 
 Outdoors, line-of-sight, no obstructions:
 
-- **2.4 GHz** (`band bg`): 50–100 m practical, up to ~150 m in ideal conditions.
-- **5 GHz** (`band a`): 30–50 m, faster throughput close in.
+- **2.4 GHz** (`band bg`, what the setup script uses): 50–100 m practical, up to ~150 m in ideal conditions.
+- **5 GHz** (`band a`, edit the profile if you want it): 30–50 m, faster throughput close in.
 
 Add walls or bodies and these drop fast (often to 10–20 m through one wall). A USB dongle with an external antenna can easily double or triple range.
 
