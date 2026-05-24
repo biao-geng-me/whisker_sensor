@@ -501,10 +501,16 @@ class MainWindow(QMainWindow):
             # Only feed the populated tail to the line view — passing the
             # NaN-prefixed full buffer makes pyqtgraph gap everything after
             # the auto-range has already locked onto the full t-axis.
+            # Pin the X range to a fixed-width window ending at latest_t so
+            # the time axis doesn't shrink while the buffer is filling.
             n_plot = self._samples_since_clear
             if n_plot > 0:
                 self._line_view.update_view(
-                    t_axis[-n_plot:], self._sig[-n_plot:], self._v0, self._scale
+                    t_axis[-n_plot:],
+                    self._sig[-n_plot:],
+                    self._v0,
+                    self._scale,
+                    x_range=(latest_t - self._t_buffer_s, latest_t),
                 )
 
             # FFT / spectrogram: update every batch (mirrors n_update=1 default).

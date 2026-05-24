@@ -47,6 +47,7 @@ class LineView(QMainWindow):
         sig: np.ndarray,
         v0: np.ndarray,
         scale: float,
+        x_range: tuple[float, float] | None = None,
     ) -> None:
         """Refresh all curves with new data.
 
@@ -56,6 +57,10 @@ class LineView(QMainWindow):
         sig       : (N, nch) float — signal block.
         v0        : (nch,) float — per-channel baseline (subtracted).
         scale     : float — amplitude scale.
+        x_range   : optional explicit (x_min, x_max). When supplied, the plot's
+                    X range is pinned to it (no auto-range). Lets the caller
+                    keep a fixed-width scrolling window even when ``t_seconds``
+                    is shorter than the window during buffer fill-up.
         """
         if sig.ndim != 2 or sig.shape[1] != self._nch:
             return
@@ -66,3 +71,6 @@ class LineView(QMainWindow):
             sensor_idx = c // 2
             y = (sig[:, c] - v0[c]) * float(scale) + float(sensor_idx)
             self._curves[c].setData(t_seconds, y)
+
+        if x_range is not None:
+            self._plot.setXRange(x_range[0], x_range[1], padding=0)
