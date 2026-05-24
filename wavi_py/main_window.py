@@ -117,6 +117,11 @@ class MainWindow(QMainWindow):
         self._last_seq = 0
         self._samples_since_spec_update = 0
         self._last_v0_version = 0
+        # Track how many real samples are sitting in `_sig` since the last
+        # connect/reset. Used to feed only the populated portion to the line
+        # view; otherwise pyqtgraph's auto-range latches onto the full t-axis
+        # the moment any sample lands and gaps the NaN-filled leading slots.
+        self._samples_since_clear = 0
 
         # recording state
         self._outpath: Path = outpath if outpath else _default_outpath()
@@ -314,6 +319,7 @@ class MainWindow(QMainWindow):
         self._client = client
         self._last_seq = 0
         self._samples_since_spec_update = 0
+        self._samples_since_clear = 0
         self._sig.fill(np.nan)
         self._spec_data.fill(0)
         self._fft_map.fill(0)
@@ -382,6 +388,7 @@ class MainWindow(QMainWindow):
         self._spec_data.fill(0)
         self._fft_map.fill(0)
         self._samples_since_spec_update = 0
+        self._samples_since_clear = 0
         self._path_label.setText("Resetting V0...")
 
     def _on_auto_stop_changed(self, v: float) -> None:
@@ -477,6 +484,7 @@ class MainWindow(QMainWindow):
         else:
             self._sig[:-n_new] = self._sig[n_new:]
             self._sig[-n_new:] = cleaned
+        self._samples_since_clear = min(self._samples_since_clear + n_new, self._ns_tot)
 
         # Recording path: write the cleaned samples with their wall-clock timestamps.
         if self._is_recording and self._dat_writer is not None:
@@ -490,7 +498,14 @@ class MainWindow(QMainWindow):
 
         # Plot updates (skipped while paused, but data still buffered + recorded).
         if not self._is_paused:
-            self._line_view.update_view(t_axis, self._sig, self._v0, self._scale)
+            # Only feed the populated tail to the line view — passing the
+            # NaN-prefixed full buffer makes pyqtgraph gap everything after
+            # the auto-range has already locked onto the full t-axis.
+            n_plot = self._samples_since_clear
+            if n_plot > 0:
+                self._line_view.update_view(
+                    t_axis[-n_plot:], self._sig[-n_plot:], self._v0, self._scale
+                )
 
             # FFT / spectrogram: update every batch (mirrors n_update=1 default).
             self._samples_since_spec_update += n_new
