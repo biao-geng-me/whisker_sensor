@@ -4,6 +4,7 @@
 *.plt
 *.lay
 .vscode
+.venv
 *.pyc
 .claude/
 serialport_received.dat

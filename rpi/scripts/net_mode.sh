@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Toggle the Pi between wifi modes:
-#   hotspot  — bring up the AP profile (Pi broadcasts its own SSID, no internet)
-#   client   — bring AP down; NetworkManager auto-reconnects to known wifi
-#   status   — print current wlan0 state and any active wifi connection
+#   hotspot  - bring up the AP profile (Pi broadcasts its own SSID, no internet)
+#   client   - bring AP down; NetworkManager auto-reconnects to known wifi
+#   status   - print current wlan0 state and any active wifi connection
 #
 # Usage:
 #   sudo ./net_mode.sh hotspot [SSID]
@@ -17,6 +17,11 @@ MODE="${1:-status}"
 CON_NAME="${2:-whisker-ap}"
 IFACE='wlan0'
 
+SUDO=""
+if [ "$(id -u)" -ne 0 ]; then
+    SUDO="sudo"
+fi
+
 if ! command -v nmcli >/dev/null 2>&1; then
     echo "Error: nmcli not found. See setup_hotspot.sh for NetworkManager install notes." >&2
     exit 1
@@ -29,7 +34,7 @@ case "$MODE" in
             exit 1
         fi
         echo "Bringing up hotspot '$CON_NAME' on $IFACE..."
-        sudo nmcli connection up "$CON_NAME"
+        $SUDO nmcli connection up "$CON_NAME"
         echo
         echo "Hotspot active. Clients connect to SSID '$CON_NAME' and reach the Pi at:"
         nmcli -g IP4.ADDRESS device show "$IFACE" | head -n1 || true
@@ -39,7 +44,7 @@ case "$MODE" in
     client)
         if nmcli -t -f NAME,STATE connection show --active | grep -qx "$CON_NAME:activated"; then
             echo "Bringing down hotspot '$CON_NAME'..."
-            sudo nmcli connection down "$CON_NAME"
+            $SUDO nmcli connection down "$CON_NAME"
         else
             echo "Hotspot '$CON_NAME' was not active."
         fi

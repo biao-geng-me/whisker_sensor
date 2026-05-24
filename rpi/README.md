@@ -103,6 +103,44 @@ wavi(transport='tcp', tcp_host='10.42.0.1', tcp_port=5555, nsensor=9)
 
 For dev, **keep ethernet plugged in** while you toggle hotspot on — sync and SSH continue to work over wired even when wlan0 is in AP mode and has no internet.
 
+
+If you want the Pi to boot into hotspot mode automatically, add a systemd unit like this on the Pi:
+
+```ini
+# /etc/systemd/system/whisker-hotspot.service
+[Unit]
+Description=Enable whisker hotspot at boot
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash /home/pi/whisker_sensor/rpi/scripts/net_mode.sh hotspot
+ExecStop=/bin/bash /home/pi/whisker_sensor/rpi/scripts/net_mode.sh client
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Then enable it:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now whisker-hotspot.service
+sudo systemctl status whisker-hotspot.service
+```
+
+To stop using boot-time hotspot mode and go back to normal wifi-client behavior:
+
+```bash
+sudo systemctl disable --now whisker-hotspot.service
+sudo ./rpi/scripts/net_mode.sh client
+./rpi/scripts/net_mode.sh status
+```
+
+`disable --now` stops the service immediately and prevents it from being started again on the next boot. The explicit `client` call brings the AP down right away so NetworkManager can reconnect `wlan0` to a known wifi network.
+
 ### Expected range (Pi 4B built-in antenna)
 
 Outdoors, line-of-sight, no obstructions:
