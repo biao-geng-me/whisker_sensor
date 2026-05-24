@@ -37,7 +37,7 @@ class LineView(QMainWindow):
         self._curves: list[pg.PlotDataItem] = []
         for c in range(self._nch):
             color = _RED if (c % 2) == 0 else _BLUE
-            pen = pg.mkPen(color=color, width=1)
+            pen = pg.mkPen(color=color, width=4)
             curve = self._plot.plot(pen=pen)
             self._curves.append(curve)
 

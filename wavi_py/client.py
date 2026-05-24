@@ -144,6 +144,18 @@ class WaviClient:
             return False
         return self._reader.wait_ready(timeout=timeout)
 
+    def reset(self) -> bool:
+        """Ask the reader to recompute V0 without dropping the connection.
+
+        Returns True if signaled. The new V0 lands in ``bus.get_metadata()``
+        with an incremented ``v0_version`` shortly after (one batch + ~Fs/4
+        samples of latency).
+        """
+        if self._reader is None:
+            return False
+        self._reader.request_reset()
+        return True
+
     # ----- record-indicator passthrough
 
     def send_record_start(self) -> bool:

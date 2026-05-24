@@ -116,6 +116,7 @@ class MainWindow(QMainWindow):
         # subscriber cursor + counters
         self._last_seq = 0
         self._samples_since_spec_update = 0
+        self._last_v0_version = 0
 
         # recording state
         self._outpath: Path = outpath if outpath else _default_outpath()
@@ -218,11 +219,17 @@ class MainWindow(QMainWindow):
         self._pause_btn.toggled.connect(self._on_pause_toggled)
         self._pause_btn.setEnabled(False)
 
+        self._reset_btn = QPushButton("Reset")
+        self._reset_btn.setToolTip("Clear the plots and recompute the V0 offset")
+        self._reset_btn.clicked.connect(self._on_reset_clicked)
+        self._reset_btn.setEnabled(False)
+
         h.addWidget(self._toggle_line)
         h.addWidget(self._toggle_fft)
         h.addWidget(self._toggle_spec)
         h.addStretch(1)
         h.addWidget(self._pause_btn)
+        h.addWidget(self._reset_btn)
         return box
 
     def _build_record_row(self) -> QGroupBox:
@@ -310,9 +317,15 @@ class MainWindow(QMainWindow):
         self._sig.fill(np.nan)
         self._spec_data.fill(0)
         self._fft_map.fill(0)
+        # Force the metadata-latching path in _on_tick to re-run; otherwise
+        # the new bus's V0 is ignored and FFT/plots use stale offsets.
+        self._v0 = np.zeros(self._nch, dtype=np.float32)
+        self._t0_unix = None
+        self._last_v0_version = 0
 
         self._connect_btn.setText("Disconnect")
         self._pause_btn.setEnabled(True)
+        self._reset_btn.setEnabled(True)
         self._record_btn.setEnabled(True)
         self._set_transport_inputs_enabled(False)
         self._path_label.setText(f"Connected to {client.endpoint_str} — output dir: {self._outpath}")
@@ -329,6 +342,7 @@ class MainWindow(QMainWindow):
         self._connect_btn.setText("Connect")
         self._pause_btn.setEnabled(False)
         self._pause_btn.setChecked(False)
+        self._reset_btn.setEnabled(False)
         self._record_btn.setEnabled(False)
         self._set_transport_inputs_enabled(True)
         self._path_label.setText(f"Disconnected. Output dir: {self._outpath}")
@@ -355,6 +369,20 @@ class MainWindow(QMainWindow):
     def _on_pause_toggled(self, on: bool) -> None:
         self._is_paused = on
         self._pause_btn.setText("Resume" if on else "Pause")
+
+    def _on_reset_clicked(self) -> None:
+        if self._client is None or not self._client.is_running:
+            return
+        self._client.reset()  # DAQ thread will recompute V0 on its next tick
+        # Skip whatever is already buffered on the bus — those samples were
+        # collected under the old V0 and would briefly render with a jump
+        # before the new V0 lands.
+        self._last_seq = self._client.bus.total_published
+        self._sig.fill(np.nan)
+        self._spec_data.fill(0)
+        self._fft_map.fill(0)
+        self._samples_since_spec_update = 0
+        self._path_label.setText("Resetting V0...")
 
     def _on_auto_stop_changed(self, v: float) -> None:
         if 0 < v < MIN_REC_LEN_S:
@@ -422,12 +450,18 @@ class MainWindow(QMainWindow):
         n_new_published = new_seq - self._last_seq
         self._last_seq = new_seq
 
-        # First time we see metadata, latch V0 and stream start.
-        if self._t0_unix is None:
-            meta = self._client.bus.get_metadata()
-            if "V0" in meta:
-                self._v0 = np.asarray(meta["V0"], dtype=np.float32)
-            self._t0_unix = float(meta.get("t0_unix", datetime.now().timestamp()))
+        # Sync bus metadata.
+        #   t0_unix latches once per connection.
+        #   V0 can refresh on Reset; v0_version lets us cheaply detect that.
+        meta = self._client.bus.get_metadata()
+        if self._t0_unix is None and "t0_unix" in meta:
+            self._t0_unix = float(meta["t0_unix"])
+        v0_version = int(meta.get("v0_version", 0))
+        if v0_version != self._last_v0_version and "V0" in meta:
+            self._v0 = np.asarray(meta["V0"], dtype=np.float32)
+            self._last_v0_version = v0_version
+            if v0_version > 1:
+                self._path_label.setText(f"Reset complete (V0 v{v0_version}).")
 
         n_new = samples.shape[0]
         if n_new_published > n_new:
