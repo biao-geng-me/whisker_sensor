@@ -2,9 +2,18 @@
 
 The Pi sits between the Arduino (USB serial) and one or more PC clients (TCP). Conceptually it's a `tee` for the Arduino's byte stream: data flows out to whoever's listening, and the Pi can grow extra capabilities (parsing, recording, multi-client) on a separate branch later without touching the data path.
 
-## Phase 1 — transparent byte pump ✅ done
+## Phase 1 — transparent byte pump ✅ done (multi-client)
 
-[`daq_bridge.py`](daq_bridge.py) opens the Arduino serial port once and forwards bytes verbatim to a single TCP client. No parsing, no recording on the Pi. The MATLAB client ([wavi/wavi.m](../wavi/wavi.m) with `transport='tcp'`) handles framing and records `.dat` files locally exactly as it does over a direct serial link.
+[`daq_bridge.py`](daq_bridge.py) opens the Arduino serial port once and broadcasts the byte stream verbatim to every connected TCP client. No parsing, no recording on the Pi. Each client also gets its own back-channel — bytes from any client (`N=<n>\n`, `S`, `E`) are forwarded to the Arduino through a single serialized write lock.
+
+Multi-client notes:
+
+- The Arduino emits one stream; every client gets the same bytes at the same time. A single background fan-out thread reads from serial and pushes each chunk into per-client send queues.
+- Each client has a bounded send queue (default 1024 chunks, ~16 s of buffering at default rates). If a client falls so far behind that its queue fills, it's disconnected; other clients are unaffected.
+- The Arduino's `loop()` only acts on `S` / `E` bytes and ignores everything else, so two clients can race on the record-indicator pin. Either coordinate at the application level or only let one client send control bytes.
+- A new client joining mid-stream sees the Arduino bytes from wherever the byte stream is *right now*; the client's marker-search alignment (in `wavi.m` / `wavi_py`) finds the next frame boundary on its own.
+
+The MATLAB and Python clients ([wavi/wavi.m](../wavi/wavi.m) and [wavi_py/](../wavi_py/)) handle framing and record `.dat` files locally exactly as they do over a direct serial link.
 
 ### Setup (once per fresh Pi)
 
@@ -150,14 +159,13 @@ Outdoors, line-of-sight, no obstructions:
 
 Add walls or bodies and these drop fast (often to 10–20 m through one wall). A USB dongle with an external antenna can easily double or triple range.
 
-## Phase 3 — Pi-side parsing, recording, multi-client (deferred)
+## Phase 3 — Pi-side parsing and recording (deferred)
 
-Promote `daq_bridge.py` to a `daq_server.py` with a parsed source/server/recorder split: Pi owns frame parsing, multi-client broadcast, and `.dat` recording. The on-the-wire protocol will follow [gantry_control/python/connection_manager.py](../gantry_control/python/connection_manager.py) style — big-endian, length-prefixed messages, single-byte command headers — with the MATLAB-side client mirroring [gantry_control/matlab/NetworkClient.m](../gantry_control/matlab/NetworkClient.m) (raw `java.net.Socket` + `TcpNoDelay`).
+Multi-client landed as part of Phase 1's transparent fan-out (see above), so the remaining Phase 3 work is Pi-side parsing + recording: promote `daq_bridge.py` to a `daq_server.py` that parses Arduino frames, owns `.dat` recording, and exposes a framed protocol. The wire format would follow [gantry_control/python/connection_manager.py](../gantry_control/python/connection_manager.py) style — big-endian, length-prefixed messages, single-byte command headers — with the MATLAB-side client mirroring [gantry_control/matlab/NetworkClient.m](../gantry_control/matlab/NetworkClient.m) (raw `java.net.Socket` + `TcpNoDelay`).
 
-Worth doing when **any** of these is true:
+Worth doing when **either** of these is true:
 
 - A client crash mid-recording costs data (Pi-side recording survives client disconnects).
-- Two consumers need the same stream simultaneously (live viz + a separate logger / classifier).
-- A second data source (different sensor, mock generator) needs to join the same protocol.
+- A second data source (different sensor, mock generator) needs to join the same protocol with consistent framing.
 
-Until then, Phase 1's tee is enough.
+Until then, Phase 1's tee is enough — multiple clients already share the raw stream, and any of them can record locally on their own machine.
