@@ -108,8 +108,10 @@ function [fh_line, fh_fft, pp_max] = datalog2image(path,name,opt)
     end
     
     if opt.save_plots
-        saveas(fh_fft,fullfile(path,['fft_' name '.png']));
-        saveas(fh_line,fullfile(path,['his_' name '.png']));
+        % saveas(fh_fft,fullfile(path,['fft_' name '.png']));
+        exportgraphics(fh_fft, fullfile(path, ['fft_' name '.png']), 'Resolution', 100);
+        % saveas(fh_line,fullfile(path,['his_' name '.png']));
+        exportgraphics(fh_line, fullfile(path,['his_' name '.png']), 'Resolution', 100);
     end
     
     
