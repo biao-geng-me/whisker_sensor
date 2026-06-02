@@ -15,3 +15,4 @@ gantry_control/python/checkpoints*/
 gantry_control/python/Old Checkpoints*/
 gantry_control/logs/
 /msd/pcb/data_32ch/
+/data_processing/*.json
