@@ -28,7 +28,7 @@ Arduino IDE 2.x with the **esp32 by Espressif** core 3.x; board **ESP32 Dev Modu
 arduino-cli compile --fqbn esp32:esp32:esp32 msd/esp32/whisker_daq
 ```
 
-Flashing needs the USB cable on the laptop (DTR/RTS auto-reset does not cross the tether). Flashing from the BlueOS Pi with `esptool` also works but is not set up yet.
+**Over the tether:** the ESP32 is plugged into the BlueOS Pi, so flash it from there with [`rpi/scripts/flash_esp32.sh`](../../rpi/scripts/flash_esp32.sh) (esptool runs on the Pi, where DTR/RTS auto-reset works). Build the image with `arduino-cli compile --fqbn esp32:esp32:esp32 --output-dir fw msd/esp32/whisker_daq` and copy `fw/whisker_daq.ino.merged.bin` to `~/esp32_flash/` on the Pi; the script's header has the one-time esptool install. Or unplug the ESP32 and use the Arduino IDE on the laptop.
 
 ## Pinout
 
