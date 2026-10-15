@@ -19,6 +19,8 @@ from wavi_py.config import (
     DEFAULT_TCP_HOST,
     DEFAULT_TCP_PORT,
 )
+from whisker_link.channels import NUM_WHISKER
+from whisker_link.wire import DEFAULT_PORT as SERVER_PORT
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -26,11 +28,14 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         prog="wavi_py",
         description="Python whisker-sensor DAQ client (GUI).",
     )
-    p.add_argument("--transport", choices=["tcp", "serial"], default="tcp")
+    p.add_argument("--transport", choices=["server", "tcp", "serial"], default="tcp",
+                   help="server = rpi/daq_server.py (ESP32 whisker array + ROV IMU)")
     p.add_argument("--host", default=DEFAULT_TCP_HOST, help="TCP host (Pi IP or hostname)")
-    p.add_argument("--port", type=int, default=DEFAULT_TCP_PORT, help="TCP port")
+    p.add_argument("--port", type=int, default=None,
+                   help=f"TCP port (default {DEFAULT_TCP_PORT}; {SERVER_PORT} for server)")
     p.add_argument("--serial-port", default=None, help="e.g. COM3 or /dev/ttyACM0")
-    p.add_argument("--nsensor", type=int, default=DEFAULT_NSENSOR)
+    p.add_argument("--nsensor", type=int, default=None,
+                   help=f"default {DEFAULT_NSENSOR}; 16 for server")
     p.add_argument("--fs", type=float, default=DEFAULT_FS_HZ, help="sample rate Hz")
     p.add_argument("--ns-read", type=int, default=DEFAULT_NS_READ,
                    help="samples per DAQ batch")
@@ -38,7 +43,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--t-spec", type=float, default=DEFAULT_T_SPEC_S, help="Spectrogram seconds")
     p.add_argument("--t-buffer", type=float, default=DEFAULT_T_BUFFER_S, help="signal buffer seconds")
     p.add_argument("--scale", type=float, default=1.0, help="line view amplitude scale")
-    return p.parse_args(argv)
+    a = p.parse_args(argv)
+    server = a.transport == "server"
+    if a.port is None:
+        a.port = SERVER_PORT if server else DEFAULT_TCP_PORT
+    if a.nsensor is None:
+        a.nsensor = NUM_WHISKER if server else DEFAULT_NSENSOR
+    return a
 
 
 def main(argv: list[str] | None = None) -> int:

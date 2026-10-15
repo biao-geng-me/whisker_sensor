@@ -36,7 +36,7 @@ done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-for d in rpi hx711_array; do
+for d in rpi hx711_array whisker_link; do
     if [[ ! -d "$REPO_ROOT/$d" ]]; then
         echo "source not found: $REPO_ROOT/$d" >&2
         exit 1
@@ -50,9 +50,10 @@ rsync -avz --delete "${DRY_RUN[@]}" \
     --exclude '__pycache__' \
     --exclude '*.dat' \
     --exclude '*.ino' \
-    "$REPO_ROOT/rpi" "$REPO_ROOT/hx711_array" \
+    "$REPO_ROOT/rpi" "$REPO_ROOT/hx711_array" "$REPO_ROOT/whisker_link" \
     "$PI_HOST:$DEST/"
 
 echo
 echo "Done. On the Pi:"
-echo "  cd $DEST && python3 -u rpi/daq_bridge.py --port /dev/ttyACM0 --bind 0.0.0.0:5555"
+echo "  whisker array + IMU (BlueROV): cd $DEST && python3 -u rpi/daq_server.py --serial /dev/ttyUSB0"
+echo "  hx711 bridge:                  cd $DEST && python3 -u rpi/daq_bridge.py --port /dev/ttyACM0 --bind 0.0.0.0:5555"

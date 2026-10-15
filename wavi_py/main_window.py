@@ -52,7 +52,7 @@ from wavi_py.config import (
 )
 from wavi_py.daq.outliers import fill_outliers_linear
 from wavi_py.io.dat_writer import DatWriter, build_datalog_filename
-from wavi_py.views import FftView, LineView, SpectrogramView
+from wavi_py.views import FftView, ImuView, LineView, SpectrogramView
 
 
 def _default_outpath() -> Path:
@@ -144,8 +144,13 @@ class MainWindow(QMainWindow):
         self._spec_view = SpectrogramView(
             self._nch, self._nfreq, self._fs, self._ns_spec, self._t_spec_s
         )
-        for v in (self._line_view, self._fft_view, self._spec_view):
+        self._imu_view = ImuView(self._t_buffer_s)
+        for v in (self._line_view, self._fft_view, self._spec_view, self._imu_view):
             v.hide()
+        # IMU rolling buffer (server transport only)
+        self._imu_last_seq = 0
+        self._imu_rows = np.empty((0, 9), dtype=np.float32)
+        self._last_status_t = 0.0
 
         # main-thread timer that drains the bus
         self._timer = QTimer(self)
@@ -173,8 +178,11 @@ class MainWindow(QMainWindow):
         h = QHBoxLayout(box)
 
         self._transport_combo = QComboBox()
-        self._transport_combo.addItems(["TCP", "Serial"])
-        self._transport_combo.setCurrentText(self._initial_transport.upper())
+        self._transport_combo.addItems(["Server", "TCP", "Serial"])
+        names = [self._transport_combo.itemText(i).lower()
+                 for i in range(self._transport_combo.count())]
+        if self._initial_transport.lower() in names:
+            self._transport_combo.setCurrentIndex(names.index(self._initial_transport.lower()))
         self._transport_combo.currentTextChanged.connect(self._on_transport_changed)
 
         self._host_edit = QLineEdit(self._initial_host)
@@ -200,7 +208,7 @@ class MainWindow(QMainWindow):
         h.addWidget(self._serial_port_edit, stretch=1)
         h.addWidget(self._connect_btn)
 
-        self._on_transport_changed(self._initial_transport.upper())
+        self._on_transport_changed(self._transport_combo.currentText())
         return box
 
     def _build_view_buttons(self) -> QGroupBox:
@@ -219,6 +227,11 @@ class MainWindow(QMainWindow):
         self._toggle_spec.setCheckable(True)
         self._toggle_spec.toggled.connect(lambda on: self._toggle_window(self._spec_view, on))
 
+        self._toggle_imu = QPushButton("IMU")
+        self._toggle_imu.setCheckable(True)
+        self._toggle_imu.setToolTip("Vehicle IMU (Server transport only)")
+        self._toggle_imu.toggled.connect(lambda on: self._toggle_window(self._imu_view, on))
+
         self._pause_btn = QPushButton("Pause")
         self._pause_btn.setCheckable(True)
         self._pause_btn.toggled.connect(self._on_pause_toggled)
@@ -232,6 +245,7 @@ class MainWindow(QMainWindow):
         h.addWidget(self._toggle_line)
         h.addWidget(self._toggle_fft)
         h.addWidget(self._toggle_spec)
+        h.addWidget(self._toggle_imu)
         h.addStretch(1)
         h.addWidget(self._pause_btn)
         h.addWidget(self._reset_btn)
@@ -287,7 +301,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_transport_changed(self, kind: str) -> None:
-        is_tcp = kind.upper() == "TCP"
+        is_tcp = kind.upper() in ("TCP", "SERVER")
         self._host_edit.setEnabled(is_tcp)
         self._port_spin.setEnabled(is_tcp)
         self._serial_port_edit.setEnabled(not is_tcp)
@@ -328,6 +342,8 @@ class MainWindow(QMainWindow):
         self._v0 = np.zeros(self._nch, dtype=np.float32)
         self._t0_unix = None
         self._last_v0_version = 0
+        self._imu_last_seq = 0
+        self._imu_rows = np.empty((0, 9), dtype=np.float32)
 
         self._connect_btn.setText("Disconnect")
         self._pause_btn.setEnabled(True)
@@ -357,9 +373,9 @@ class MainWindow(QMainWindow):
     def _set_transport_inputs_enabled(self, enabled: bool) -> None:
         self._transport_combo.setEnabled(enabled)
         kind = self._transport_combo.currentText().upper()
-        self._host_edit.setEnabled(enabled and kind == "TCP")
-        self._port_spin.setEnabled(enabled and kind == "TCP")
-        self._serial_port_edit.setEnabled(enabled and kind != "TCP")
+        self._host_edit.setEnabled(enabled and kind in ("TCP", "SERVER"))
+        self._port_spin.setEnabled(enabled and kind in ("TCP", "SERVER"))
+        self._serial_port_edit.setEnabled(enabled and kind == "SERIAL")
 
     # ------------------------------------------------------------------
     # callbacks: view toggle / pause / record
@@ -419,7 +435,9 @@ class MainWindow(QMainWindow):
             return
         self._record_start_dt = start_dt
         self._is_recording = True
-        self._client.send_record_start()
+        # Server transport: also starts the recording on the vehicle, and tees
+        # the full whisker+IMU stream to a local .jsonl next to the .dat.
+        self._client.send_record_start(tag, local_copy=str(fullpath.with_suffix(".jsonl")))
 
         self._record_btn.setText("■ Stop")
         self._record_btn.setStyleSheet(
@@ -450,6 +468,8 @@ class MainWindow(QMainWindow):
     def _on_tick(self) -> None:
         if self._client is None or not self._client.is_running:
             return
+        if self._client.transport_kind == "server":
+            self._tick_server_extras()
 
         samples, new_seq = self._client.bus.read_since(self._last_seq, block=False)
         if samples is None:
@@ -519,6 +539,29 @@ class MainWindow(QMainWindow):
                 self._update_fft_and_spec()
                 self._samples_since_spec_update = 0
 
+    def _tick_server_extras(self) -> None:
+        """IMU view + a one-line server status (rates, vehicle-side recording)."""
+        assert self._client is not None
+        rows, seq = self._client.imu_bus.read_since(self._imu_last_seq, block=False)
+        meta = self._client.bus.get_metadata()
+        st = meta.get("server_status") or {}
+        if rows is not None:
+            self._imu_last_seq = seq
+            keep = int(self._t_buffer_s * 400)
+            self._imu_rows = np.vstack([self._imu_rows, rows])[-keep:]
+            hz = float(st.get("hz", {}).get("RAW_IMU", 0)) or 100.0
+            n = len(self._imu_rows)
+            if not self._is_paused and self._imu_view.isVisible():
+                self._imu_view.update_view(np.arange(-n + 1, 1) / hz, self._imu_rows)
+        if st and st.get("t", 0) != self._last_status_t and not self._is_recording:
+            self._last_status_t = st.get("t", 0)
+            hz = st.get("hz", {})
+            rec = st.get("rec", {})
+            pi_rec = f"ROV rec {rec.get('secs', 0):.0f}s" if rec.get("on") else "ROV rec off"
+            self._path_label.setText(
+                f"{self._client.endpoint_str} | whisker {hz.get('wsk', 0):g} Hz | "
+                f"IMU {hz.get('RAW_IMU', 0):g} Hz | att {hz.get('ATTITUDE', 0):g} Hz | {pi_rec}")
+
     def _update_fft_and_spec(self) -> None:
         """Recompute the current FFT (matches ``do_fft`` in wavi.m:901-914)."""
         window = self._sig[-self._n_fft_window:]
@@ -569,6 +612,6 @@ class MainWindow(QMainWindow):
         try:
             self._disconnect()
         finally:
-            for v in (self._line_view, self._fft_view, self._spec_view):
+            for v in (self._line_view, self._fft_view, self._spec_view, self._imu_view):
                 v.close()
         super().closeEvent(event)

@@ -4,7 +4,7 @@
     Copy the Pi-relevant subtrees from this repo to the Raspberry Pi over scp.
 
 .DESCRIPTION
-    Pushes rpi/ and hx711_array/ as full subdirectories under -Dest on the Pi.
+    Pushes rpi/, whisker_link/ and hx711_array/ as subdirectories under -Dest on the Pi.
     Uses scp (OpenSSH, built into Windows 10+) so no extra tooling is needed.
     Each invocation re-copies everything — fine for these small folders.
 
@@ -38,8 +38,9 @@ $RepoRoot  = Resolve-Path (Join-Path $ScriptDir '..\..')
 
 $RpiDir   = Join-Path $RepoRoot 'rpi'
 $Hx711Dir = Join-Path $RepoRoot 'hx711_array'
+$LinkDir  = Join-Path $RepoRoot 'whisker_link'
 
-foreach ($d in @($RpiDir, $Hx711Dir)) {
+foreach ($d in @($RpiDir, $Hx711Dir, $LinkDir)) {
     if (-not (Test-Path $d)) { throw "Source not found: $d" }
 }
 
@@ -51,6 +52,10 @@ if ($LASTEXITCODE -ne 0) { throw "ssh mkdir failed (exit $LASTEXITCODE)" }
 & scp -P $Port -r $RpiDir ('{0}:{1}/' -f $PiHost, $Dest)
 if ($LASTEXITCODE -ne 0) { throw "scp rpi/ failed (exit $LASTEXITCODE)" }
 
+# whisker_link/ — wire formats shared with daq_server.py (pure Python)
+& scp -P $Port -r $LinkDir ('{0}:{1}/' -f $PiHost, $Dest)
+if ($LASTEXITCODE -ne 0) { throw "scp whisker_link/ failed (exit $LASTEXITCODE)" }
+
 # From hx711_array/, only push the Python files (skip *.ino — Arduino source)
 $PyFiles = Get-ChildItem -Path $Hx711Dir -File -Filter '*.py'
 if ($PyFiles.Count -eq 0) {
@@ -61,4 +66,6 @@ if ($PyFiles.Count -eq 0) {
     if ($LASTEXITCODE -ne 0) { throw "scp hx711_array/*.py failed (exit $LASTEXITCODE)" }
 }
 
-Write-Host "Done. On the Pi: cd $Dest && python3 -u rpi/daq_bridge.py --port /dev/ttyACM0 --bind 0.0.0.0:5555"
+Write-Host "Done. On the Pi:"
+Write-Host "  whisker array + IMU (BlueROV): cd $Dest && python3 -u rpi/daq_server.py --serial /dev/ttyUSB0"
+Write-Host "  hx711 bridge:                  cd $Dest && python3 -u rpi/daq_bridge.py --port /dev/ttyACM0 --bind 0.0.0.0:5555"

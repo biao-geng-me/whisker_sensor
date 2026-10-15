@@ -28,6 +28,7 @@ Typical headless usage::
 
 from __future__ import annotations
 
+import json
 from typing import Optional
 
 from wavi_py.config import (
@@ -41,9 +42,11 @@ from wavi_py.config import (
 )
 from wavi_py.daq.bus import SampleBus
 from wavi_py.daq.reader import Reader
+from wavi_py.daq.server_reader import IMU_CHANNELS, ServerReader
 from wavi_py.transports.base import Transport
 from wavi_py.transports.serial_transport import SerialTransport
 from wavi_py.transports.tcp_transport import TcpTransport
+from whisker_link.channels import NUM_WHISKER
 
 
 class WaviClient:
@@ -69,8 +72,12 @@ class WaviClient:
         t_buffer_s: float = DEFAULT_T_BUFFER_S,
     ):
         transport = transport.lower()
-        if transport not in ("tcp", "serial"):
-            raise ValueError(f"transport must be 'tcp' or 'serial', got {transport!r}")
+        if transport not in ("tcp", "serial", "server"):
+            raise ValueError(
+                f"transport must be 'tcp', 'serial' or 'server', got {transport!r}")
+        if transport == "server" and int(nsensor) != NUM_WHISKER:
+            raise ValueError(f"server transport is the {NUM_WHISKER}-whisker array: "
+                             f"nsensor must be {NUM_WHISKER}, got {nsensor}")
         if transport == "serial" and not serial_port:
             raise ValueError("serial transport requires serial_port (e.g. 'COM3', '/dev/ttyACM0')")
 
@@ -90,9 +97,12 @@ class WaviClient:
 
         capacity = max(self.ns_read * 2, int(round(self.t_buffer_s * self.fs)))
         self.bus = SampleBus(capacity=capacity, nch=self.nch)
+        # IMU rows from the server transport (RAW_IMU rate, ~100 Hz); unused otherwise.
+        self.imu_bus = SampleBus(capacity=max(16, int(round(self.t_buffer_s * 400))),
+                                 nch=len(IMU_CHANNELS))
 
         self._transport: Optional[Transport] = None
-        self._reader: Optional[Reader] = None
+        self._reader: Optional[Reader | ServerReader] = None
 
     # ----- lifecycle
 
@@ -106,6 +116,12 @@ class WaviClient:
             return
 
         self._transport = self._build_transport()
+
+        if self._transport_kind == "server":
+            self._reader = ServerReader(self._transport, self.bus, self.imu_bus,
+                                        fs=self.fs, nch=self.nch)
+            self._reader.start()
+            return
 
         self._reader = Reader(
             transport=self._transport,
@@ -128,10 +144,11 @@ class WaviClient:
             self._reader.request_stop()
         if self._transport is not None:
             # Best-effort: tell the Arduino we're done recording before we drop the line.
-            try:
-                self._transport.write(b"E")
-            except Exception:
-                pass
+            if self._transport_kind != "server":
+                try:
+                    self._transport.write(b"E")
+                except Exception:
+                    pass
             self._transport.close()
             self._transport = None
         if self._reader is not None:
@@ -158,13 +175,32 @@ class WaviClient:
 
     # ----- record-indicator passthrough
 
-    def send_record_start(self) -> bool:
-        """Send 'S' so the Arduino raises its CONTROL_PIN. Returns True if sent."""
+    def send_record_start(self, tag: str = "", local_copy: Optional[str] = None) -> bool:
+        """Start recording at the source. Returns True if sent.
+
+        Arduino: send 'S' so it raises its CONTROL_PIN. Server: start the
+        recording on the vehicle, and if ``local_copy`` is given also tee the
+        raw stream to that local .jsonl path.
+        """
+        if self._transport_kind == "server":
+            if local_copy and isinstance(self._reader, ServerReader):
+                self._reader.start_tee(local_copy)
+            return self.send_command({"cmd": "rec_start", "tag": tag})
         return self._send_cmd(b"S")
 
     def send_record_stop(self) -> bool:
-        """Send 'E' so the Arduino drops CONTROL_PIN. Returns True if sent."""
+        """Stop recording at the source (Arduino: 'E'). Returns True if sent."""
+        if self._transport_kind == "server":
+            if isinstance(self._reader, ServerReader):
+                self._reader.stop_tee()
+            return self.send_command({"cmd": "rec_stop"})
         return self._send_cmd(b"E")
+
+    def send_command(self, cmd: dict) -> bool:
+        """Server transport only: send one JSON command (see whisker_link/wire.py)."""
+        if self._transport_kind != "server":
+            return False
+        return self._send_cmd((json.dumps(cmd) + "\n").encode())
 
     def _send_cmd(self, payload: bytes) -> bool:
         if self._transport is None or not self._transport.is_open:
@@ -187,14 +223,14 @@ class WaviClient:
 
     @property
     def endpoint_str(self) -> str:
-        if self._transport_kind == "tcp":
-            return f"tcp://{self._tcp_host}:{self._tcp_port}"
+        if self._transport_kind in ("tcp", "server"):
+            return f"{self._transport_kind}://{self._tcp_host}:{self._tcp_port}"
         return f"serial://{self._serial_port}@{self._baudrate}"
 
     # ----- internals
 
     def _build_transport(self) -> Transport:
-        if self._transport_kind == "tcp":
+        if self._transport_kind in ("tcp", "server"):
             return TcpTransport(self._tcp_host, self._tcp_port)
         assert self._serial_port is not None
         return SerialTransport(self._serial_port, baudrate=self._baudrate)

@@ -20,6 +20,14 @@ Against the Pi bridge (`rpi/daq_bridge.py` running on the Pi):
 python -m wavi_py --transport tcp --host 192.168.2.3 --port 5555 --nsensor 9 --fs 80
 ```
 
+Against the BlueROV2 whisker array + IMU (`rpi/daq_server.py` on the vehicle; see [rpi/README.md](../rpi/README.md#bluerov2-whisker-array--imu-server-daq_serverpy)):
+
+```bash
+python -m wavi_py --transport server --host 192.168.2.2 --scale 0.2
+```
+
+This adds an **IMU** view, and **Rec** records on the vehicle as well as locally (`.dat` + full `.jsonl`).
+
 Against an Arduino plugged directly into the PC:
 
 ```bash

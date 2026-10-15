@@ -2,6 +2,57 @@
 
 The Pi sits between the Arduino (USB serial) and one or more PC clients (TCP). Conceptually it's a `tee` for the Arduino's byte stream: data flows out to whoever's listening, and the Pi can grow extra capabilities (parsing, recording, multi-client) on a separate branch later without touching the data path.
 
+## BlueROV2: whisker array + IMU server (`daq_server.py`)
+
+On the BlueROV2 the "Pi" is the vehicle's own BlueOS computer (Raspberry Pi 4 + Navigator, 192.168.2.2 on the tether). The ESP32 whisker DAQ ([`msd/esp32/`](../msd/esp32/)) plugs into it by USB. [`daq_server.py`](daq_server.py) replaces both `daq_bridge.py` and BlueOS's UDP serial bridge (bridget) for this setup:
+
+```
+ESP32 (USB, binary frames, 921600) ──┐
+                                     ├─► stamped on the Pi's monotonic clock ─┬─► ~/whisker_rec/*.jsonl  (on the Pi)
+ArduSub (MAVLink, UDP 127.0.0.1:14660)┘                                       └─► TCP :5600, JSON lines ─► wavi_py on the laptop
+```
+
+- Both sources are timestamped by the same clock on the Pi, and each also carries its own sample clock (ESP32 `micros()`, autopilot `time_boot_ms`). [`whisker_link/convert.py`](../whisker_link/convert.py) uses both to put whiskers and IMU on one time base to well under a millisecond (checked end to end with the simulators: an injected 50 ms lag is recovered as 50 ± 1 ms).
+- Requested MAVLink streams (re-requested every 5 s, since a GCS can override rates): `RAW_IMU` and `SCALED_IMU2` at 100 Hz, `ATTITUDE`/`ATTITUDE_QUATERNION` 50 Hz, `SCALED_PRESSURE2` (depth) and `SERVO_OUTPUT_RAW` (thrusters) 20 Hz, `LOCAL_POSITION_NED` 10 Hz. Everything else the router delivers is recorded too. Change rates with `--mav-rates RAW_IMU=200,SERVO_OUTPUT_RAW=50`; the measured rates are in the status line, so check what ArduSub actually delivers before relying on a number.
+- Recording format = stream format ([`whisker_link/wire.py`](../whisker_link/wire.py)): one JSON object per line, ~330 MB/hour. Convert with `python -m whisker_link.convert file.jsonl --mat`.
+
+### One-time vehicle setup
+
+1. **Flash the new firmware** ([`msd/esp32/README.md`](../msd/esp32/README.md)) over USB from the laptop.
+2. **Delete the bridget serial bridge** — it holds `/dev/ttyUSB0` open, and the server can't share it: `curl -X DELETE http://192.168.2.2/bridget/v1.0/bridges -H 'Content-Type: application/json' -d '{"serial_path":"/dev/ttyUSB0","baud":115200,"ip":"192.168.2.1","udp_target_port":27000,"udp_listen_port":27001}'`, then check `curl -s http://192.168.2.2/bridget/v1.0/bridges` prints `[]`.
+3. **Add a MAVLink endpoint** — BlueOS web UI → enable Pirate mode → MAVLink Endpoints → new endpoint: type **UDP Client**, IP `127.0.0.1`, port `14660`, name `whisker`.
+4. **Python deps on the Pi host.** `ssh pi@192.168.2.2` (BlueOS default password `raspberry` — change it). The Pi needs internet once: connect BlueOS to a WiFi network from its web UI, then `python3 -m venv ~/whisker_venv && ~/whisker_venv/bin/pip install pyserial pymavlink`. Check `uname -m` if pip has trouble (aarch64 vs armv7l decide which wheels exist).
+5. **Copy the code** from the laptop: `.\rpi\scripts\sync.ps1 -PiHost pi@192.168.2.2` (pushes `rpi/` and `whisker_link/` to `~/whisker_sensor`).
+
+### Every session
+
+On the Pi (inside `tmux`/`screen`, or with `nohup`, so it survives the ssh session):
+
+```bash
+cd ~/whisker_sensor && ~/whisker_venv/bin/python -u rpi/daq_server.py --serial /dev/ttyUSB0
+```
+
+Every 5 s it logs e.g. `whisker 80.0 Hz | RAW_IMU 100, SCALED_IMU2 100, ATTITUDE 50, ... | clients 1 | rec off`. If whisker is 0 Hz, the ESP32 isn't streaming: the server sends `B` every 2 s on its own; if that doesn't help, send `{"cmd":"esp32_reset"}` (RTS pulse = pressing EN). If the IMU entries are missing, the MAVLink endpoint (step 3) isn't set up.
+
+On the laptop:
+
+```bash
+python -m wavi_py --transport server --host 192.168.2.2 --scale 0.2
+```
+
+**Rec** in the GUI starts a recording on the Pi *and* writes the same stream to a local `.jsonl` (plus the usual whisker-only `.dat`) in `~/wavi_data`. **IMU** opens the accel / gyro / attitude view. Recording without the GUI: start the server with `--record --tag run1`, or send commands over the socket (`{"cmd":"rec_start","tag":"run1"}`, `{"cmd":"rec_stop"}`, `{"cmd":"mark","text":"tap W3"}`).
+
+### Testing without the vehicle
+
+[`sim/fake_esp32.py`](sim/fake_esp32.py) (pty) and [`sim/fake_autopilot.py`](sim/fake_autopilot.py) (MAVLink UDP) stand in for the hardware; both put the same sine motion on a shared wall clock so alignment can be checked:
+
+```bash
+python rpi/sim/fake_esp32.py --link /tmp/wtty &
+python rpi/sim/fake_autopilot.py --lag-ms 50 &
+python rpi/daq_server.py --serial /tmp/wtty --rec-dir /tmp/rec
+python -m wavi_py --transport server --host 127.0.0.1
+```
+
 ## Phase 1 — transparent byte pump ✅ done (multi-client)
 
 [`daq_bridge.py`](daq_bridge.py) opens the Arduino serial port once and broadcasts the byte stream verbatim to every connected TCP client. No parsing, no recording on the Pi. Each client also gets its own back-channel — bytes from any client (`N=<n>\n`, `S`, `E`) are forwarded to the Arduino through a single serialized write lock.
