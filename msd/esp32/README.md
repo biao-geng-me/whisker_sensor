@@ -22,7 +22,7 @@ Channels within one scan are not simultaneous: the four ADC channels of one mux 
 
 ## Signal chain and units
 
-Per gauge (32 per board): one strain gauge in a **350 Ω quarter bridge** (one active gauge, three fixed resistors), excited at **3.3 V** from the PCB's on-board regulator (the PCB is fed 5 V). The bridge output goes to an **INA351ABSIDDFR** instrumentation amplifier, whose gain is **10 or 20** depending on its GS pin. Which one this board uses has not been verified yet. The older firmware comments said "gain ~141", which this part can't produce, so treat that number as wrong. The amplifier output goes through the CD4097 mux to the **ADS131M04**, which runs at PGA gain 1 with its internal 1.2 V reference.
+Per gauge (32 per board): one strain gauge in a **350 Ω quarter bridge** (one active gauge, three fixed resistors), excited at **3.3 V** from the PCB's on-board regulator (the PCB is fed 5 V). The bridge output goes to an **INA351ABSIDDFR** instrumentation amplifier, whose gain is set by its GS pin (pin 1): **low = 10, high or unconnected = 20**. Which one this board uses has not been verified yet. Its output is `G × V_bridge + V_REF` (REF is pin 6), so the REF connection sets the zero offset seen by the ADC. The older firmware comments said "gain ~141", which this part can't produce, so treat that number as wrong. The amplifier output goes through the CD4097 mux to the **ADS131M04**, which runs at PGA gain 1 with its internal 1.2 V reference.
 
 Units: the stream carries raw 24-bit codes. `mV = code × 1200 / 2^23` (`MV_PER_CODE` in `whisker_link/esp32_frame.py`) is the voltage at the ADC input, range ±1200 mV. A channel with nothing plugged in rails at +1200 mV.
 
