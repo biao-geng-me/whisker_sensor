@@ -159,14 +159,15 @@ class _Client:
             self.close()
 
     def _reader(self) -> None:
+        # Blocking recv, no socket timeout: a timeout is per socket, so it would
+        # also cut the writer's sendall when the laptop stalls for a moment
+        # (e.g. Cockpit starting video). close() unblocks recv via shutdown().
+        # A stalled client is bounded by the queue instead: publish() drops it
+        # once the queue is full.
         splitter = wire.LineSplitter()
         try:
-            self.conn.settimeout(0.5)
             while not self._closed.is_set():
-                try:
-                    data = self.conn.recv(4096)
-                except socket.timeout:
-                    continue
+                data = self.conn.recv(4096)
                 if not data:
                     break
                 for cmd in splitter.feed(data):
@@ -563,6 +564,7 @@ class Server:
                 continue
             except OSError:
                 break
+            conn.settimeout(None)      # blocking; must not inherit the listener's 0.5 s
             conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             c = _Client(conn, addr, self.on_command, self._on_client_closed)
             self.hub.send_to(c, self.hub.hello())

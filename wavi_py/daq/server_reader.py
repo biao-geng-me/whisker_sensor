@@ -18,6 +18,7 @@ spectrogram views work unchanged. Differences:
 from __future__ import annotations
 
 import json
+import socket
 import threading
 import time
 from typing import Optional
@@ -55,6 +56,7 @@ class ServerReader:
         self._mv_per_code = MV_PER_CODE
         self.hello: dict = {}
         self._last_t = 0.0           # server clock of the newest event seen
+        self.error: Optional[str] = None   # why _run ended, if not stop()
 
     # ----- lifecycle (same surface as Reader)
 
@@ -63,6 +65,7 @@ class ServerReader:
             return
         self._stop.clear()
         self._ready.clear()
+        self.error = None
         self._thread = threading.Thread(target=self._run, name="wavi-server", daemon=True)
         self._thread.start()
 
@@ -139,7 +142,9 @@ class ServerReader:
                     last_flush = now
         except Exception as exc:  # noqa: BLE001
             if not self._stop.is_set():
-                print(f"[ServerReader] terminating: {exc}")
+                self.error = ("no data for a while (timed out)"
+                              if isinstance(exc, socket.timeout) else str(exc) or type(exc).__name__)
+                print(f"[ServerReader] terminating: {self.error}")
         finally:
             self.stop_tee()
             self._bus.close()

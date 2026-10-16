@@ -145,8 +145,11 @@ class MainWindow(QMainWindow):
             self._nch, self._nfreq, self._fs, self._ns_spec, self._t_spec_s
         )
         self._imu_view = ImuView(self._t_buffer_s)
-        for v in (self._line_view, self._fft_view, self._spec_view, self._imu_view):
+        for v, btn in ((self._line_view, self._toggle_line), (self._fft_view, self._toggle_fft),
+                       (self._spec_view, self._toggle_spec), (self._imu_view, self._toggle_imu)):
             v.hide()
+            # closing a view window unchecks its button (setChecked is a no-op if already off)
+            v.closed.connect(lambda b=btn: b.setChecked(False))
         # IMU rolling buffer (server transport only)
         self._imu_last_seq = 0
         self._imu_rows = np.empty((0, 9), dtype=np.float32)
@@ -370,6 +373,16 @@ class MainWindow(QMainWindow):
         self._path_label.setText(f"Disconnected. Output dir: {self._outpath}")
         self._progress.setValue(0)
 
+    def _on_link_lost(self) -> None:
+        """The DAQ thread ended on its own (server dropped us, cable, timeout)."""
+        reason = (self._client.error if self._client else None) or "stream ended"
+        was_recording = self._is_recording
+        self._disconnect()
+        msg = f"Connection lost: {reason}. Click Connect to reconnect."
+        if was_recording:
+            msg += " The local recording was saved; the ROV-side recording may still be running."
+        self._path_label.setText(msg)
+
     def _set_transport_inputs_enabled(self, enabled: bool) -> None:
         self._transport_combo.setEnabled(enabled)
         kind = self._transport_combo.currentText().upper()
@@ -466,7 +479,10 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_tick(self) -> None:
-        if self._client is None or not self._client.is_running:
+        if self._client is None:
+            return
+        if not self._client.is_running:
+            self._on_link_lost()
             return
         if self._client.transport_kind == "server":
             self._tick_server_extras()

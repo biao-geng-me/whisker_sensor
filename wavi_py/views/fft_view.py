@@ -9,12 +9,14 @@ OpenGL 3D mesh — and stack a ``BarGraphItem`` underneath.
 from __future__ import annotations
 
 import numpy as np
-from PyQt6.QtWidgets import QMainWindow, QWidget, QVBoxLayout
+from PyQt6.QtWidgets import QWidget, QVBoxLayout
 
 import pyqtgraph as pg
 
+from wavi_py.views.base import ViewWindow
 
-class FftView(QMainWindow):
+
+class FftView(ViewWindow):
     def __init__(self, nch: int, nfreq: int, t_fft_s: float):
         super().__init__()
         self.setWindowTitle("Wavi - FFT contour")

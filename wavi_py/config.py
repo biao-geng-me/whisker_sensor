@@ -27,6 +27,8 @@ DEFAULT_BAUDRATE = 2_000_000
 DEFAULT_TCP_HOST = "127.0.0.1"
 DEFAULT_TCP_PORT = 5555
 TCP_CONNECT_TIMEOUT_S = 5.0
+# daq_server sends a status event every second, so this much silence = link lost
+SERVER_READ_TIMEOUT_S = 5.0
 
 # Frame layout — derive concrete byte sizes from nch at runtime via frame_bytes()
 FRAME_MARKER_VALUE = 2024.0

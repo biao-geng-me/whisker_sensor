@@ -8,12 +8,13 @@ array and renders it with ``imagesc``. We do the same with a pyqtgraph
 from __future__ import annotations
 
 import numpy as np
-from PyQt6.QtWidgets import QMainWindow
 
 import pyqtgraph as pg
 
+from wavi_py.views.base import ViewWindow
 
-class SpectrogramView(QMainWindow):
+
+class SpectrogramView(ViewWindow):
     def __init__(self, nch: int, nfreq: int, fs: float, ns_spec: int, t_spec_s: float):
         super().__init__()
         self.setWindowTitle("Wavi - Spectrogram")

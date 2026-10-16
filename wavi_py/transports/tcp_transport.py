@@ -13,11 +13,16 @@ from wavi_py.transports.base import Transport
 
 
 class TcpTransport(Transport):
-    def __init__(self, host: str, port: int, connect_timeout_s: float = TCP_CONNECT_TIMEOUT_S):
+    def __init__(self, host: str, port: int, connect_timeout_s: float = TCP_CONNECT_TIMEOUT_S,
+                 read_timeout_s: float | None = None):
+        """``read_timeout_s``: raise ``socket.timeout`` (an OSError) when the
+        peer has been silent that long — a dead link without a FIN/RST. None
+        blocks forever, for sources that may legitimately go quiet."""
         self._sock: socket.socket | None = None
         self._host = host
         self._port = port
         self._connect_timeout_s = connect_timeout_s
+        self._read_timeout_s = read_timeout_s
         self._open()
 
     def _open(self) -> None:
@@ -26,7 +31,7 @@ class TcpTransport(Transport):
         s.connect((self._host, self._port))
         s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 65536)
-        s.settimeout(None)  # block on subsequent reads
+        s.settimeout(self._read_timeout_s)  # None: block on subsequent reads
         self._sock = s
 
     @property

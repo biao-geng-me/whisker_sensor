@@ -8,9 +8,10 @@ not a time-accurate record (use the recording + ``whisker_link.convert``).
 from __future__ import annotations
 
 import numpy as np
-from PyQt6.QtWidgets import QMainWindow
 
 import pyqtgraph as pg
+
+from wavi_py.views.base import ViewWindow
 
 _COLORS = [(220, 40, 40), (40, 160, 40), (40, 80, 220)]
 _GROUPS = [
@@ -20,7 +21,7 @@ _GROUPS = [
 ]
 
 
-class ImuView(QMainWindow):
+class ImuView(ViewWindow):
     def __init__(self, t_buffer_s: float = 30.0):
         super().__init__()
         self.setWindowTitle("Wavi - IMU")

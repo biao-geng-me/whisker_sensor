@@ -39,6 +39,7 @@ from wavi_py.config import (
     DEFAULT_TCP_HOST,
     DEFAULT_TCP_PORT,
     DEFAULT_BAUDRATE,
+    SERVER_READ_TIMEOUT_S,
 )
 from wavi_py.daq.bus import SampleBus
 from wavi_py.daq.reader import Reader
@@ -218,6 +219,11 @@ class WaviClient:
         return self._reader is not None and self._reader.is_running
 
     @property
+    def error(self) -> Optional[str]:
+        """Why the DAQ thread ended on its own (link lost etc.); None otherwise."""
+        return getattr(self._reader, "error", None)
+
+    @property
     def transport_kind(self) -> str:
         return self._transport_kind
 
@@ -230,7 +236,10 @@ class WaviClient:
     # ----- internals
 
     def _build_transport(self) -> Transport:
-        if self._transport_kind in ("tcp", "server"):
+        if self._transport_kind == "server":
+            return TcpTransport(self._tcp_host, self._tcp_port,
+                                read_timeout_s=SERVER_READ_TIMEOUT_S)
+        if self._transport_kind == "tcp":
             return TcpTransport(self._tcp_host, self._tcp_port)
         assert self._serial_port is not None
         return SerialTransport(self._serial_port, baudrate=self._baudrate)
