@@ -13,7 +13,7 @@ The event / recording format is ``whisker_link/wire.py``; the ESP32 frame
 format is ``whisker_link/esp32_frame.py``.
 
 MAVLink: add an endpoint in BlueOS (Pirate mode -> MAVLink Endpoints):
-type "UDP Client", IP 127.0.0.1, port 14660. The server listens there and
+type "UDP Client", IP 127.0.0.1, port 14670. The server listens there and
 asks the autopilot for the messages in ``DEFAULT_MAV_RATES``, re-sending the
 request every few seconds because a GCS (Cockpit/QGC) may override rates.
 
@@ -52,7 +52,7 @@ log = logging.getLogger("daq_server")
 
 SERVER_VERSION = "0.1"
 DEFAULT_SERIAL_BAUD = 921600
-DEFAULT_MAVLINK = "udpin:0.0.0.0:14660"
+DEFAULT_MAVLINK = "udpin:0.0.0.0:14670"
 
 # MAVLink message -> requested rate (Hz). ArduSub on Navigator runs its main
 # loop at 400 Hz; what it can actually stream is measured in the status line.

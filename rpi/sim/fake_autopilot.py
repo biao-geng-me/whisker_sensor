@@ -1,13 +1,13 @@
 """Fake ArduSub autopilot over MAVLink UDP, for testing ``daq_server.py``.
 
 Plays the part of BlueOS's mavlink-router endpoint ("UDP Client" to
-127.0.0.1:14660): sends HEARTBEAT at 1 Hz and honours
+127.0.0.1:14670): sends HEARTBEAT at 1 Hz and honours
 MAV_CMD_SET_MESSAGE_INTERVAL for the IMU-type messages the server asks for.
 
 Motion: pitch and x-accel follow ``sin(2*pi*f*t)`` on the shared wall clock,
 matching ``fake_esp32.py``, delayed by ``--lag-ms`` to mimic a physical lag.
 
-    python rpi/sim/fake_autopilot.py --target 127.0.0.1:14660
+    python rpi/sim/fake_autopilot.py --target 127.0.0.1:14670
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ mavlink = mavutil.mavlink
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--target", default="127.0.0.1:14660")
+    ap.add_argument("--target", default="127.0.0.1:14670")
     ap.add_argument("--freq", type=float, default=0.5)
     ap.add_argument("--lag-ms", type=float, default=0.0)
     ap.add_argument("--max-hz", type=float, default=400.0, help="autopilot loop rate cap")

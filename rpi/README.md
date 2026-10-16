@@ -9,7 +9,7 @@ On the BlueROV2 the "Pi" is the vehicle's own BlueOS computer (Raspberry Pi 4 + 
 ```
 ESP32 (USB, binary frames, 921600) ──┐
                                      ├─► stamped on the Pi's monotonic clock ─┬─► ~/whisker_rec/*.jsonl  (on the Pi)
-ArduSub (MAVLink, UDP 127.0.0.1:14660)┘                                       └─► TCP :5600, JSON lines ─► wavi_py on the laptop
+ArduSub (MAVLink, UDP 127.0.0.1:14670)┘                                       └─► TCP :5600, JSON lines ─► wavi_py on the laptop
 ```
 
 - Both sources are timestamped by the same clock on the Pi, and each also carries its own sample clock (ESP32 `micros()`, autopilot `time_boot_ms`). [`whisker_link/convert.py`](../whisker_link/convert.py) uses both to put whiskers and IMU on one time base to well under a millisecond (checked end to end with the simulators: an injected 50 ms lag is recovered as 50 ± 1 ms).
@@ -20,7 +20,7 @@ ArduSub (MAVLink, UDP 127.0.0.1:14660)┘                                       
 
 1. **Flash the new firmware** ([`msd/esp32/README.md`](../msd/esp32/README.md)) over USB from the laptop.
 2. **Delete the bridget serial bridge** — it holds `/dev/ttyUSB0` open, and the server can't share it: `curl -X DELETE http://192.168.2.2/bridget/v1.0/bridges -H 'Content-Type: application/json' -d '{"serial_path":"/dev/ttyUSB0","baud":115200,"ip":"192.168.2.1","udp_target_port":27000,"udp_listen_port":27001}'`, then check `curl -s http://192.168.2.2/bridget/v1.0/bridges` prints `[]`.
-3. **Add a MAVLink endpoint** — BlueOS web UI → enable Pirate mode → MAVLink Endpoints → new endpoint: type **UDP Client**, IP `127.0.0.1`, port `14660`, name `whisker`.
+3. **Add a MAVLink endpoint** — BlueOS web UI → enable Pirate mode → MAVLink Endpoints → new endpoint: type **UDP Client**, IP `127.0.0.1`, port `14670`, name `whisker`.
 4. **Python deps on the Pi host (offline).** `ssh pi@192.168.2.2` (BlueOS default password `raspberry` — change it). The Pi is Raspbian 11, armv7l (32-bit), Python 3.9.2, with no pip and usually no internet. Debian also strips `ensurepip` and `distutils`, so pip can't run there at all, not even from its wheel. Instead, run [`scripts/fetch_pi_wheels.sh`](scripts/fetch_pi_wheels.sh) on any machine with internet (armv7l wheels come from piwheels), copy the `pi_wheels` folder to the Pi, and unzip the wheels straight into a venv:
    ```bash
    python3 -m venv --without-pip ~/whisker_venv
