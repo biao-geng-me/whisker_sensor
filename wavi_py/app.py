@@ -36,7 +36,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--serial-port", default=None, help="e.g. COM3 or /dev/ttyACM0")
     p.add_argument("--nsensor", type=int, default=None,
                    help=f"default {DEFAULT_NSENSOR}; 16 for server")
-    p.add_argument("--fs", type=float, default=DEFAULT_FS_HZ, help="sample rate Hz")
+    p.add_argument("--fs", type=float, default=None,
+                   help=f"sample rate Hz (default {DEFAULT_FS_HZ:g}; server: measured "
+                        "from the stream unless given)")
     p.add_argument("--ns-read", type=int, default=DEFAULT_NS_READ,
                    help="samples per DAQ batch")
     p.add_argument("--t-fft", type=float, default=DEFAULT_T_FFT_S, help="FFT window seconds")
@@ -49,6 +51,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         a.port = SERVER_PORT if server else DEFAULT_TCP_PORT
     if a.nsensor is None:
         a.nsensor = NUM_WHISKER if server else DEFAULT_NSENSOR
+    a.auto_fs = a.fs is None
+    if a.fs is None:
+        a.fs = DEFAULT_FS_HZ      # server: a starting guess until the rate is measured
     return a
 
 
@@ -68,6 +73,7 @@ def main(argv: list[str] | None = None) -> int:
         serial_port=args.serial_port,
         nsensor=args.nsensor,
         fs=args.fs,
+        auto_fs=args.auto_fs,
         ns_read=args.ns_read,
         t_fft_s=args.t_fft,
         t_spec_s=args.t_spec,

@@ -84,7 +84,12 @@
 
 // ── Clocking ─────────────────────────────────────────────────────────────────
 #define CLKIN_HZ   800000UL   // 0.8 MHz on GPIO16 via LEDC
-#define SPI_HZ     200000UL   // SCLK must stay BELOW CLKIN
+// One ADC read is 18 bytes = 144 SCLK. It must finish inside one 320 us sample
+// period or every read waits an extra period: 200 kHz (720 us/read) gave ~33
+// scans/s. 600 kHz = 240 us/read. Kept below CLKIN per the original bring-up
+// rule ("SCLK must stay below CLKIN"), whose source is unverified. Watch the
+// server's adc-crc / recov counters after raising it.
+#define SPI_HZ     600000UL
 // fMOD = CLKIN/2 = 400 kHz; OSR 128 -> fDATA = 3.125 kSPS -> 320 us/sample.
 #define FDATA_SPS  (CLKIN_HZ / 2 / 128)
 
@@ -137,7 +142,8 @@ static const uint8_t CONN_TO_JPIN[17] =
 #define FT_TEXT       0x02
 #define FT_INFO       0x03
 #define PROTO_VERSION 1
-#define FLAG_RECOVERED 0x01
+#define FLAG_RECOVERED 0x01   // an ADC halt was recovered during this sweep
+#define FLAG_CRC_RETRY 0x02   // an ADC SPI read failed CRC and was re-read
 
 // ── State ────────────────────────────────────────────────────────────────────
 SPIClass vspi(VSPI);
@@ -159,6 +165,7 @@ static char     g_mode     = 'g';     // 'g' grid, 'x' profile, 's' table, 'c' c
 static uint32_t g_scanT0   = 0;       // micros() at the start of the last scan
 static uint32_t g_scanDur  = 0;
 static bool     g_scanRecovered = false;
+static bool     g_scanCrcRetry  = false;
 
 // Graph geometry.
 #define BAR_H        6
@@ -242,7 +249,7 @@ static void send_scan() {
     put_u32(p + 4, g_scanT0);
     put_u16(p + 8, g_scanDur > 0xFFFF ? 0xFFFF : (uint16_t)g_scanDur);
     put_u32(p + 10, rail);
-    p[14] = g_scanRecovered ? FLAG_RECOVERED : 0;
+    p[14] = (g_scanRecovered ? FLAG_RECOVERED : 0) | (g_scanCrcRetry ? FLAG_CRC_RETRY : 0);
     p[15] = NUM_OUT;
     for (int o = 1; o <= NUM_OUT; o++) {
         uint32_t c = (uint32_t)outRaw[o] & 0xFFFFFF;
@@ -383,6 +390,7 @@ static bool readValid(long ch[4], uint32_t budget_ms) {
         if (statusValid(st)) {
             if (crcOk) return true;
             g_crcFails++;                     // looked alive, was noise
+            g_scanCrcRetry = true;
         }
     }
     return false;
@@ -461,6 +469,7 @@ static int probeSelectsGrounded() {
 static bool scan_all() {
     long ch[4];
     g_scanRecovered = false;
+    g_scanCrcRetry  = false;
     g_scanT0 = micros();
     for (uint8_t sel = 0; sel < NUM_SEL; sel++) {
         mux_select(sel);

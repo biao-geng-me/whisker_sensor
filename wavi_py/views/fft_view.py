@@ -60,6 +60,10 @@ class FftView(ViewWindow):
         except Exception:
             pass
 
+    def set_nfreq(self, nfreq: int) -> None:
+        """The FFT length changed (sample rate measured / changed)."""
+        self._nfreq = int(nfreq)
+
     def update_view(self, fft_map: np.ndarray, fs: float) -> None:
         """Refresh with a new FFT frame.
 

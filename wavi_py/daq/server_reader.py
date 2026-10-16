@@ -11,12 +11,17 @@ spectrogram views work unchanged. Differences:
   one row per RAW_IMU message, attitude sample-and-held from ATTITUDE.
 - The server's 1 Hz ``status`` event is kept in ``bus`` metadata as
   ``server_status``.
+- The whisker rate is measured from the ESP32's own scan timestamps (``tus``,
+  its micros() clock) and kept in ``bus`` metadata as ``fs_measured``. Host
+  arrival times are useless for this: USB, TCP and the GUI tick deliver
+  samples in bursts.
 - ``start_tee(path)`` copies the raw stream to a local .jsonl — the same
   format as the recording on the Pi, so ``whisker_link.convert`` reads both.
 """
 
 from __future__ import annotations
 
+import collections
 import json
 import socket
 import threading
@@ -28,6 +33,9 @@ import numpy as np
 from wavi_py.daq.bus import SampleBus
 from wavi_py.transports.base import Transport
 from whisker_link.esp32_frame import MV_PER_CODE
+
+FS_WINDOW_S = 10.0        # sliding window for the rate estimate
+FS_MIN_SPAN_S = 2.0       # report nothing until the window spans this long
 
 IMU_CHANNELS = [
     "ax_mg", "ay_mg", "az_mg",               # RAW_IMU accel
@@ -57,6 +65,8 @@ class ServerReader:
         self.hello: dict = {}
         self._last_t = 0.0           # server clock of the newest event seen
         self.error: Optional[str] = None   # why _run ended, if not stop()
+        self._scan_clock: collections.deque = collections.deque()  # (seq, tus)
+        self._last_fs_report = 0.0
 
     # ----- lifecycle (same surface as Reader)
 
@@ -155,6 +165,8 @@ class ServerReader:
         self._last_t = ev.get("t", self._last_t)
         if k == "wsk":
             rows.append(np.asarray(ev["raw"], dtype=np.float32) * self._mv_per_code)
+            if "seq" in ev and "tus" in ev:
+                self._note_scan_clock(int(ev["seq"]), int(ev["tus"]))
         elif k == "mav":
             mtype = ev.get("type")
             d = ev.get("d", {})
@@ -176,6 +188,22 @@ class ServerReader:
             self._bus.set_metadata(server_ack=ev)
             if not ev.get("ok", True):
                 print(f"[ServerReader] command failed: {ev}")
+
+    def _note_scan_clock(self, seq: int, tus: int) -> None:
+        hist = self._scan_clock
+        if hist and (seq <= hist[-1][0] or tus <= hist[-1][1]):
+            hist.clear()                      # ESP32 rebooted: counters restarted
+        hist.append((seq, tus))
+        while tus - hist[0][1] > FS_WINDOW_S * 1e6:
+            hist.popleft()
+        now = time.monotonic()
+        if now - self._last_fs_report < 1.0:
+            return
+        (s0, t0), (s1, t1) = hist[0], hist[-1]
+        if t1 - t0 >= FS_MIN_SPAN_S * 1e6:
+            # seq counts device scans, so dropped frames don't bias the rate
+            self._bus.set_metadata(fs_measured=(s1 - s0) * 1e6 / (t1 - t0))
+            self._last_fs_report = now
 
     def _flush(self, rows: list, imu_rows: list) -> None:
         if imu_rows:

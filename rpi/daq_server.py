@@ -278,6 +278,8 @@ class Esp32Source:
         self.last_seq: Optional[int] = None
         self.n_scans = 0
         self.n_seq_gaps = 0
+        self.n_adc_recov = 0          # scans with FLAG_RECOVERED (ADC halt recovered)
+        self.n_adc_crc = 0            # scans with FLAG_CRC_RETRY (SPI read re-read)
         self.info: Optional[dict] = None
         self._thread = threading.Thread(target=self._run, name="esp32", daemon=True)
 
@@ -362,6 +364,10 @@ class Esp32Source:
                 self.n_seq_gaps += 1
             self.last_seq = ev.seq
             self.last_scan_mono = now
+            if ev.flags & ef.FLAG_RECOVERED:
+                self.n_adc_recov += 1
+            if ev.flags & ef.FLAG_CRC_RETRY:
+                self.n_adc_crc += 1
             self.n_scans += 1
             self.rates.tick("wsk")
             self.hub.publish({"k": "wsk", "t": now, "seq": ev.seq, "tus": self._unwrap(ev.t_us),
@@ -526,6 +532,7 @@ class Server:
             dec = self.esp32.decoder
             st["esp32"] = {"scans": self.esp32.n_scans, "seq_gaps": self.esp32.n_seq_gaps,
                            "crc_fail": dec.n_crc_fail, "skipped": dec.n_skipped,
+                           "adc_recov": self.esp32.n_adc_recov, "adc_crc": self.esp32.n_adc_crc,
                            "streaming": time.monotonic() - self.esp32.last_scan_mono < 1.0}
         if self.mav:
             st["mav"] = {"msgs": self.mav.n_msgs, "target": self.mav.target}
@@ -543,9 +550,13 @@ class Server:
             if n % self.args.log_every == 0:
                 hz = st["hz"]
                 imu = ", ".join(f"{k} {hz[k]:g}" for k in self.args.mav_rates if k in hz)
-                log.info("whisker %s Hz | %s | clients %d | rec %s",
+                e = st.get("esp32", {})
+                log.info("whisker %s Hz | %s | clients %d | rec %s | errs: gap %d link-crc %d "
+                         "adc-crc %d adc-recov %d",
                          hz.get("wsk", 0), imu or "no MAVLink", st["clients"],
-                         os.path.basename(st["rec"]["path"]) if st["rec"]["on"] else "off")
+                         os.path.basename(st["rec"]["path"]) if st["rec"]["on"] else "off",
+                         e.get("seq_gaps", 0), e.get("crc_fail", 0),
+                         e.get("adc_crc", 0), e.get("adc_recov", 0))
 
     # ----- lifecycle
 

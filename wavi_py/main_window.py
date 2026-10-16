@@ -74,6 +74,7 @@ class MainWindow(QMainWindow):
         serial_port: Optional[str] = None,
         nsensor: int = DEFAULT_NSENSOR,
         fs: float = DEFAULT_FS_HZ,
+        auto_fs: bool = True,
         ns_read: int = DEFAULT_NS_READ,
         t_fft_s: float = DEFAULT_T_FFT_S,
         t_spec_s: float = DEFAULT_T_SPEC_S,
@@ -92,36 +93,21 @@ class MainWindow(QMainWindow):
         self._initial_serial_port = serial_port
         self._nsensor = int(nsensor)
         self._nch = self._nsensor * 2
-        self._fs = float(fs)
+        # Server transport with auto_fs: fs is only a starting guess, replaced
+        # by the rate measured from the ESP32's scan clock (fs_measured).
+        self._auto_fs = bool(auto_fs)
         self._ns_read = int(ns_read)
         self._scale = float(scale)
         self._t_fft_s = float(t_fft_s)
         self._t_spec_s = float(t_spec_s)
         self._t_buffer_s = float(t_buffer_s)
-
-        # derived sizes
-        self._n_fft_window = max(2, int(round(self._fs * self._t_fft_s)))
-        self._nfreq = self._n_fft_window // 2 + 1
-        self._ns_tot = max(self._n_fft_window, int(self._t_buffer_s * self._fs))
         self._ns_spec = self._ns_read
-        self._spec_cols = max(1, int(self._t_spec_s * self._fs / self._ns_spec))
-
-        # rolling buffers (filled by timer)
-        self._sig = np.full((self._ns_tot, self._nch), np.nan, dtype=np.float32)
-        self._t_axis = np.arange(self._ns_tot, dtype=np.float64) / self._fs  # seconds since stream start
         self._v0 = np.zeros(self._nch, dtype=np.float32)
-        self._spec_data = np.zeros((self._nfreq * self._nch, self._spec_cols), dtype=np.float32)
-        self._fft_map = np.zeros((self._nfreq, self._nch), dtype=np.float32)
 
         # subscriber cursor + counters
         self._last_seq = 0
-        self._samples_since_spec_update = 0
         self._last_v0_version = 0
-        # Track how many real samples are sitting in `_sig` since the last
-        # connect/reset. Used to feed only the populated portion to the line
-        # view; otherwise pyqtgraph's auto-range latches onto the full t-axis
-        # the moment any sample lands and gaps the NaN-filled leading slots.
-        self._samples_since_clear = 0
+        self._set_rate(float(fs))   # derived sizes + rolling buffers
 
         # recording state
         self._outpath: Path = outpath if outpath else _default_outpath()
@@ -159,6 +145,37 @@ class MainWindow(QMainWindow):
         self._timer = QTimer(self)
         self._timer.setInterval(50)  # 20 Hz UI cadence
         self._timer.timeout.connect(self._on_tick)
+
+    def _set_rate(self, fs: float) -> None:
+        """Size the rolling buffers for sample rate ``fs`` and clear them."""
+        self._fs = float(fs)
+        self._n_fft_window = max(2, int(round(self._fs * self._t_fft_s)))
+        self._nfreq = self._n_fft_window // 2 + 1
+        self._ns_tot = max(self._n_fft_window, int(self._t_buffer_s * self._fs))
+        self._spec_cols = max(1, int(self._t_spec_s * self._fs / self._ns_spec))
+        self._sig = np.full((self._ns_tot, self._nch), np.nan, dtype=np.float32)
+        self._spec_data = np.zeros((self._nfreq * self._nch, self._spec_cols), dtype=np.float32)
+        self._fft_map = np.zeros((self._nfreq, self._nch), dtype=np.float32)
+        self._samples_since_spec_update = 0
+        # Track how many real samples are sitting in `_sig` since the last
+        # connect/reset. Used to feed only the populated portion to the line
+        # view; otherwise pyqtgraph's auto-range latches onto the full t-axis
+        # the moment any sample lands and gaps the NaN-filled leading slots.
+        self._samples_since_clear = 0
+
+    def _maybe_apply_measured_rate(self, fs_measured: Optional[float]) -> None:
+        """Adopt the measured whisker rate when it differs by more than 1%.
+
+        Not mid-recording: the .dat timestamps are first_index / fs, so a
+        rate change there would put a step in the file's time axis.
+        """
+        if not self._auto_fs or not fs_measured or self._is_recording:
+            return
+        if abs(fs_measured - self._fs) <= 0.01 * self._fs:
+            return
+        self._set_rate(fs_measured)
+        self._fft_view.set_nfreq(self._nfreq)
+        print(f"[MainWindow] whisker rate measured from the ESP32 clock: {fs_measured:.2f} Hz")
 
     # ------------------------------------------------------------------
     # UI construction
@@ -560,6 +577,7 @@ class MainWindow(QMainWindow):
         assert self._client is not None
         rows, seq = self._client.imu_bus.read_since(self._imu_last_seq, block=False)
         meta = self._client.bus.get_metadata()
+        self._maybe_apply_measured_rate(meta.get("fs_measured"))
         st = meta.get("server_status") or {}
         if rows is not None:
             self._imu_last_seq = seq
@@ -575,7 +593,7 @@ class MainWindow(QMainWindow):
             rec = st.get("rec", {})
             pi_rec = f"ROV rec {rec.get('secs', 0):.0f}s" if rec.get("on") else "ROV rec off"
             self._path_label.setText(
-                f"{self._client.endpoint_str} | whisker {hz.get('wsk', 0):g} Hz | "
+                f"{self._client.endpoint_str} | whisker {self._fs:.2f} Hz | "
                 f"IMU {hz.get('RAW_IMU', 0):g} Hz | att {hz.get('ATTITUDE', 0):g} Hz | {pi_rec}")
 
     def _update_fft_and_spec(self) -> None:

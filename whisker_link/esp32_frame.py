@@ -18,6 +18,7 @@ Frame types:
     u16 dur_us     sweep duration
     u32 railmask   bit (o-1) set => OUT o is at full scale (nothing plugged in)
     u8  flags      bit0: an ADC halt was recovered during this sweep
+                   bit1: an ADC SPI read failed CRC and was re-read
     u8  nch        number of codes that follow (32)
     nch x i24      raw ADC codes, OUT order 1..nch
 
@@ -54,6 +55,7 @@ NCH = 32
 _SCAN_HDR = struct.Struct("<IIHIBB")       # seq, t_us, dur_us, railmask, flags, nch
 _INFO = struct.Struct("<BBHHIII")
 FLAG_RECOVERED = 0x01
+FLAG_CRC_RETRY = 0x02
 
 # Physical conversion: code -> volts at the ADC input (PGA gain 1).
 VREF_V = 1.2
