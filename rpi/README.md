@@ -13,7 +13,7 @@ ArduSub (MAVLink, UDP 127.0.0.1:14670)┘                                       
 ```
 
 - Both sources are timestamped by the same clock on the Pi, and each also carries its own sample clock (ESP32 `micros()`, autopilot `time_boot_ms`). [`whisker_link/convert.py`](../whisker_link/convert.py) uses both to put whiskers and IMU on one time base to well under a millisecond (checked end to end with the simulators: an injected 50 ms lag is recovered as 50 ± 1 ms).
-- Requested MAVLink streams (re-requested every 5 s, since a GCS can override rates): `RAW_IMU` and `SCALED_IMU2` at 100 Hz, `ATTITUDE`/`ATTITUDE_QUATERNION` 50 Hz, `SCALED_PRESSURE2` (depth) and `SERVO_OUTPUT_RAW` (thrusters) 20 Hz, `LOCAL_POSITION_NED` 10 Hz. Everything else the router delivers is recorded too. Change rates with `--mav-rates RAW_IMU=200,SERVO_OUTPUT_RAW=50`; the measured rates are in the status line, so check what ArduSub actually delivers before relying on a number.
+- Requested MAVLink streams (re-requested every 5 s, since a GCS can override rates): `RAW_IMU` at 100 Hz, `ATTITUDE`/`ATTITUDE_QUATERNION` 50 Hz, `SCALED_PRESSURE2` (depth), `SERVO_OUTPUT_RAW` (thrusters) and `RC_CHANNELS` (pilot inputs) 20 Hz, `LOCAL_POSITION_NED` 10 Hz. Everything else the router delivers is recorded too. Change rates with `--mav-rates RAW_IMU=200,SERVO_OUTPUT_RAW=50`; the measured rates are in the status line, so check what ArduSub actually delivers before relying on a number.
 - Recording format = stream format ([`whisker_link/wire.py`](../whisker_link/wire.py)): one JSON object per line, ~330 MB/hour. Convert with `python -m whisker_link.convert file.jsonl --mat`.
 
 ### One-time vehicle setup
@@ -38,7 +38,7 @@ On the Pi (inside `tmux`/`screen`, or with `nohup`, so it survives the ssh sessi
 cd ~/whisker_sensor && ~/whisker_venv/bin/python -u rpi/daq_server.py --serial /dev/ttyUSB0
 ```
 
-Every 5 s it logs e.g. `whisker 80.0 Hz | RAW_IMU 100, SCALED_IMU2 100, ATTITUDE 50, ... | clients 1 | rec off`. If whisker is 0 Hz, the ESP32 isn't streaming: the server sends `B` every 2 s on its own; if that doesn't help, send `{"cmd":"esp32_reset"}` (RTS pulse = pressing EN). If the IMU entries are missing, the MAVLink endpoint (step 3) isn't set up.
+Every 5 s it logs e.g. `whisker 82.4 Hz | RAW_IMU 100, ATTITUDE 50, ... | clients 1 | rec off`. If whisker is 0 Hz, the ESP32 isn't streaming: the server sends `B` every 2 s on its own; if that doesn't help, send `{"cmd":"esp32_reset"}` (RTS pulse = pressing EN). If the IMU entries are missing, the MAVLink endpoint (step 3) isn't set up.
 
 On the laptop:
 

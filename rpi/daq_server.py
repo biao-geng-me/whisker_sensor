@@ -58,11 +58,15 @@ DEFAULT_MAVLINK = "udpin:0.0.0.0:14670"
 # loop at 400 Hz; what it can actually stream is measured in the status line.
 DEFAULT_MAV_RATES = {
     "RAW_IMU": 100,            # IMU0 accel (mg) / gyro (mrad/s) / mag
-    "SCALED_IMU2": 100,        # IMU1
+    # SCALED_IMU2 not requested: on this vehicle its accel/gyro are all zero
+    # (only the magnetometer is populated), and it cost 14% of the file.
     "ATTITUDE": 50,            # roll/pitch/yaw + rates (EKF)
     "ATTITUDE_QUATERNION": 50,
     "SCALED_PRESSURE2": 20,    # Bar30 depth sensor on ArduSub
     "SERVO_OUTPUT_RAW": 20,    # thruster PWM — likely matters for the whiskers
+    "RC_CHANNELS": 20,         # pilot inputs as ArduSub sees them (joystick -> RC)
+    # MANUAL_CONTROL (joystick, GCS -> vehicle) can't be requested from the
+    # autopilot; it is recorded if the router forwards Cockpit's copy to us.
     "LOCAL_POSITION_NED": 10,
     "SYSTEM_TIME": 1,
 }
