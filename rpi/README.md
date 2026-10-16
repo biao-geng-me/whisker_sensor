@@ -20,7 +20,7 @@ ArduSub (MAVLink, UDP 127.0.0.1:14670)┘                                       
 
 1. **Flash the new firmware** ([`msd/esp32/README.md`](../msd/esp32/README.md)) over USB from the laptop.
 2. **Delete the bridget serial bridge** — it holds `/dev/ttyUSB0` open, and the server can't share it: `curl -X DELETE http://192.168.2.2/bridget/v1.0/bridges -H 'Content-Type: application/json' -d '{"serial_path":"/dev/ttyUSB0","baud":115200,"ip":"192.168.2.1","udp_target_port":27000,"udp_listen_port":27001}'`, then check `curl -s http://192.168.2.2/bridget/v1.0/bridges` prints `[]`.
-3. **Add a MAVLink endpoint** — BlueOS web UI → enable Pirate mode → MAVLink Endpoints → new endpoint: type **UDP Client**, IP `127.0.0.1`, port `14670`, name `whisker`.
+3. **Add a MAVLink endpoint** — BlueOS web UI → enable Pirate mode → MAVLink Endpoints → new endpoint: type **UDP Client**, IP `127.0.0.1`, port `14670`, name `whisker`. Don't use 14660: BlueOS reserves it for its protected "Ping360 Heading" UDP Server endpoint, and daq_server fails with `Address already in use`.
 4. **Python deps on the Pi host (offline).** `ssh pi@192.168.2.2` (BlueOS default password `raspberry` — change it). The Pi is Raspbian 11, armv7l (32-bit), Python 3.9.2, with no pip and usually no internet. Debian also strips `ensurepip` and `distutils`, so pip can't run there at all, not even from its wheel. Instead, run [`scripts/fetch_pi_wheels.sh`](scripts/fetch_pi_wheels.sh) on any machine with internet (armv7l wheels come from piwheels), copy the `pi_wheels` folder to the Pi, and unzip the wheels straight into a venv:
    ```bash
    python3 -m venv --without-pip ~/whisker_venv
@@ -38,7 +38,7 @@ On the Pi (inside `tmux`/`screen`, or with `nohup`, so it survives the ssh sessi
 cd ~/whisker_sensor && ~/whisker_venv/bin/python -u rpi/daq_server.py --serial /dev/ttyUSB0
 ```
 
-Every 5 s it logs e.g. `whisker 82.4 Hz | RAW_IMU 100, ATTITUDE 50, ... | clients 1 | rec off`. If whisker is 0 Hz, the ESP32 isn't streaming: the server sends `B` every 2 s on its own; if that doesn't help, send `{"cmd":"esp32_reset"}` (RTS pulse = pressing EN). If the IMU entries are missing, the MAVLink endpoint (step 3) isn't set up.
+Every 5 s it logs e.g. `whisker 82.4 Hz | RAW_IMU 100, ATTITUDE 50, ... | clients 1 | rec off | errs: gap 0 link-crc 0 adc-crc 0 adc-recov 0`. The `errs` are running totals: `gap` = scans lost on USB, `link-crc` = corrupted frames, `adc-crc` = ADC SPI reads that failed CRC and were re-read (data stays valid; a climbing count means marginal SPI wiring or ground), `adc-recov` = ADC halts recovered. wavi_py shows the same counters in its status line. If whisker is 0 Hz, the ESP32 isn't streaming: the server sends `B` every 2 s on its own; if that doesn't help, send `{"cmd":"esp32_reset"}` (RTS pulse = pressing EN). If the IMU entries are missing, the MAVLink endpoint (step 3) isn't set up.
 
 On the laptop:
 
