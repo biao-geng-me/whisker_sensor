@@ -22,11 +22,17 @@ Channels within one scan are not simultaneous: the four ADC channels of one mux 
 
 ## Signal chain and units
 
-Per gauge (32 per board): one strain gauge in a **350 Ω quarter bridge** (one active gauge, three fixed resistors), excited at **3.3 V** from the PCB's on-board regulator (the PCB is fed 5 V). The bridge output goes to an **INA351ABSIDDFR** instrumentation amplifier, whose gain is set by its GS pin (pin 1): **low = 10, high or unconnected = 20**. Which one this board uses has not been verified yet. Its output is `G × V_bridge + V_REF` (REF is pin 6), so the REF connection sets the zero offset seen by the ADC. The older firmware comments said "gain ~141", which this part can't produce, so treat that number as wrong. The amplifier output goes through the CD4097 mux to the **ADS131M04**, which runs at PGA gain 1 with its internal 1.2 V reference.
+From the MSD Altium sources (`/shared/rc/whiskers/MSD_P25937/P25937_Whisker_Final.zip`, sheets Whisker / Processing / Amplifier_Reference / MAIN / Power), per channel (32 per board):
+
+- **Bridge (Whisker sheet), quarter bridge at 3.3 V:** the external gauge runs from 3V3 to `StrainPOS`, with 352 Ω from `StrainPOS` to GND. The reference half is 123 Ω + 123 Ω from 3V3 to GND, giving `StrainNEG` ≈ 1.65 V. That is about 18 mA per channel, ~0.6 A for 32 channels. 3V3 comes from a TPSM84203 buck module fed 5 V through the USB-A jack J1.
+- **Amplifier (Processing sheet):** INA351ABS, SOT-23-8 (DDF) package, with pinout GS 1, IN− 2, IN+ 3, V− 4, REF 5, OUT 6, V+ 7, SHDN 8. **GS (pin 1) is tied to GND, so G = 10** (low = 10, high or unconnected = 20). SHDN is unconnected, so the amp is enabled. OUT drives the mux through 1 kΩ / 0.1 µF (corner ≈ 1.6 kHz). The older firmware comments said "gain ~141", which this part can't produce.
+- **ADC (MAIN):** ADS131M04 at PGA gain 1 with its internal 1.2 V reference. AINxP comes from the mux COM lines; **all AINxN are tied to GND**.
+
+**Open issue, REF offset:** in the schematic, every INA351 REF (pin 5) goes to `AMP_REF_3V3`, which is a 100 k/100 k divider from 3V3, so ≈ 1.65 V. With AINxN at GND, every connected channel would then read 1.65 V + signal, which is beyond the ±1.2 V full scale, so it would rail. The live board doesn't: W4_B rests at about +26 mV. So the built board probably differs from the schematic, e.g. the divider is reworked and REF ≈ 0 V. If REF is at GND, the single-supply INA output can't go below ≈ 0 V, so **bridge outputs below zero clip**, and only one bending direction is measured from a near-balanced rest. To check, measure REF (pin 5 of any INA351, or C4 on the reference sheet) and one INA output against GND with a multimeter.
 
 Units: the stream carries raw 24-bit codes. `mV = code × 1200 / 2^23` (`MV_PER_CODE` in `whisker_link/esp32_frame.py`) is the voltage at the ADC input, range ±1200 mV. A channel with nothing plugged in rails at +1200 mV.
 
-Strain (quarter bridge, small strain, after subtracting the resting offset V0): `ε = 4 · V_adc / (G · V_ex · GF)`. With V_ex = 3.3 V and GF = 2, that is **30.3 µε per mV at G = 20** and **60.6 µε per mV at G = 10**. Measure V_ex on the board once. For physical units, an end-to-end calibration (known tip load or deflection) is more reliable than these nominal values.
+Strain: the gauge sits on the top arm, so tension (gauge R up) lowers `StrainPOS` and the reading. For a quarter bridge with small strain, after subtracting the resting offset V0, `ε ≈ −4 · V_adc / (G · V_ex · GF)`, assuming IN+ = StrainPOS. With G = 10, V_ex = 3.3 V and GF = 2, that is **−60.6 µε per mV**. For physical units, an end-to-end calibration (known tip load or deflection) is still more reliable than these nominal values.
 
 ## Build and flash
 

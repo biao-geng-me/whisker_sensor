@@ -16,12 +16,12 @@
  *
  *  Board : ESP32 (ESP-WROOM-32, 38-pin)   Arduino ESP32 core 3.x
  *  ADC   : ADS131M04IPWR (4-ch, 24-bit delta-sigma, NO internal oscillator)
- *  MUX   : 2x CD4097BM (dual 8:1)     Amp : INA351ABSIDDFR (gain 10 or 20, GS pin)
+ *  MUX   : 2x CD4097BM (dual 8:1)     Amp : INA351ABS (gain 10, GS to GND)
  * ============================================================================
  *
  *  SIGNAL CHAIN
  *    whisker gauge (350 ohm quarter bridge, 3.3 V excitation)
- *    -> 2 connector pins -> INA351ABS (diff, gain 10 or 20) -> OUTn
+ *    -> 2 connector pins -> INA351ABS (diff, gain 10) -> OUTn
  *    -> CD4097 channel -> COM_Xn/COM_Yn -> ADS131M04 AINxP -> SPI -> ESP32
  *    whisker W (1..16):  gauge A = OUT(2W-1),  gauge B = OUT(2W)
  *    OUT n:              CONN(2n-1) and CONN(2n)
@@ -113,9 +113,9 @@
 
 #define VREF        1.2f
 #define ADC_FS      8388608.0f   // 2^23
-// INA351ABSIDDFR: gain 10 or 20 by its GS pin (state not yet verified). The
+// INA351ABS with GS (pin 1) tied to GND in the MSD schematic -> gain 10. The
 // inherited "~141" doesn't match this part. Text-mode display only.
-#define INA_GAIN    20.0f
+#define INA_GAIN    10.0f
 
 // ── Scan geometry ────────────────────────────────────────────────────────────
 #define NUM_SEL         8
