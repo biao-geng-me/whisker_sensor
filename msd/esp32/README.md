@@ -20,6 +20,14 @@ Defined once in [`whisker_link/esp32_frame.py`](../../whisker_link/esp32_frame.p
 
 Channels within one scan are not simultaneous: the four ADC channels of one mux select are, but the 8 selects follow each other ~1.5 ms apart (~12.3 ms per scan). `t_us` is the scan start.
 
+## Signal chain and units
+
+Per gauge (32 per board): one strain gauge in a **350 Ω quarter bridge** (one active gauge, three fixed resistors), excited at **3.3 V** from the PCB's on-board regulator (the PCB is fed 5 V). The bridge output goes to an **INA351ABSIDDFR** instrumentation amplifier, whose gain is **10 or 20** depending on its GS pin. Which one this board uses has not been verified yet. The older firmware comments said "gain ~141", which this part can't produce, so treat that number as wrong. The amplifier output goes through the CD4097 mux to the **ADS131M04**, which runs at PGA gain 1 with its internal 1.2 V reference.
+
+Units: the stream carries raw 24-bit codes. `mV = code × 1200 / 2^23` (`MV_PER_CODE` in `whisker_link/esp32_frame.py`) is the voltage at the ADC input, range ±1200 mV. A channel with nothing plugged in rails at +1200 mV.
+
+Strain (quarter bridge, small strain, after subtracting the resting offset V0): `ε = 4 · V_adc / (G · V_ex · GF)`. With V_ex = 3.3 V and GF = 2, that is **30.3 µε per mV at G = 20** and **60.6 µε per mV at G = 10**. Measure V_ex on the board once. For physical units, an end-to-end calibration (known tip load or deflection) is more reliable than these nominal values.
+
 ## Build and flash
 
 Arduino IDE 2.x with the **esp32 by Espressif** core 3.x; board **ESP32 Dev Module**. Open `whisker_daq/whisker_daq.ino`, upload over USB. Compile check from the command line:

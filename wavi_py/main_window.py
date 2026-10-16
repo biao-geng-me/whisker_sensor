@@ -592,9 +592,14 @@ class MainWindow(QMainWindow):
             hz = st.get("hz", {})
             rec = st.get("rec", {})
             pi_rec = f"ROV rec {rec.get('secs', 0):.0f}s" if rec.get("on") else "ROV rec off"
+            e = st.get("esp32", {})
+            # running totals since daq_server started; adc-crc = SPI reads re-read
+            errs = (f"errs: gap {e.get('seq_gaps', 0)} link-crc {e.get('crc_fail', 0)} "
+                    f"adc-crc {e.get('adc_crc', 0)} adc-recov {e.get('adc_recov', 0)}")
             self._path_label.setText(
                 f"{self._client.endpoint_str} | whisker {self._fs:.2f} Hz | "
-                f"IMU {hz.get('RAW_IMU', 0):g} Hz | att {hz.get('ATTITUDE', 0):g} Hz | {pi_rec}")
+                f"IMU {hz.get('RAW_IMU', 0):g} Hz | att {hz.get('ATTITUDE', 0):g} Hz | {pi_rec}"
+                f" | {errs}")
 
     def _update_fft_and_spec(self) -> None:
         """Recompute the current FFT (matches ``do_fft`` in wavi.m:901-914)."""

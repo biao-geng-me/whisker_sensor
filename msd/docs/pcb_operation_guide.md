@@ -15,7 +15,8 @@ This guide describes how to physically and procedurally operate the logger hardw
 | Raspberry Pi 4B | Host. Drives ADC master clock, SPI, MUX address lines. Runs the Python logger. |
 | ADS131M04 | 4-channel, 24-bit simultaneously-sampling delta-sigma ADC. |
 | 2 × CD4097B | Differential 8-channel analog MUX. Together they multiplex 32 sensor lines into 4 ADC inputs at 8 MUX positions. |
-| 16 × Wheatstone bridges (350 Ω, strain-gauge) | One bridge per whisker, two channels per whisker → 32 channels total. |
+| 16 × Wheatstone bridges (350 Ω, strain-gauge) | One bridge per whisker, two channels per whisker → 32 channels total. Each channel is a quarter bridge (one active gauge). |
+| 32 × INA351ABSIDDFR | Instrumentation amplifier per channel, gain 10 or 20 set by the GS pin (board setting unverified). See [`msd/esp32/README.md`](../esp32/README.md#signal-chain-and-units) for units and strain conversion. |
 
 All chips on the analog board are powered at **VDD = 3.3 V** (confirmed by multimeter). This matches the Pi's GPIO logic level so no level shifters are required.
 
