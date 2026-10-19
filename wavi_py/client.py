@@ -45,6 +45,7 @@ from wavi_py.daq.bus import SampleBus
 from wavi_py.daq.reader import Reader
 from wavi_py.daq.server_reader import IMU_CHANNELS, ServerReader
 from wavi_py.transports.base import Transport
+from wavi_py.transports.esp32_transport import Esp32SerialTransport
 from wavi_py.transports.serial_transport import SerialTransport
 from wavi_py.transports.tcp_transport import TcpTransport
 from whisker_link.channels import NUM_WHISKER
@@ -73,13 +74,13 @@ class WaviClient:
         t_buffer_s: float = DEFAULT_T_BUFFER_S,
     ):
         transport = transport.lower()
-        if transport not in ("tcp", "serial", "server"):
+        if transport not in ("tcp", "serial", "server", "esp32"):
             raise ValueError(
-                f"transport must be 'tcp', 'serial' or 'server', got {transport!r}")
-        if transport == "server" and int(nsensor) != NUM_WHISKER:
-            raise ValueError(f"server transport is the {NUM_WHISKER}-whisker array: "
+                f"transport must be 'tcp', 'serial', 'server' or 'esp32', got {transport!r}")
+        if transport in ("server", "esp32") and int(nsensor) != NUM_WHISKER:
+            raise ValueError(f"{transport} transport is the {NUM_WHISKER}-whisker array: "
                              f"nsensor must be {NUM_WHISKER}, got {nsensor}")
-        if transport == "serial" and not serial_port:
+        if transport in ("serial", "esp32") and not serial_port:
             raise ValueError("serial transport requires serial_port (e.g. 'COM3', '/dev/ttyACM0')")
 
         # connection params (deferred until start())
@@ -118,7 +119,7 @@ class WaviClient:
 
         self._transport = self._build_transport()
 
-        if self._transport_kind == "server":
+        if self.is_event_stream:
             self._reader = ServerReader(self._transport, self.bus, self.imu_bus,
                                         fs=self.fs, nch=self.nch)
             self._reader.start()
@@ -145,7 +146,7 @@ class WaviClient:
             self._reader.request_stop()
         if self._transport is not None:
             # Best-effort: tell the Arduino we're done recording before we drop the line.
-            if self._transport_kind != "server":
+            if not self.is_event_stream:
                 try:
                     self._transport.write(b"E")
                 except Exception:
@@ -181,9 +182,9 @@ class WaviClient:
 
         Arduino: send 'S' so it raises its CONTROL_PIN. Server: start the
         recording on the vehicle, and if ``local_copy`` is given also tee the
-        raw stream to that local .jsonl path.
+        raw stream to that local .jsonl path. ESP32: only the local tee.
         """
-        if self._transport_kind == "server":
+        if self.is_event_stream:
             if local_copy and isinstance(self._reader, ServerReader):
                 self._reader.start_tee(local_copy)
             return self.send_command({"cmd": "rec_start", "tag": tag})
@@ -191,15 +192,15 @@ class WaviClient:
 
     def send_record_stop(self) -> bool:
         """Stop recording at the source (Arduino: 'E'). Returns True if sent."""
-        if self._transport_kind == "server":
+        if self.is_event_stream:
             if isinstance(self._reader, ServerReader):
                 self._reader.stop_tee()
             return self.send_command({"cmd": "rec_stop"})
         return self._send_cmd(b"E")
 
     def send_command(self, cmd: dict) -> bool:
-        """Server transport only: send one JSON command (see whisker_link/wire.py)."""
-        if self._transport_kind != "server":
+        """Server / ESP32 transport only: send one JSON command (see whisker_link/wire.py)."""
+        if not self.is_event_stream:
             return False
         return self._send_cmd((json.dumps(cmd) + "\n").encode())
 
@@ -228,9 +229,16 @@ class WaviClient:
         return self._transport_kind
 
     @property
+    def is_event_stream(self) -> bool:
+        """The source sends daq_server's JSON events (server, or the ESP32 decoded locally)."""
+        return self._transport_kind in ("server", "esp32")
+
+    @property
     def endpoint_str(self) -> str:
         if self._transport_kind in ("tcp", "server"):
             return f"{self._transport_kind}://{self._tcp_host}:{self._tcp_port}"
+        if self._transport_kind == "esp32":
+            return f"esp32://{self._serial_port}"
         return f"serial://{self._serial_port}@{self._baudrate}"
 
     # ----- internals
@@ -242,4 +250,6 @@ class WaviClient:
         if self._transport_kind == "tcp":
             return TcpTransport(self._tcp_host, self._tcp_port)
         assert self._serial_port is not None
+        if self._transport_kind == "esp32":
+            return Esp32SerialTransport(self._serial_port)
         return SerialTransport(self._serial_port, baudrate=self._baudrate)

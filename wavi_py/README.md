@@ -28,6 +28,14 @@ python -m wavi_py --transport server --host 192.168.2.2 --scale 0.2
 
 This adds an **IMU** view, and **Rec** records on the vehicle as well as locally (`.dat` + full `.jsonl`).
 
+Against the ESP32 whisker DAQ ([`msd/esp32/whisker_daq`](../msd/esp32/whisker_daq/)) plugged directly into the PC by USB, for bench work without the ROV:
+
+```bash
+python -m wavi_py --transport esp32 --serial-port COM5
+```
+
+wavi_py decodes the ESP32's binary frames itself (921600 baud, sends `B` to start streaming), so everything behaves as with `--transport server` except that there is no IMU and **Rec** writes only the local `.dat` + `.jsonl`. The status line shows the scan rate and the same error counters. Opening the port does not reset the ESP32.
+
 Against an Arduino plugged directly into the PC:
 
 ```bash
