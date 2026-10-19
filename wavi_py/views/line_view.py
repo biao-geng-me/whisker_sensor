@@ -1,7 +1,7 @@
 """Multi-channel time-series view — port of ``wavi/line_view.m``.
 
-Each sensor uses two channels (X/Y); color alternates red/blue between the two
-channels of each sensor. Two layouts:
+Each sensor uses two channels, gauge A then gauge B (red / blue, with a legend).
+Two layouts:
 
 - Stacked: the two channels of sensor ``i`` are plotted at Y-offset ``i``, so
   all nsensor are visible at once on one axis.
@@ -28,6 +28,13 @@ from wavi_py.views.base import ViewWindow
 _RED = (220, 40, 40)
 _BLUE = (40, 80, 220)
 _PROBE_PEN = pg.mkPen((90, 90, 90), width=1, style=pg.QtCore.Qt.PenStyle.DashLine)
+_GAUGE_NAMES = ("A", "B")
+
+
+def _add_gauge_legend(plot: pg.PlotItem) -> None:
+    """A / B legend in the top-right corner; curves named afterwards join it."""
+    plot.addLegend(offset=(-10, 10), labelTextColor="k",
+                   brush=pg.mkBrush(255, 255, 255, 200), pen=pg.mkPen(180, 180, 180))
 
 
 class LineView(ViewWindow):
@@ -47,12 +54,15 @@ class LineView(ViewWindow):
         self._stacked = pg.PlotWidget()
         self._stacked.setBackground("w")
         self._stacked.setLabel("bottom", "Time", units="s")
-        self._stacked.setLabel("left", "Sensor index")
+        self._stacked.setLabel("left", "Whisker")
+        self._stacked.getAxis("left").setTicks([[(s, f"W{s + 1}") for s in range(self._nsensor)]])
         self._stacked.showGrid(x=True, y=True, alpha=0.2)
+        _add_gauge_legend(self._stacked.getPlotItem())
         self._stacked_curves: list[pg.PlotDataItem] = []
         for c in range(self._nch):
             color = _RED if (c % 2) == 0 else _BLUE
-            self._stacked_curves.append(self._stacked.plot(pen=pg.mkPen(color=color, width=4)))
+            name = _GAUGE_NAMES[c] if c < 2 else None
+            self._stacked_curves.append(self._stacked.plot(pen=pg.mkPen(color=color, width=4), name=name))
 
         # --- grid: one tile per sensor
         self._grid = pg.GraphicsLayoutWidget()
@@ -65,10 +75,13 @@ class LineView(ViewWindow):
             p.showGrid(x=True, y=True, alpha=0.2)
             if self._tiles:
                 p.setXLink(self._tiles[0])
+            if not self._tiles:
+                _add_gauge_legend(p)
             self._tiles.append(p)
             for g in range(2):
                 color = _RED if g == 0 else _BLUE
-                self._grid_curves.append(p.plot(pen=pg.mkPen(color=color, width=2)))
+                name = _GAUGE_NAMES[g] if s == 0 else None
+                self._grid_curves.append(p.plot(pen=pg.mkPen(color=color, width=2), name=name))
 
         self._pages = QStackedWidget()
         self._pages.addWidget(self._stacked)
