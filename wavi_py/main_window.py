@@ -596,9 +596,11 @@ class MainWindow(QMainWindow):
             else:
                 pi_rec = "streaming" if st.get("esp32", {}).get("streaming") else "NOT streaming"
             e = st.get("esp32", {})
-            # running totals since daq_server started; adc-crc = SPI reads re-read
+            # running totals since daq_server started; adc-crc = SPI reads re-read,
+            # adc-stale = scans where a read had no new conversion (dropped)
             errs = (f"errs: gap {e.get('seq_gaps', 0)} link-crc {e.get('crc_fail', 0)} "
-                    f"adc-crc {e.get('adc_crc', 0)} adc-recov {e.get('adc_recov', 0)}")
+                    f"adc-crc {e.get('adc_crc', 0)} adc-stale {e.get('adc_stale', 0)} "
+                    f"adc-recov {e.get('adc_recov', 0)}")
             imu = (f"IMU {hz.get('RAW_IMU', 0):g} Hz | att {hz.get('ATTITUDE', 0):g} Hz | "
                    if self._client.transport_kind == "server" else "")
             self._path_label.setText(

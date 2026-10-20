@@ -56,6 +56,14 @@ def test_corrupted_frame_is_dropped_not_misparsed():
     assert [s.seq for s in scans] == [2]
 
 
+def test_flags_roundtrip():
+    flags = ef.FLAG_RECOVERED | ef.FLAG_CRC_RETRY | ef.FLAG_STALE
+    assert flags == 0x07
+    frame = ef.encode_scan(7, 1000, 12300, 0, flags, [0] * ef.NCH)
+    (scan,) = list(ef.Decoder().feed(frame))
+    assert scan.flags & ef.FLAG_STALE and scan.flags == flags
+
+
 def test_info_roundtrip():
     info = ef.Info(ef.PROTO_VERSION, 32, 0x2240, 0xFF02, 800000, 3125, 921600)
     (ev,) = list(ef.Decoder().feed(ef.encode_info(info)))

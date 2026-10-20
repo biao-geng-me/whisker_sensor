@@ -52,7 +52,7 @@ class Esp32SerialTransport(Transport):
         self._last_kick = 0.0
         self._last_status = time.monotonic()
         self._scans_since_status = 0
-        self._n = {"scans": 0, "seq_gaps": 0, "adc_recov": 0, "adc_crc": 0}
+        self._n = {"scans": 0, "seq_gaps": 0, "adc_recov": 0, "adc_crc": 0, "adc_stale": 0}
         self._emit(self._hello())
         self._kick()
 
@@ -142,6 +142,8 @@ class Esp32SerialTransport(Transport):
                 self._n["adc_recov"] += 1
             if ev.flags & ef.FLAG_CRC_RETRY:
                 self._n["adc_crc"] += 1
+            if ev.flags & ef.FLAG_STALE:
+                self._n["adc_stale"] += 1
             self._emit({"k": "wsk", "t": now, "seq": ev.seq, "tus": self._unwrap(ev.t_us),
                         "dur": ev.dur_us, "rail": ev.railmask, "flg": ev.flags, "raw": ev.raw})
         elif isinstance(ev, ef.Text):

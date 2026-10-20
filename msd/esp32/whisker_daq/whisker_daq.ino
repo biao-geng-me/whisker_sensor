@@ -41,15 +41,25 @@
  *    b  re-capture baseline               v  deviation <-> absolute volts
  *    m  connector/channel map             c  calibration      n  noise floor
  *    [ ]  halve / double the graph scale  0  auto-scale
+ *    d<sel>  mux settling diagnostic: 'd' then a target select digit 0-7.
+ *            Per ADC channel, switches N times from a select where that
+ *            channel is railed/far off to <sel>, reads every conversion for
+ *            ~5 ms (no discards) and prints the averaged mV vs time since
+ *            the switch. Shows the true analog + sinc3 settling floor.
  *  Any text-mode command leaves binary mode. Serial Monitor: set the line
  *  ending to "No line ending" and the baud to SERIAL_BAUD.
  *
  *  SCAN TIMING
- *    Each select: SETTLE_US + (DISCARD_SAMPLES+1) ADC samples of 320 us.
- *    8 selects ~ 12.3 ms -> ~80 scans/s. The four ADC channels of one select
- *    are simultaneous; successive selects are ~1.5 ms apart, so gauges within
- *    one scan are NOT sampled at the same instant (see OUT_OF for the order).
- *    t_us in the frame is the start of the sweep.
+ *    Each select: SETTLE_US, then DISCARD_SAMPLES + 1 conversions that END
+ *    after the settle: the kept one's sinc3 window (3 x 320 us) starts after
+ *    the settle. ~250 + 160 (avg wait) + 3 x 320 + 240 (last read) ~ 1.6
+ *    ms/select, 8 selects ~ 13 ms -> ~75-80 scans/s (estimate; read dur_us
+ *    off the stream). Every conversion is read (also during the
+ *    settle) so the ADC's 2-deep output FIFO never backs up; a read that
+ *    carries no new conversion is counted as "stale" (see readValid). The
+ *    four ADC channels of one select are simultaneous; successive selects are
+ *    ~1.6 ms apart, so gauges within one scan are NOT sampled at the same
+ *    instant (see OUT_OF for the order). t_us in the frame is the sweep start.
  * ============================================================================
  */
 
@@ -87,9 +97,12 @@
 #define CLKIN_HZ   800000UL   // 0.8 MHz on GPIO16 via LEDC
 // One ADC read is 18 bytes = 144 SCLK. It must finish inside one 320 us sample
 // period or every read waits an extra period: 200 kHz (720 us/read) gave ~33
-// scans/s. 600 kHz = 240 us/read. Kept below CLKIN per the original bring-up
-// rule ("SCLK must stay below CLKIN"), whose source is unverified. Watch the
-// server's adc-crc / recov counters after raising it.
+// scans/s. 600 kHz = 240 us/read. The old bring-up rule "SCLK must stay below
+// CLKIN" is not in the datasheet: SBAS890D 6.6 only asks tc(SC) >= 40 ns
+// (SCLK <= 25 MHz at DVDD 2.7-3.6 V); SPI is asynchronous to CLKIN. What does
+// matter is finishing a read before the next conversion lands (8.5.1.5: the
+// DRDY pulse is blocked when a conversion completes during a read). Watch the
+// server's adc-crc / adc-stale / recov counters after raising it.
 #define SPI_HZ     600000UL
 // fMOD = CLKIN/2 = 400 kHz; OSR 128 -> fDATA = 3.125 kSPS -> 320 us/sample.
 #define FDATA_SPS  (CLKIN_HZ / 2 / 128)
@@ -103,13 +116,17 @@
 #define CMD_WREG(a) (0x6000 | ((a) << 7))
 #define REG_ID      0x00
 #define REG_CLOCK   0x03
-#define REG_GAIN1   0x04
-#define REG_GAIN2   0x05
+#define REG_GAIN1   0x04   // the only GAIN register on the M04; 0x05 is reserved
 // CLOCK: reserved[15:12]=1111 (preserve), CH_EN[11:8]=1111, OSR[4:2]=000 (128),
 // PWR[1:0]=10 (high-resolution) -> 0xFF02
 #define CLOCK_ALL_CH_OSR128  0xFF02
 #define CLOCK_MASK  0x0FFF
 #define GAIN_ALL_1  0x0000
+// STATUS (reg 0x01, returned as word 0 of every data frame, MSB-aligned in the
+// 24-bit word): bits 3:0 = DRDY3..DRDY0, "1b = New data are available" per
+// channel (SBAS890D Table 8-15). All four channels are enabled, so a frame
+// with a fresh conversion has all four set.
+#define STATUS_DRDY_ALL  0x000F
 
 #define VREF        1.2f
 #define ADC_FS      8388608.0f   // 2^23
@@ -147,6 +164,7 @@ static const uint8_t CONN_TO_JPIN[17] =
 #define PROTO_VERSION 1
 #define FLAG_RECOVERED 0x01   // an ADC halt was recovered during this sweep
 #define FLAG_CRC_RETRY 0x02   // an ADC SPI read failed CRC and was re-read
+#define FLAG_STALE     0x04   // a read carried no new conversion and was dropped
 
 // ── State ────────────────────────────────────────────────────────────────────
 SPIClass vspi(VSPI);
@@ -163,12 +181,24 @@ static float outNoise[NUM_OUT + 1];
 static uint16_t g_id = 0, g_clockRb = 0;
 static uint32_t g_halts = 0, g_crcFails = 0, g_unrecovered = 0, g_scans = 0;
 static uint32_t g_recByLevel[4] = {0, 0, 0, 0};
+static uint32_t g_staleReads = 0;      // reads whose STATUS DRDY bits said "no new data"
 static bool     g_absolute = false;   // 'v' toggles
 static char     g_mode     = 'g';     // 'g' grid, 'x' profile, 's' table, 'c' cal, 'n' noise, 'B' binary
 static uint32_t g_scanT0   = 0;       // micros() at the start of the last scan
 static uint32_t g_scanDur  = 0;
 static bool     g_scanRecovered = false;
 static bool     g_scanCrcRetry  = false;
+static bool     g_scanStale     = false;
+
+// DRDY edge bookkeeping. Each falling edge is one new conversion; the ISR
+// counts them and reads claim them one at a time, so no read can ever reuse
+// a conversion that was already read (the old level test on DRDY could).
+static volatile uint32_t g_drdyEdges = 0;   // falling edges seen by the ISR
+static volatile uint32_t g_drdyEdgeT = 0;   // micros() of the latest edge
+static uint32_t g_drdyTaken  = 0;           // edges already claimed by a read
+static bool     g_respPending = false;      // next frame's word 0 is a command
+                                            // response, not STATUS
+static void IRAM_ATTR drdyISR() { g_drdyEdges = g_drdyEdges + 1; g_drdyEdgeT = micros(); }
 
 // Graph geometry.
 #define BAR_H        6
@@ -182,7 +212,8 @@ inline void cs_low()  { digitalWrite(PIN_CS, LOW);  }
 inline void cs_high() { digitalWrite(PIN_CS, HIGH); }
 
 static bool initADC();
-static bool readValid(long ch[4], uint32_t budget_ms);
+static bool readValid(long ch[4], uint32_t budget_ms, uint32_t *idx = nullptr,
+                      uint32_t *tConv = nullptr);
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Framing + logging
@@ -252,7 +283,8 @@ static void send_scan() {
     put_u32(p + 4, g_scanT0);
     put_u16(p + 8, g_scanDur > 0xFFFF ? 0xFFFF : (uint16_t)g_scanDur);
     put_u32(p + 10, rail);
-    p[14] = (g_scanRecovered ? FLAG_RECOVERED : 0) | (g_scanCrcRetry ? FLAG_CRC_RETRY : 0);
+    p[14] = (g_scanRecovered ? FLAG_RECOVERED : 0) | (g_scanCrcRetry ? FLAG_CRC_RETRY : 0) |
+            (g_scanStale ? FLAG_STALE : 0);
     p[15] = NUM_OUT;
     for (int o = 1; o <= NUM_OUT; o++) {
         uint32_t c = (uint32_t)outRaw[o] & 0xFFFFFF;
@@ -314,20 +346,55 @@ static uint16_t ads_read_reg(uint8_t reg) {
     return r;
 }
 
-static bool waitDRDY(uint32_t timeout_ms) {
+static inline bool edgePending() { return (int32_t)(g_drdyEdges - g_drdyTaken) > 0; }
+
+// True when an unread conversion is (probably) waiting; cheap, claims nothing.
+static inline bool drdyPending() { return edgePending() || digitalRead(PIN_DRDY) == LOW; }
+
+// Forget edges nobody read (text-mode pauses, re-init). Data still sitting in
+// the ADC's FIFO keeps DRDY low, so waitDRDY still finds it.
+static inline void drdyResync() { g_drdyTaken = g_drdyEdges; }
+
+// Wait for a conversion that no read has claimed yet:
+//  - an unclaimed DRDY falling edge (the normal case), or
+//  - DRDY held low with no unclaimed edge: data whose falling edge never came
+//    because it completed during the previous read (SBAS890D 8.5.1.5: "The
+//    DRDY pulse is blocked when new conversions complete while conversion
+//    data are read"), or the second slot of the 2-deep output FIFO after a
+//    pause (8.5.1.9.1). The 10 us re-check stops a fresh edge whose ISR has
+//    not run yet from being taken for this case and then claimed twice.
+// *idx = edge count of the claimed conversion; an edgeless one gets the count
+// of the last claimed edge, i.e. it is never labelled newer than it is.
+// *tConv = micros() of the edge, or "now" for an edgeless one.
+static bool waitDRDY(uint32_t timeout_ms, uint32_t *idx = nullptr, uint32_t *tConv = nullptr) {
     uint32_t t0 = millis();
-    while (digitalRead(PIN_DRDY) == HIGH) { if (millis() - t0 > timeout_ms) return false; }
+    for (;;) {
+        if (edgePending()) {
+            g_drdyTaken++;
+            if (tConv) *tConv = g_drdyEdgeT;
+            break;
+        }
+        if (digitalRead(PIN_DRDY) == LOW) {
+            delayMicroseconds(10);
+            if (edgePending()) continue;
+            if (digitalRead(PIN_DRDY) == LOW) {
+                if (tConv) *tConv = micros();
+                break;
+            }
+        }
+        if (millis() - t0 > timeout_ms) return false;
+    }
+    if (idx) *idx = g_drdyTaken;
     return true;
 }
 
 static uint32_t ads_read_all(long ch[4], bool *crcOk) {
-    uint8_t buf[15];                        // STATUS + CH0..CH3, 3 bytes each
+    static const uint8_t zeros[18] = {0};   // NULL command + 5 don't-care words
+    uint8_t buf[18];                        // STATUS, CH0..CH3, CRC (+pad)
     cs_low();
-    for (int i = 0; i < 15; i++) buf[i] = vspi.transfer(0x00);
-    uint16_t rxCrc  = (uint16_t)vspi.transfer(0x00) << 8;
-    rxCrc          |= (uint16_t)vspi.transfer(0x00);
-    vspi.transfer(0x00);                    // CRC word pad byte
+    vspi.transferBytes(zeros, buf, sizeof(buf));   // one call: no per-byte gaps
     cs_high();
+    uint16_t rxCrc = ((uint16_t)buf[15] << 8) | buf[16];
     uint32_t status = ((uint32_t)buf[0] << 16) | ((uint32_t)buf[1] << 8) | buf[2];
     for (int i = 0; i < 4; i++) {
         uint32_t raw = ((uint32_t)buf[3 + 3*i] << 16) |
@@ -370,37 +437,53 @@ static void restartCLKIN() {
 static bool initADC() {
     spi_word(CMD_RESET);
     delay(50);
+    drdyResync();
     waitDRDY(300);
     spi_word(CMD_UNLOCK);
     delayMicroseconds(50);
     ads_write_reg(REG_CLOCK, CLOCK_ALL_CH_OSR128);
     ads_write_reg(REG_GAIN1, GAIN_ALL_1);
-    ads_write_reg(REG_GAIN2, GAIN_ALL_1);
     g_clockRb = ads_read_reg(REG_CLOCK);     // read back BEFORE locking
     g_id      = ads_read_reg(REG_ID);
     spi_word(CMD_LOCK);
     delay(10);
-    waitDRDY(300);
+    drdyResync();
+    g_respPending = true;                    // next frame answers LOCK (0x0555)
     return (g_clockRb & CLOCK_MASK) == (CLOCK_ALL_CH_OSR128 & CLOCK_MASK);
 }
 
-static bool readValid(long ch[4], uint32_t budget_ms) {
+// One conversion that is alive (STATUS not 0/FFFFFF), CRC-clean and fresh
+// (all STATUS DRDY bits set). A frame read right after a command carries the
+// command's response in word 0 instead of STATUS, so that one is not checked.
+static bool readValid(long ch[4], uint32_t budget_ms, uint32_t *idx, uint32_t *tConv) {
     uint32_t t0 = millis();
     while (millis() - t0 < budget_ms) {
-        if (!waitDRDY(50)) continue;
+        uint32_t k, t;
+        if (!waitDRDY(50, &k, &t)) continue;
         bool crcOk = false;
         uint32_t st = ads_read_all(ch, &crcOk);
-        if (statusValid(st)) {
-            if (crcOk) return true;
+        if (!statusValid(st)) continue;
+        if (!crcOk) {
             g_crcFails++;                     // looked alive, was noise
             g_scanCrcRetry = true;
+            continue;
         }
+        if (g_respPending) {
+            g_respPending = false;
+        } else if (((st >> 8) & STATUS_DRDY_ALL) != STATUS_DRDY_ALL) {
+            g_staleReads++;                   // no new conversion behind this read
+            g_scanStale = true;
+            continue;
+        }
+        if (idx)   *idx = k;
+        if (tConv) *tConv = t;
+        return true;
     }
     return false;
 }
 
 // Levels: 1 soft re-init · 2 SPI flush + re-init · 3 CLKIN restart (+HW reset)
-static int recoverADC(long ch[4]) {
+static int recoverADC(long ch[4], uint32_t *idx = nullptr) {
     for (int level = 1; level <= 3; level++) {
         switch (level) {
             case 1: break;
@@ -413,31 +496,32 @@ static int recoverADC(long ch[4]) {
                     break;
         }
         initADC();
-        if (readValid(ch, 300)) return level;
+        if (readValid(ch, 300, idx)) return level;
     }
     return 0;
 }
 
-static bool readOrRecover(long ch[4]) {
-    if (readValid(ch, 250)) return true;
+// 0 = failed, 1 = read, 2 = read after an ADC re-init (its filters restarted).
+static int readOrRecover(long ch[4], uint32_t *idx = nullptr) {
+    if (readValid(ch, 250, idx)) return 1;
     g_halts++;
     g_scanRecovered = true;
-    int lvl = recoverADC(ch);
+    int lvl = recoverADC(ch, idx);
     if (lvl > 0) {
         g_recByLevel[lvl]++;
-        logf("[halt #%lu] recovered at L%d  (L1=%lu L2=%lu L3=%lu fail=%lu crcbad=%lu)\n",
+        logf("[halt #%lu] recovered at L%d  (L1=%lu L2=%lu L3=%lu fail=%lu crcbad=%lu stale=%lu)\n",
              (unsigned long)g_halts, lvl,
              (unsigned long)g_recByLevel[1], (unsigned long)g_recByLevel[2],
              (unsigned long)g_recByLevel[3], (unsigned long)g_unrecovered,
-             (unsigned long)g_crcFails);
-        return true;
+             (unsigned long)g_crcFails, (unsigned long)g_staleReads);
+        return 2;
     }
     g_unrecovered++;
     logf("[halt #%lu] UNRECOVERED  ID=0x%04X CLOCKrb=0x%04X crcbad=%lu"
          "  -> power-cycle the PCB with the ESP32 already running\n",
          (unsigned long)g_halts, g_id, g_clockRb, (unsigned long)g_crcFails);
     delay(500);
-    return false;
+    return 0;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -469,17 +553,35 @@ static int probeSelectsGrounded() {
 // ─────────────────────────────────────────────────────────────────────────────
 //  Scan — sweep select 0..7, fill outRaw/outV[1..32]
 // ─────────────────────────────────────────────────────────────────────────────
+// Upper bound on reads per select before giving up on edge accounting (only
+// reachable if DRDY edges keep getting swallowed; normally DISCARD + 1 or +2).
+#define MAX_READS_PER_SEL  (4 * (DISCARD_SAMPLES + 1))
+
 static bool scan_all() {
     long ch[4];
     g_scanRecovered = false;
     g_scanCrcRetry  = false;
+    g_scanStale     = false;
+    drdyResync();
     g_scanT0 = micros();
     for (uint8_t sel = 0; sel < NUM_SEL; sel++) {
         mux_select(sel);
-        delayMicroseconds(SETTLE_US);
-        for (uint8_t d = 0; d < DISCARD_SAMPLES; d++)   // flush the sinc filter
-            if (!readOrRecover(ch)) return false;
-        if (!readOrRecover(ch)) return false;
+        uint32_t tSel = micros();
+        // Settle, but keep reading (and dropping) conversions meanwhile, so
+        // none is left in the FIFO to come back later as a "new" sample.
+        while (micros() - tSel < SETTLE_US)
+            if (drdyPending() && !readOrRecover(ch)) return false;
+        // Keep the (DISCARD_SAMPLES+1)-th conversion that completes after the
+        // settle: its sinc3 window (3 conversions) lies entirely after it.
+        uint32_t mark = g_drdyEdges, k;
+        uint8_t got = 0;
+        for (int reads = 0; got <= DISCARD_SAMPLES; reads++) {
+            int r = readOrRecover(ch, &k);
+            if (r == 0) return false;
+            if (r == 2) { mark = k; got = 0; continue; }   // filters restarted
+            if ((int32_t)(k - mark) > 0) got++;
+            else if (reads >= MAX_READS_PER_SEL) { g_staleReads++; g_scanStale = true; break; }
+        }
         for (uint8_t a = 0; a < NUM_ADC_CH; a++) {
             uint8_t o = OUT_OF[a][sel];
             outRaw[o] = ch[a];
@@ -543,10 +645,11 @@ static void printCell(char g, uint8_t o) {
 static void print_scan() {
     int railed = 0;
     for (int o = 1; o <= NUM_OUT; o++) if (isRailed(o)) railed++;
-    Serial.printf("\n--- scan #%lu   %s   (halts=%lu crcbad=%lu, %d/%d open) ---\n",
+    Serial.printf("\n--- scan #%lu   %s   (halts=%lu crcbad=%lu stale=%lu, %d/%d open) ---\n",
                   (unsigned long)g_scans,
                   g_absolute ? "absolute V at ADC" : "deviation from baseline, mV",
-                  (unsigned long)g_halts, (unsigned long)g_crcFails, railed, NUM_OUT);
+                  (unsigned long)g_halts, (unsigned long)g_crcFails,
+                  (unsigned long)g_staleReads, railed, NUM_OUT);
     for (uint8_t w = 1; w <= NUM_WHISKER; w++) {
         Serial.printf("  W%-2u", w);
         printCell('A', 2 * w - 1);
@@ -584,9 +687,9 @@ static void print_profile() {
         if (v < -BAR_H) v = -BAR_H;
         n[o] = (int8_t)v;
     }
-    Serial.printf("\n== scan %lu | %d/%d open | scale +/-%.2f mV | halts %lu crc %lu ==\n",
+    Serial.printf("\n== scan %lu | %d/%d open | scale +/-%.2f mV | halts %lu crc %lu stale %lu ==\n",
                   (unsigned long)g_scans, open, NUM_OUT, g_scale,
-                  (unsigned long)g_halts, (unsigned long)g_crcFails);
+                  (unsigned long)g_halts, (unsigned long)g_crcFails, (unsigned long)g_staleReads);
     char row[NUM_OUT * COL_W + 1];
     for (int r = BAR_H; r >= -BAR_H; r--) {
         for (int i = 0; i < NUM_OUT; i++) {
@@ -659,9 +762,10 @@ static void print_grid() {
         if (fabsf(devMv(o)) > fabsf(peak)) { peak = devMv(o); peakOut = o; }
     }
     Serial.printf("\n===== scan %lu | %d live, %d open | bar = +/-%.2f mV"
-                  " | halts %lu crc %lu =====\n",
+                  " | halts %lu crc %lu stale %lu =====\n",
                   (unsigned long)g_scans, live, open, g_scale,
-                  (unsigned long)g_halts, (unsigned long)g_crcFails);
+                  (unsigned long)g_halts, (unsigned long)g_crcFails,
+                  (unsigned long)g_staleReads);
     if (peakOut)
         Serial.printf("  largest: W%02u gauge %c  %+.2f mV\n",
                       whiskerOfOut(peakOut), gaugeOfOut(peakOut), peak);
@@ -722,6 +826,133 @@ static void calibrate_step() {
                   outNoise[bo] > 0 ? best / outNoise[bo] : 0.0f);
 }
 
+// ── Settling diagnostic ('d'): what a select change really costs ────────────
+// For each ADC channel: dwell on a "from" select where that channel is railed
+// (or, failing that, furthest from the target), switch to the target select
+// right after a read, then read EVERY conversion for DIAG_WINDOW_US with no
+// discards. Repeat DIAG_REPS times; per conversion index k print the mean time
+// since the switch and the mean deviation from that rep's final value (mean
+// of the last ms). A conversion whose t >= 3 x 320 us ("post" in the table)
+// has its whole sinc3 window after the switch, so any residual left there is
+// analog (MUX/INA351/RC) settling, not the digital filter.
+#define DIAG_REPS       32
+#define DIAG_DWELL_US   3000
+#define DIAG_WINDOW_US  5000
+#define DIAG_FINAL_US   1000      // last part of the window = "settled" value
+#define DIAG_MAXK       24
+#define CONV_US         (1000000UL / FDATA_SPS)
+
+static inline float codeMv(long c) { return (c / ADC_FS) * VREF * 1000.0f; }
+
+// Read every conversion for `us` microseconds; returns false on an ADC halt.
+static bool diag_dwell(uint32_t us, long ch[4]) {
+    uint32_t t0 = micros();
+    do { if (!readOrRecover(ch)) return false; } while (micros() - t0 < us);
+    return true;
+}
+
+static uint8_t diag_from_select(uint8_t a, uint8_t tgt) {
+    uint8_t ot = OUT_OF[a][tgt];
+    int best = -1; long bestD = -1;
+    for (uint8_t s = 0; s < NUM_SEL; s++) {
+        if (s == tgt) continue;
+        long d = labs(outRaw[OUT_OF[a][s]] - outRaw[ot]);
+        if (isRailed(OUT_OF[a][s])) d += 1L << 26;     // railed beats anything
+        if (d > bestD) { bestD = d; best = s; }
+    }
+    return (uint8_t)best;
+}
+
+static void settle_diag(uint8_t tgt) {
+    long ch[4];
+    if (!scan_all()) { Serial.println("settle diag: ADC not responding"); return; }
+    Serial.printf("\n=== mux settling diagnostic -> select %u  (%d reps, %lu us window,"
+                  " conversion %lu us, SETTLE_US %d, discards %d) ===\n",
+                  tgt, DIAG_REPS, (unsigned long)DIAG_WINDOW_US, (unsigned long)CONV_US,
+                  SETTLE_US, DISCARD_SAMPLES);
+    for (uint8_t a = 0; a < NUM_ADC_CH; a++) {
+        uint8_t from = diag_from_select(a, tgt);
+        uint8_t of = OUT_OF[a][from], ot = OUT_OF[a][tgt];
+        static double sT[DIAG_MAXK], sD[DIAG_MAXK], sD2[DIAG_MAXK], sV[DIAG_MAXK];
+        static int32_t tMin[DIAG_MAXK];
+        static uint16_t n[DIAG_MAXK];
+        for (int k = 0; k < DIAG_MAXK; k++) {
+            sT[k] = sD[k] = sD2[k] = sV[k] = 0; n[k] = 0; tMin[k] = INT32_MAX;
+        }
+        double sPre = 0, sFin = 0, sFin2 = 0;
+        int reps = 0;
+        uint32_t staleBefore = g_staleReads;
+        for (int r = 0; r < DIAG_REPS; r++) {
+            float v[DIAG_MAXK]; int32_t t[DIAG_MAXK]; int nk = 0;
+            mux_select(from);
+            if (!diag_dwell(DIAG_DWELL_US, ch)) return;     // ends right after a read
+            float pre = codeMv(ch[a]);
+            mux_select(tgt);
+            uint32_t tSw = micros(), tc;
+            while (micros() - tSw < DIAG_WINDOW_US) {
+                if (!readValid(ch, 250, nullptr, &tc)) { Serial.println("  ADC halt — aborted"); return; }
+                if (nk < DIAG_MAXK) { v[nk] = codeMv(ch[a]); t[nk] = (int32_t)(tc - tSw); nk++; }
+            }
+            double fin = 0; int nf = 0;
+            for (int k = 0; k < nk; k++)
+                if (t[k] >= (int32_t)(DIAG_WINDOW_US - DIAG_FINAL_US)) { fin += v[k]; nf++; }
+            if (!nf) continue;
+            fin /= nf;
+            for (int k = 0; k < nk; k++) {
+                double d = v[k] - fin;
+                sT[k] += t[k]; sV[k] += v[k]; sD[k] += d; sD2[k] += d * d; n[k]++;
+                if (t[k] < tMin[k]) tMin[k] = t[k];
+            }
+            sPre += pre; sFin += fin; sFin2 += fin * fin; reps++;
+        }
+        if (reps < 2) { Serial.printf("  CH%u: no usable reps\n", a); continue; }
+        double pre = sPre / reps, fin = sFin / reps;
+        double finSd = sqrt(fmax(0.0, sFin2 / reps - fin * fin));
+        double step = fin - pre;
+        Serial.printf("\n-- CH%u: sel %u (OUT%u W%02u%c%s) -> sel %u (OUT%u W%02u%c%s), %d reps --\n",
+                      a, from, of, whiskerOfOut(of), gaugeOfOut(of), isRailed(of) ? " railed" : "",
+                      tgt, ot, whiskerOfOut(ot), gaugeOfOut(ot), isRailed(ot) ? " railed" : "", reps);
+        Serial.printf("   before %+9.3f mV   after %+9.3f mV   step %+9.3f mV   final sd %.3f mV"
+                      "   stale reads %lu\n", pre, fin, step, finSd,
+                      (unsigned long)(g_staleReads - staleBefore));
+        Serial.println("    k   t_us  t_min  window   mean_mV    dev_mV  dev_sd_mV  dev/step");
+        int settledK = -1;
+        for (int k = 0; k < DIAG_MAXK; k++) {
+            if (n[k] < reps / 2) break;
+            double mt = sT[k] / n[k], md = sD[k] / n[k];
+            double sd = sqrt(fmax(0.0, sD2[k] / n[k] - md * md));
+            const char *win = tMin[k] >= (int32_t)(3 * CONV_US) ? "post"
+                            : (sT[k] / n[k] >= 3.0 * CONV_US ? "most" : "part");
+            Serial.printf("   %2d  %5.0f  %5ld  %-6s %+9.3f %+9.3f  %9.3f  %+8.4f\n",
+                          k, mt, (long)tMin[k], win, sV[k] / n[k], md, sd,
+                          fabs(step) > 1e-9 ? md / step : 0.0);
+            if (settledK < 0 && fabs(md) <= fmax(3.0 * finSd, 0.05)) settledK = k;
+            else if (settledK >= 0 && fabs(md) > fmax(3.0 * finSd, 0.05)) settledK = -1;
+        }
+        if (settledK >= 0)
+            Serial.printf("   settled (|dev| <= max(3 x final sd, 0.05 mV) from here on) at k=%d,"
+                          " t ~ %.0f us after the switch\n", settledK, sT[settledK] / n[settledK]);
+        else
+            Serial.println("   did not settle within the window");
+    }
+    Serial.printf("\n  scan_all keeps a conversion that ends >= SETTLE_US + 4 x %lu us after the"
+                  " switch.\n  'post' rows: whole sinc3 window after the switch (residual = analog)."
+                  "\n", (unsigned long)CONV_US);
+}
+
+static void settle_diag_cmd() {
+    Serial.println("\nsettle diag: target select 0-7? (10 s)");
+    uint32_t t0 = millis();
+    while (millis() - t0 < 10000) {
+        if (!Serial.available()) { delay(5); continue; }
+        char c = Serial.read();
+        if (c == '\r' || c == '\n') continue;
+        if (c >= '0' && c <= '7') { settle_diag(c - '0'); return; }
+        break;
+    }
+    Serial.println("settle diag: cancelled");
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  Setup
 // ─────────────────────────────────────────────────────────────────────────────
@@ -752,6 +983,7 @@ void setup() {
 
     pinMode(PIN_CS, OUTPUT);  cs_high();
     pinMode(PIN_DRDY, INPUT);
+    attachInterrupt(digitalPinToInterrupt(PIN_DRDY), drdyISR, FALLING);
     pinMode(PIN_RESET, OUTPUT); digitalWrite(PIN_RESET, HIGH);   // idle = not reset
 
     // ledcAttach returns a BOOL in core 3.x, not a frequency
@@ -791,6 +1023,7 @@ void setup() {
     captureBaseline(16);
     Serial.println("\nCommands: B=binary stream  g=grid  x=profile  s=table  b=rebaseline");
     Serial.println("          v=abs/delta  m=map  c=calibrate  n=noise  [ ]=scale  0=auto");
+    Serial.println("          d<0-7>=mux settling diagnostic for that select");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -820,6 +1053,7 @@ void loop() {
             case ']': g_autoScale = false; g_scale *= 2.0f;
                       logf("scale +/-%.2f mV (manual)\n", g_scale); break;
             case '0': g_autoScale = true; logf("scale: auto\n"); break;
+            case 'd': if (g_mode == 'B') g_mode = 'g'; settle_diag_cmd(); break;
             default: break;    // ignore CR/LF and anything unknown
         }
     }
