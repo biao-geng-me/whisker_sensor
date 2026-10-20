@@ -20,6 +20,15 @@ Defined once in [`whisker_link/esp32_frame.py`](../../whisker_link/esp32_frame.p
 
 Channels within one scan are not simultaneous: the four ADC channels of one mux select are, but the 8 selects follow each other ~1.5 ms apart (~12.3 ms per scan). `t_us` is the scan start.
 
+## Mux settling and fresh conversions (bench, 2026-10-20)
+
+Before commit 3c7e881, `waitDRDY()` tested the DRDY level, so a scan could return a conversion that had already been read (or the older slot of the ADC's 2-deep FIFO). That stale-sample bug, not the hardware, caused the spikes and the "~2 ms/select analog settling floor (~52 Hz for 32 ch)" in the MSD handoff (`/shared/rc/whiskers/MSD_P25937/PROJECT_HANDOFF.md` §3.3). The firmware now counts DRDY falling edges in an ISR and checks STATUS DRDY[3:0] = 1111 on every frame; a read that fails is dropped and counted (SCAN flag bit2 `FLAG_STALE`, `adc-stale` in the status line). The handoff's "SCLK must stay below CLKIN" rule is not in the datasheet either.
+
+Bench results with a 352 Ω gauge on W2_A (OUT3, ADC CH2, select 2), boot reporting DRDY edges/200 ms = 1246, CLOCK readback 0x0F02 and Device ID 0x2405:
+
+- `d2` settling curve, step −1107 mV from a railed channel: conversions k = 0, 1 after the switch still hold the old value; k = 2 (~700 µs) has 41 % of the step left, k = 3 (~1015 µs) 4 mV, k = 4 (~1330 µs) 0.03 mV, within the 0.06 mV noise, with no slow tail out to 4.9 ms. Settling is set by the ADS131M04 sinc3 latency (~4 conversions × 320 µs at CLKIN 0.8 MHz, OSR 128), not by the analog chain (at 320 µs resolution). The firmware keeps a conversion ending ≥ 250 + 4 × 320 = 1530 µs after the switch, about one conversion of margin.
+- Streaming through the wavi_py esp32 transport: 76.2 Hz, steady 13 ms period, no gaps. W2_A first-difference noise 0.063 mV (was 3.07 mV) and 0 spikes in 10 s (was 36, up to 145 mV). The floating channels W3_B and W8_B lost their spikes too. The stale counter rises by about 1 per several hundred scans in normal scanning; the `d` diagnostic produces more, which is harmless.
+
 ## Signal chain and units
 
 From the MSD Altium sources (`/shared/rc/whiskers/MSD_P25937/P25937_Whisker_Final.zip`, sheets Whisker / Processing / Amplifier_Reference / MAIN / Power), per channel (32 per board):
