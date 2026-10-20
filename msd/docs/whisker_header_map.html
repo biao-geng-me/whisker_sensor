@@ -121,6 +121,7 @@ svg.hdr { width: 100%; min-width: 420px; height: auto; display: block; }
 .notes { display: grid; gap: 10px; padding-left: 1.1em; margin: 0; }
 .notes li { max-width: 72ch; }
 .notes b { font-weight: 600; }
+a { color: var(--h2); }
 code { font: .88em var(--f-mono); }
 .stack { display: grid; gap: 16px; }
 table.ctl { min-width: 760px; }
@@ -140,7 +141,7 @@ tr.q td { color: var(--mut); font-style: italic; }
   <header>
     <div class="eyebrow">MSD P25937 · Whisker PCB rev 2 · top view</div>
     <h1>Whisker PCB header map</h1>
-    <p class="lede">Which header pins each strain gauge plugs into, from the Altium layout. It also shows the two ESP32 control headers, P1 (ADC SPI) and P2 (mux selects), with the ESP32 GPIO each pin is wired to in the current firmware. Every view is from the top (component) side, with the J1 power jack on the left and the silkscreen reading normally.</p>
+    <p class="lede">Which header pins each strain gauge plugs into, from the Altium layout. It also shows the two ESP32 control headers, P1 (ADC SPI) and P2 (mux selects), with the ESP32 GPIO each pin is wired to in the current firmware. For what happens inside the board, see the <a href="whisker_signal_chain.html">signal chain schematic</a>. Every view is from the top (component) side, with the J1 power jack on the left and the silkscreen reading normally.</p>
   </header>
 
   <section>

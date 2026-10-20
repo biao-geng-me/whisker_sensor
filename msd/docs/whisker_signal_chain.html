@@ -1,0 +1,398 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Whisker Signal Chain</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@600&display=swap">
+<style>
+:root {
+  --bg: #f3f5f2; --panel: #ffffff; --fg: #18211c; --mut: #5d6a62; --line: #d5ddd7;
+  --ga: #d6402f; --gb: #2f63d6; --p1: #e0507a; --p2: #1fa3b3; --ref: #c2418f; --pwr: #c0392b;
+  --chip: #f4f6f8; --wire: #2a3530; --board: #eef5f0;
+  --f-display: "IBM Plex Sans Condensed", "Arial Narrow", sans-serif;
+  --f-body: "IBM Plex Sans", system-ui, sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #121815; --panel: #1a221e; --fg: #e3ebe5; --mut: #93a299; --line: #2c3832;
+  --ga: #f06a5a; --gb: #6b95f0; --p1: #f0708f; --p2: #45c9d8; --ref: #e27bb7; --pwr: #ef6a5a;
+  --chip: #222c27; --wire: #c9d4cd; --board: #17211c; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #121815; --panel: #1a221e; --fg: #e3ebe5; --mut: #93a299; --line: #2c3832;
+  --ga: #f06a5a; --gb: #6b95f0; --p1: #f0708f; --p2: #45c9d8; --ref: #e27bb7; --pwr: #ef6a5a;
+  --chip: #222c27; --wire: #c9d4cd; --board: #17211c; color-scheme: dark }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.55 var(--f-body);
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 28px 56px; }
+main { max-width: 1200px; margin: 0 auto; display: grid; gap: 30px; }
+h1 { font: 600 2rem/1.1 var(--f-display); margin: 0; }
+h2 { font: 600 1.25rem/1.2 var(--f-display); margin: 0 0 6px; }
+p { margin: 0; max-width: 72ch; }
+.lede { color: var(--mut); margin-top: 8px; }
+.eyebrow { font: 500 .75rem var(--f-mono); letter-spacing: .08em; text-transform: uppercase; color: var(--mut); }
+a { color: var(--gb); }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 12px; }
+.scroll { overflow-x: auto; }
+svg.sch { width: 100%; min-width: 900px; height: auto; display: block; }
+.w { fill: none; stroke: var(--wire); stroke-width: 1.6; stroke-linejoin: round; }
+.lead { fill: none; stroke-width: 2.4; stroke-dasharray: 6 3; }
+.p1w { stroke: var(--p1); } .p2w { stroke: var(--p2); }
+.res { fill: var(--panel); stroke: var(--wire); stroke-width: 1.6; }
+.plate { stroke: var(--wire); stroke-width: 2.4; }
+.g { stroke: var(--wire); stroke-width: 1.6; }
+.dot { fill: var(--wire); }
+.amp { fill: var(--chip); stroke: var(--wire); stroke-width: 1.8; stroke-linejoin: round; }
+.chip { fill: var(--chip); stroke: var(--wire); stroke-width: 1.6; }
+.esp { fill: #1f2a44; stroke: #0e1526; stroke-width: 1.4; }
+.host { fill: var(--chip); stroke: var(--line); stroke-width: 1.4; }
+.pwr { fill: var(--chip); stroke: var(--pwr); stroke-width: 1.4; }
+.board { fill: var(--board); stroke: var(--line); stroke-width: 1.4; }
+.whisker { fill: none; stroke: var(--mut); stroke-width: 1.4; stroke-dasharray: 5 4; }
+.hpin { fill: #c9a24a; stroke: #23272a; stroke-width: 1.2; }
+.f3v3 { fill: var(--pwr); } .fref { fill: var(--ref); }
+.t, .lab { font: 600 11px var(--f-mono); fill: var(--fg); }
+.val { font: 400 10.5px var(--f-mono); fill: var(--mut); }
+.note { font: 400 10.5px var(--f-body); fill: var(--mut); }
+.net { font: 600 10.5px var(--f-mono); fill: var(--mut); }
+.pinl { font: 600 10.5px var(--f-mono); fill: #a07d22; }
+.flagt { font: 600 9.5px var(--f-mono); fill: #fff; }
+.gname { font: 600 12px var(--f-body); }
+.pm { font: 600 14px var(--f-mono); fill: var(--fg); }
+.ampt, .chipt { font: 600 11.5px var(--f-body); fill: var(--fg); }
+.outl { font: 600 12px var(--f-mono); }
+.blk { font: 600 12px var(--f-body); fill: var(--fg); }
+.gpio { font: 600 10px var(--f-mono); fill: var(--p1); }
+.gpio2 { font: 600 10px var(--f-mono); fill: #f3a3bb; }
+.p1t { font: 600 11px var(--f-mono); fill: var(--p1); }
+.p2t { font: 600 11px var(--f-mono); fill: var(--p2); }
+.espt { font: 600 13px var(--f-mono); fill: #dfe6f2; }
+.espv { font: 400 10px var(--f-mono); fill: #aeb8cc; }
+.grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+@media (max-width: 760px) { .grid2 { grid-template-columns: 1fr; } }
+ul { margin: 0; padding-left: 1.1em; display: grid; gap: 8px; }
+li { max-width: 72ch; }
+code { font: .88em var(--f-mono); }
+.eq { font: 500 .95rem var(--f-mono); background: var(--chip); border: 1px solid var(--line); border-radius: 4px; padding: 8px 10px; overflow-x: auto; white-space: nowrap; }
+.src { font-size: .8rem; color: var(--mut); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="eyebrow">MSD P25937 · whisker PCB rev 2 · one whisker, end to end</div>
+    <h1>Whisker signal chain</h1>
+    <p class="lede">How one whisker (W1, gauges A and B) travels through the board: quarter bridge, INA351 amplifier, RC filter, CD4097B mux and ADS131M04 ADC to the ESP32 and the host. The other 15 whiskers are identical copies on other mux inputs. For where things plug in, see the <a href="whisker_header_map.html">header map</a>.</p>
+  </header>
+
+  <section class="card"><div class="scroll"><svg class="sch" viewBox="0 0 1260 860" role="img" aria-label="Signal chain schematic for whisker W1: two strain gauges through quarter bridges, INA351 amplifiers, RC filters, the CD4097B mux and the ADS131M04 ADC to the ESP32">
+<rect x="132" y="40" width="930" height="800" rx="10" class="board"/>
+<text x="146" y="830" class="blk" text-anchor="start">whisker PCB (P25937 rev 2)</text>
+<rect x="14" y="62" width="100" height="440" rx="14" class="whisker"/>
+<text x="64" y="522" class="blk" text-anchor="middle">whisker W1</text>
+<text x="64" y="538" class="note" text-anchor="middle">(off board)</text>
+<rect x="800" y="110" width="100" height="400" rx="4" class="chip"/>
+<rect x="950" y="200" width="116" height="300" rx="4" class="chip"/>
+<rect x="1130" y="200" width="116" height="330" rx="8" class="esp"/>
+<text x="64" y="88" class="gname" text-anchor="middle" style="fill:var(--ga)">gauge A</text>
+<path d="M64,110 L64,147.0" class="w" style="stroke:var(--ga)"/>
+<path d="M64,183.0 L64,220" class="w" style="stroke:var(--ga)"/>
+<rect x="58" y="147.0" width="12" height="36" class="res" style="stroke:var(--ga)"/>
+<text x="76" y="163.0" class="lab" text-anchor="start"></text>
+<text x="76" y="177.0" class="val" text-anchor="start"></text>
+<text x="52" y="169" class="val" text-anchor="end">~350 Ω</text>
+<text x="64" y="238" class="note" text-anchor="middle">(+ series R)</text>
+<path d="M64,110 L150,110" class="lead" style="stroke:var(--ga)"/>
+<path d="M64,220 L150,220" class="lead" style="stroke:var(--ga)"/>
+<circle cx="150" cy="110" r="5" class="hpin"/>
+<text x="150" y="100" class="pinl" text-anchor="middle">J2-3</text>
+<circle cx="150" cy="220" r="5" class="hpin"/>
+<text x="150" y="210" class="pinl" text-anchor="middle">J2-1</text>
+<path d="M155,110 L200,110" class="w"/>
+<path d="M200,110 L200,100" class="w"/>
+<rect x="181" y="84" width="38" height="16" rx="3" class="f3v3"/>
+<text x="200" y="96" class="flagt" text-anchor="middle">3V3</text>
+<path d="M155,220 L250,220" class="w"/>
+<circle cx="250" cy="220" r="3" class="dot"/>
+<path d="M250,220 L250,234.5" class="w"/>
+<path d="M250,270.5 L250,285" class="w"/>
+<rect x="244" y="234.5" width="12" height="36" class="res"/>
+<text x="238" y="250.5" class="lab" text-anchor="end">R3</text>
+<text x="238" y="264.5" class="val" text-anchor="end">352 Ω</text>
+<path d="M240,285 L260,285" class="g"/>
+<path d="M244,289 L256,289" class="g"/>
+<path d="M248,293 L252,293" class="g"/>
+<text x="200" y="214" class="net" text-anchor="middle">sense</text>
+<path d="M250,220 L420,220" class="w"/>
+<path d="M330,85 L330,75" class="w"/>
+<rect x="311" y="59" width="38" height="16" rx="3" class="f3v3"/>
+<text x="330" y="71" class="flagt" text-anchor="middle">3V3</text>
+<path d="M330,85 L330,102.0" class="w"/>
+<path d="M330,138.0 L330,155" class="w"/>
+<rect x="324" y="102.0" width="12" height="36" class="res"/>
+<text x="342" y="118.0" class="lab" text-anchor="start">R1</text>
+<text x="342" y="132.0" class="val" text-anchor="start">123 Ω</text>
+<circle cx="330" cy="155" r="3" class="dot"/>
+<path d="M330,155 L330,158.5" class="w"/>
+<path d="M330,194.5 L330,198" class="w"/>
+<rect x="324" y="158.5" width="12" height="36" class="res"/>
+<text x="342" y="174.5" class="lab" text-anchor="start">R2</text>
+<text x="342" y="188.5" class="val" text-anchor="start">123 Ω</text>
+<path d="M320,198 L340,198" class="g"/>
+<path d="M324,202 L336,202" class="g"/>
+<path d="M328,206 L332,206" class="g"/>
+<path d="M330,155 L420,155" class="w"/>
+<text x="385" y="149" class="net" text-anchor="middle">1.65 V</text>
+<path d="M420,130 L420,245 L510,187.5 Z" class="amp"/>
+<text x="426" y="160" class="pm" text-anchor="start">+</text>
+<text x="426" y="225" class="pm" text-anchor="start">−</text>
+<text x="455" y="190.5" class="ampt" text-anchor="middle">INA351</text>
+<text x="455" y="204.5" class="val" text-anchor="middle">G = 10</text>
+<path d="M462,224 L462,252" class="w"/>
+<text x="468" y="244" class="lab" text-anchor="start">REF</text>
+<rect x="443" y="252" width="38" height="16" rx="3" class="fref"/>
+<text x="462" y="264" class="flagt" text-anchor="middle">REF</text>
+<path d="M510,187.5 L530,187.5" class="w"/>
+<path d="M530,187.5 L552.0,187.5" class="w"/>
+<path d="M588.0,187.5 L610,187.5" class="w"/>
+<rect x="552.0" y="181.5" width="36" height="12" class="res"/>
+<text x="570.0" y="176.5" class="lab" text-anchor="middle"></text>
+<text x="570.0" y="209.5" class="val" text-anchor="middle">1 k</text>
+<circle cx="630" cy="187.5" r="3" class="dot"/>
+<path d="M610,187.5 L800,187.5" class="w"/>
+<path d="M630,187.5 L630,211.0" class="w"/>
+<path d="M630,219.0 L630,242.5" class="w"/>
+<path d="M619,211.0 L641,211.0" class="plate"/>
+<path d="M619,219.0 L641,219.0" class="plate"/>
+<text x="646" y="213.0" class="lab" text-anchor="start"></text>
+<text x="646" y="227.0" class="val" text-anchor="start">0.1 µF</text>
+<path d="M620,242.5 L640,242.5" class="g"/>
+<path d="M624,246.5 L636,246.5" class="g"/>
+<path d="M628,250.5 L632,250.5" class="g"/>
+<text x="715" y="179.5" class="outl" text-anchor="middle" style="fill:var(--ga)">OUT1</text>
+<path d="M800,187.5 m-7,-5 l7,5 l-7,5" class="w"/>
+<text x="806" y="191.5" class="lab" text-anchor="start">X3</text>
+<text x="838" y="191.5" class="val" text-anchor="start">(sel 3)</text>
+<text x="64" y="328" class="gname" text-anchor="middle" style="fill:var(--gb)">gauge B</text>
+<path d="M64,350 L64,387.0" class="w" style="stroke:var(--gb)"/>
+<path d="M64,423.0 L64,460" class="w" style="stroke:var(--gb)"/>
+<rect x="58" y="387.0" width="12" height="36" class="res" style="stroke:var(--gb)"/>
+<text x="76" y="403.0" class="lab" text-anchor="start"></text>
+<text x="76" y="417.0" class="val" text-anchor="start"></text>
+<text x="52" y="409" class="val" text-anchor="end">~350 Ω</text>
+<text x="64" y="478" class="note" text-anchor="middle">(+ series R)</text>
+<path d="M64,350 L150,350" class="lead" style="stroke:var(--gb)"/>
+<path d="M64,460 L150,460" class="lead" style="stroke:var(--gb)"/>
+<circle cx="150" cy="350" r="5" class="hpin"/>
+<text x="150" y="340" class="pinl" text-anchor="middle">J2-2</text>
+<circle cx="150" cy="460" r="5" class="hpin"/>
+<text x="150" y="450" class="pinl" text-anchor="middle">J2-4</text>
+<path d="M155,350 L200,350" class="w"/>
+<path d="M200,350 L200,340" class="w"/>
+<rect x="181" y="324" width="38" height="16" rx="3" class="f3v3"/>
+<text x="200" y="336" class="flagt" text-anchor="middle">3V3</text>
+<path d="M155,460 L250,460" class="w"/>
+<circle cx="250" cy="460" r="3" class="dot"/>
+<path d="M250,460 L250,474.5" class="w"/>
+<path d="M250,510.5 L250,525" class="w"/>
+<rect x="244" y="474.5" width="12" height="36" class="res"/>
+<text x="238" y="490.5" class="lab" text-anchor="end">R3</text>
+<text x="238" y="504.5" class="val" text-anchor="end">352 Ω</text>
+<path d="M240,525 L260,525" class="g"/>
+<path d="M244,529 L256,529" class="g"/>
+<path d="M248,533 L252,533" class="g"/>
+<text x="200" y="454" class="net" text-anchor="middle">sense</text>
+<path d="M250,460 L420,460" class="w"/>
+<path d="M330,325 L330,315" class="w"/>
+<rect x="311" y="299" width="38" height="16" rx="3" class="f3v3"/>
+<text x="330" y="311" class="flagt" text-anchor="middle">3V3</text>
+<path d="M330,325 L330,342.0" class="w"/>
+<path d="M330,378.0 L330,395" class="w"/>
+<rect x="324" y="342.0" width="12" height="36" class="res"/>
+<text x="342" y="358.0" class="lab" text-anchor="start">R1</text>
+<text x="342" y="372.0" class="val" text-anchor="start">123 Ω</text>
+<circle cx="330" cy="395" r="3" class="dot"/>
+<path d="M330,395 L330,398.5" class="w"/>
+<path d="M330,434.5 L330,438" class="w"/>
+<rect x="324" y="398.5" width="12" height="36" class="res"/>
+<text x="342" y="414.5" class="lab" text-anchor="start">R2</text>
+<text x="342" y="428.5" class="val" text-anchor="start">123 Ω</text>
+<path d="M320,438 L340,438" class="g"/>
+<path d="M324,442 L336,442" class="g"/>
+<path d="M328,446 L332,446" class="g"/>
+<path d="M330,395 L420,395" class="w"/>
+<text x="385" y="389" class="net" text-anchor="middle">1.65 V</text>
+<path d="M420,370 L420,485 L510,427.5 Z" class="amp"/>
+<text x="426" y="400" class="pm" text-anchor="start">+</text>
+<text x="426" y="465" class="pm" text-anchor="start">−</text>
+<text x="455" y="430.5" class="ampt" text-anchor="middle">INA351</text>
+<text x="455" y="444.5" class="val" text-anchor="middle">G = 10</text>
+<path d="M462,464 L462,492" class="w"/>
+<text x="468" y="484" class="lab" text-anchor="start">REF</text>
+<rect x="443" y="492" width="38" height="16" rx="3" class="fref"/>
+<text x="462" y="504" class="flagt" text-anchor="middle">REF</text>
+<path d="M510,427.5 L530,427.5" class="w"/>
+<path d="M530,427.5 L552.0,427.5" class="w"/>
+<path d="M588.0,427.5 L610,427.5" class="w"/>
+<rect x="552.0" y="421.5" width="36" height="12" class="res"/>
+<text x="570.0" y="416.5" class="lab" text-anchor="middle"></text>
+<text x="570.0" y="449.5" class="val" text-anchor="middle">1 k</text>
+<circle cx="630" cy="427.5" r="3" class="dot"/>
+<path d="M610,427.5 L800,427.5" class="w"/>
+<path d="M630,427.5 L630,451.0" class="w"/>
+<path d="M630,459.0 L630,482.5" class="w"/>
+<path d="M619,451.0 L641,451.0" class="plate"/>
+<path d="M619,459.0 L641,459.0" class="plate"/>
+<text x="646" y="453.0" class="lab" text-anchor="start"></text>
+<text x="646" y="467.0" class="val" text-anchor="start">0.1 µF</text>
+<path d="M620,482.5 L640,482.5" class="g"/>
+<path d="M624,486.5 L636,486.5" class="g"/>
+<path d="M628,490.5 L632,490.5" class="g"/>
+<text x="715" y="419.5" class="outl" text-anchor="middle" style="fill:var(--gb)">OUT2</text>
+<path d="M800,427.5 m-7,-5 l7,5 l-7,5" class="w"/>
+<text x="806" y="431.5" class="lab" text-anchor="start">X4</text>
+<text x="838" y="431.5" class="val" text-anchor="start">(sel 4)</text>
+<text x="850.0" y="132" class="chipt" text-anchor="middle">CD4097B #1</text>
+<text x="850.0" y="147" class="val" text-anchor="middle">X section</text>
+<text x="850.0" y="290" class="note" text-anchor="middle">X0–X7 = OUT</text>
+<text x="850.0" y="304" class="note" text-anchor="middle">5, 7, 3, 1,</text>
+<text x="850.0" y="318" class="note" text-anchor="middle">2, 4, 6, 8</text>
+<path d="M900,340 L950,340" class="w"/>
+<text x="925" y="332" class="net" text-anchor="middle">COM_X1</text>
+<text x="850.0" y="498" class="val" text-anchor="middle">A   B   C</text>
+<text x="1008.0" y="222" class="chipt" text-anchor="middle">ADS131M04</text>
+<text x="1008.0" y="237" class="val" text-anchor="middle">U4</text>
+<text x="956" y="344" class="lab" text-anchor="start">AIN2P</text>
+<text x="956" y="384" class="lab" text-anchor="start">AIN2N</text>
+<path d="M950,380 L930,380 L930,392" class="w"/>
+<path d="M920,392 L940,392" class="g"/>
+<path d="M924,396 L936,396" class="g"/>
+<path d="M928,400 L932,400" class="g"/>
+<text x="1000.0" y="400" class="val" text-anchor="middle">±1.2 V FS</text>
+<text x="1000.0" y="414" class="val" text-anchor="middle">gain 1</text>
+<text x="1000.0" y="428" class="val" text-anchor="middle">int. 1.2 V ref</text>
+<text x="1000.0" y="442" class="val" text-anchor="middle">OSR 128</text>
+<text x="1000.0" y="456" class="val" text-anchor="middle">3125 SPS</text>
+<text x="1008.0" y="482" class="note" text-anchor="middle">AIN0/1/3: other</text>
+<text x="1008.0" y="494" class="note" text-anchor="middle">mux outputs</text>
+<text x="1061" y="266" class="lab" text-anchor="end">SCLK</text>
+<path d="M1066,262 L1130,262" class="w p1w"/>
+<text x="1135" y="266" class="gpio2" text-anchor="start">GPIO18</text>
+<text x="1061" y="286" class="lab" text-anchor="end">DIN</text>
+<path d="M1066,282 L1130,282" class="w p1w"/>
+<text x="1135" y="286" class="gpio2" text-anchor="start">GPIO23</text>
+<text x="1061" y="306" class="lab" text-anchor="end">CS</text>
+<path d="M1066,302 L1130,302" class="w p1w"/>
+<text x="1135" y="306" class="gpio2" text-anchor="start">GPIO21</text>
+<text x="1061" y="326" class="lab" text-anchor="end">CLKIN</text>
+<path d="M1066,322 L1130,322" class="w p1w"/>
+<text x="1135" y="326" class="gpio2" text-anchor="start">GPIO16</text>
+<text x="1061" y="346" class="lab" text-anchor="end">DOUT</text>
+<path d="M1066,342 L1130,342" class="w p1w"/>
+<text x="1135" y="346" class="gpio2" text-anchor="start">GPIO19</text>
+<text x="1061" y="366" class="lab" text-anchor="end">DRDY</text>
+<path d="M1066,362 L1130,362" class="w p1w"/>
+<text x="1135" y="366" class="gpio2" text-anchor="start">GPIO4</text>
+<text x="1098.0" y="250" class="p1t" text-anchor="middle">P1</text>
+<text x="1188.0" y="222" class="espt" text-anchor="middle">ESP32</text>
+<text x="1188.0" y="237" class="espv" text-anchor="middle">DevKit V1</text>
+<text x="1188.0" y="400" class="espv" text-anchor="middle">per select:</text>
+<text x="1188.0" y="413" class="espv" text-anchor="middle">250 µs settle,</text>
+<text x="1188.0" y="426" class="espv" text-anchor="middle">3 discards,</text>
+<text x="1188.0" y="439" class="espv" text-anchor="middle">keep the 4th</text>
+<text x="1188.0" y="452" class="espv" text-anchor="middle"></text>
+<text x="1188.0" y="465" class="espv" text-anchor="middle">8 selects × 4 ch</text>
+<text x="1188.0" y="478" class="espv" text-anchor="middle">= 32 gauges/scan</text>
+<text x="1188.0" y="491" class="espv" text-anchor="middle">≈76 scans/s</text>
+<rect x="1080" y="62" width="170" height="70" rx="6" class="host"/>
+<text x="1165" y="82" class="blk" text-anchor="middle">host</text>
+<text x="1165" y="99" class="note" text-anchor="middle">laptop: wavi_py</text>
+<text x="1165" y="112" class="note" text-anchor="middle">(--transport esp32) or</text>
+<text x="1165" y="125" class="note" text-anchor="middle">BlueOS Pi: daq_server.py</text>
+<path d="M1188,200 L1188,132" class="w"/>
+<text x="1182" y="170" class="lab" text-anchor="end">USB serial</text>
+<text x="1182" y="184" class="val" text-anchor="end">921600 Bd</text>
+<path d="M828,510 L828,560 L1150,560 L1150,530" class="w p2w"/>
+<text x="1154" y="610" class="val" text-anchor="start"></text>
+<path d="M850,510 L850,576 L1170,576 L1170,530" class="w p2w"/>
+<text x="1174" y="610" class="val" text-anchor="start"></text>
+<path d="M872,510 L872,592 L1190,592 L1190,530" class="w p2w"/>
+<text x="1194" y="610" class="val" text-anchor="start"></text>
+<text x="1240" y="628" class="p2t" text-anchor="end">P2: SELA_1 / SELB_1 / SELC_1</text>
+<text x="1240" y="642" class="p2t" text-anchor="end">= GPIO25 / 26 / 27</text>
+<text x="1240" y="658" class="note" text-anchor="end">same 3-bit select also drives mux #2</text>
+<rect x="150" y="600" width="210" height="70" rx="6" class="pwr"/>
+<text x="160" y="620" class="lab" text-anchor="start">5.5 V bench supply</text>
+<text x="160" y="637" class="val" text-anchor="start">→ J1 (pin 1 +, pin 4 GND)</text>
+<text x="160" y="653" class="val" text-anchor="start">→ MD1 buck (TPSM84203)</text>
+<path d="M360,635 L400,635" class="w"/>
+<path d="M400,635 L400,625" class="w"/>
+<rect x="381" y="609" width="38" height="16" rx="3" class="f3v3"/>
+<text x="400" y="621" class="flagt" text-anchor="middle">3V3</text>
+<text x="412" y="652" class="note" text-anchor="start">bridges, INA351s,</text>
+<text x="412" y="665" class="note" text-anchor="start">muxes, ADC</text>
+<text x="160" y="692" class="note" text-anchor="start">ESP32 GND ← wire from MD1 pin 2</text>
+<text x="580" y="604" class="blk" text-anchor="start">REF divider (AMP_REF_3V3): one net for all 32 INA351 REF pins</text>
+<path d="M620,640 L620,630" class="w"/>
+<rect x="601" y="614" width="38" height="16" rx="3" class="f3v3"/>
+<text x="620" y="626" class="flagt" text-anchor="middle">3V3</text>
+<path d="M620,640 L620,662.0" class="w"/>
+<path d="M620,698.0 L620,720" class="w"/>
+<rect x="614" y="662.0" width="12" height="36" class="res"/>
+<text x="632" y="678.0" class="lab" text-anchor="start">R7</text>
+<text x="632" y="692.0" class="val" text-anchor="start">47 k (target)</text>
+<circle cx="620" cy="720" r="3" class="dot"/>
+<path d="M620,720 L620,742.0" class="w"/>
+<path d="M620,778.0 L620,800" class="w"/>
+<rect x="614" y="742.0" width="12" height="36" class="res"/>
+<text x="632" y="758.0" class="lab" text-anchor="start">R8</text>
+<text x="632" y="772.0" class="val" text-anchor="start">10 k (target)</text>
+<path d="M610,800 L630,800" class="g"/>
+<path d="M614,804 L626,804" class="g"/>
+<path d="M618,808 L622,808" class="g"/>
+<path d="M620,720 L770,720" class="w"/>
+<circle cx="770" cy="720" r="3" class="dot"/>
+<path d="M770,720 L770,746.0" class="w"/>
+<path d="M770,754.0 L770,780" class="w"/>
+<path d="M759,746.0 L781,746.0" class="plate"/>
+<path d="M759,754.0 L781,754.0" class="plate"/>
+<text x="786" y="748.0" class="lab" text-anchor="start">C4</text>
+<text x="786" y="762.0" class="val" text-anchor="start">1 µF</text>
+<path d="M760,780 L780,780" class="g"/>
+<path d="M764,784 L776,784" class="g"/>
+<path d="M768,788 L772,788" class="g"/>
+<path d="M770,720 L820,720" class="w"/>
+<rect x="820" y="712" width="38" height="16" rx="3" class="fref"/>
+<text x="839" y="724" class="flagt" text-anchor="middle">REF</text>
+<text x="695" y="714" class="net" text-anchor="middle">≈ 0.58 V</text>
+<text x="870" y="676" class="note" text-anchor="start">schematic: 100 k / 100 k = 1.65 V</text>
+<text x="870" y="690" class="note" text-anchor="start">(would rail every channel)</text>
+<text x="870" y="712" class="note" text-anchor="start">as built: one copy empty, the</text>
+<text x="870" y="726" class="note" text-anchor="start">other modified; REF floats</text>
+<text x="870" y="748" class="note" text-anchor="start">two copies on the board;</text>
+<text x="870" y="762" class="note" text-anchor="start">one is enough</text>
+</svg></div></section>
+
+  <section class="grid2">
+    <div>
+      <h2>Per gauge</h2>
+      <ul>
+        <li><b>Quarter bridge.</b> The gauge (in the whisker) runs from 3V3 to the sense node, R3 (352 Ω) from the sense node to GND. A fixed arm R1/R2 makes 1.65 V. Only the sense pin carries signal; every odd header pin is the same 3V3 net, so gauge orientation does not matter.</li>
+        <li><b>INA351</b> (GS = GND, gain 10) amplifies the difference of the two arms and adds REF. Higher gauge resistance → lower sense voltage → higher output.</li>
+        <li><b>RC filter</b> 1 k / 0.1 µF (≈1.6 kHz) on each output, then the net OUTn goes to a mux input. W1 gauge A = OUT1 = mux #1 X3, gauge B = OUT2 = mux #1 X4; both reach the ADC on AIN2 (COM_X1), at mux selects 3 and 4.</li>
+      </ul>
+      <div class="eq" style="margin-top:12px">V<sub>sense</sub> = 3.3 V × 352 / (352 + R<sub>gauge</sub>)<br>OUT = 10 × (1.65 V − V<sub>sense</sub>) + REF ≈ REF + 23 mV per Ω above 352 Ω</div>
+    </div>
+    <div>
+      <h2>Shared parts</h2>
+      <ul>
+        <li><b>REF</b> (<code>AMP_REF_3V3</code>) is one net for all 32 INA351s, set by R7/R8 with C4. It sets where zero bridge signal sits on the output. The ADC measures OUT against GND (AINxN grounded), so REF drift shows on every channel at once. Target 0.58 V (47 k / 10 k); as built it is unreliable (one divider copy empty, the other modified).</li>
+        <li><b>Mux and ADC.</b> Two CD4097B (X and Y sections each) feed the four ADC inputs: mux #1 X → AIN2, Y → AIN3 (OUT1–16); mux #2 X → AIN0, Y → AIN1 (OUT17–32). One 3-bit select drives both muxes, so 8 selects × 4 ADC channels = 32 gauges per scan.</li>
+        <li><b>ADC</b> ADS131M04: ±1.2 V full scale, gain 1, internal 1.2 V reference, OSR 128 at CLKIN 0.8 MHz (from ESP32 GPIO16) → 320 µs per conversion. Per select the firmware settles 250 µs, drops 3 conversions and keeps the 4th (sinc3 filter flushed), ≈1.6 ms per select, ≈76 scans/s.</li>
+        <li><b>Power</b>: 5.5 V bench supply → J1 → MD1 buck → 3V3 for the bridges, amplifiers, muxes and ADC. The ESP32 is powered by USB and shares ground through a wire from MD1 pin 2.</li>
+      </ul>
+    </div>
+  </section>
+  <p class="src">Drawn from the traced nets of <code>PCB0603.PcbDoc</code> and the <code>MAIN</code> / <code>Amplifier_Reference</code> schematic sheets (<code>P25937_Whisker_Final.zip</code>), the mux table <code>OUT_OF</code> and timing constants in <code>msd/esp32/whisker_daq/whisker_daq.ino</code>. Generated by <code>msd/pcb_map/make_signal_chain.py</code>.</p>
+</main>
+</body>
+</html>

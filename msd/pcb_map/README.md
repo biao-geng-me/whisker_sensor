@@ -13,6 +13,8 @@ Inputs, all read directly (no unzipping):
 - `--gerber-zip` (default `/shared/rc/whiskers/MSD_P25937/REV2_GERBER.zip`): `PCB0603_Legend_Top.gbr` gives the silkscreen drawn under the board view.
 - `--firmware` (default `msd/esp32/whisker_daq/whisker_daq.ino`): the `PIN_*` defines give the ESP32 GPIO for each P1/P2 signal, so the page follows the firmware.
 
+`make_signal_chain.py` writes the companion page `whisker_signal_chain.html`: a schematic of one whisker (W1, gauges A and B) from the gauges through the quarter bridges, INA351s, RC filters, mux and ADC to the ESP32 and host, plus the shared REF divider and power. It is hand-drawn from the traced nets and has no inputs: `python msd/pcb_map/make_signal_chain.py whisker_signal_chain.html`.
+
 Files: `pcbdoc.py` is a minimal Altium PcbDoc reader (Components6, Nets6, Pads6, Board6 streams; binary pad layout as in KiCad's Altium importer). `gerber.py` is a minimal Gerber RS-274X reader (strokes, regions, flashes). `page.html` is the page template (styles and static text); `make_map.py` fills in the SVGs and tables.
 
 Hand-entered facts, not read from the files: the gauge pin pairing (from the schematic MAIN sheet, checked by asserts against the PCB nets), the firmware/wavi_py whisker naming (W(n)_A = OUT(2n−1)), the ADS131M04 pin functions, and the DevKit V1 30-pin header order (DOIT layout; check your board's labels). The whisker numbering was verified on the bench: J2 pins 1–4 show up as W1 in wavi_py.
