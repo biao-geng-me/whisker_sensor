@@ -59,11 +59,13 @@ CTL, CTL_SIG = {}, {"P1": {}, "P2": {}}
 CTL_TITLE = {"P1": "ADC SPI", "P2": "mux selects"}
 for i, c in enumerate(comps):
     d = c["SOURCEDESIGNATOR"]
-    if d in ("P1", "P2", "J1"):
+    if d in ("P1", "P2", "J1", "MD1"):
         pp = {q["name"]: dict(net=nets[q["net"]] if q["net"] < len(nets) else None, x=q["x"] * MM, y=q["y"] * MM)
               for q in pads if q["comp"] == i}
         if d == "J1":
             J1 = {int(k): v for k, v in pp.items() if k.isdigit()}
+        elif d == "MD1":      # TPSM84203 3.3 V buck module, through-hole: 1 VIN, 2 GND, 3 VOUT
+            MD1 = {int(k): v for k, v in pp.items()}
         else:
             CTL[d] = {int(k): v for k, v in pp.items()}
 u4 = {}   # net -> ADS131M04 pin
@@ -84,7 +86,7 @@ for n, p in CTL["P2"].items():
     name = p["net"]; m = name[-1]
     CTL_SIG["P2"][n] = dict(name=name, short=name.replace("_", ""), net=name,
                             chip=f"CD4097B #{m} pin {mux[name]}", gpio=FW_GPIO[name], dir="ESP32 → mux")
-assert J1[4]["net"] == "GND"
+assert J1[4]["net"] == "GND" and MD1[2]["net"] == "GND"
 
 # gauge = (signal pin, 3V3 pin). Schematic MAIN sheet: CONN(4k+1)->pin 4k+3, CONN(4k+3)->pin 4k+2;
 # the odd CONN nets are 3V3 on the PCB, the even ones carry the signal.
@@ -149,7 +151,7 @@ for h in HEADERS:
         gy = fy((a["y"] + b["y"]) / 2)
         o.insert(under, f'<path d="M{a["x"]:.2f},{fy(a["y"]):.2f} L{b["x"]:.2f},{fy(b["y"]):.2f}" class="pair" style="stroke:{HCOL[h]}"/>')
         o.append(f'<text x="{gx:.2f}" y="{gy + .5:.2f}" text-anchor="{"start" if right else "end"}" class="glab">{g["w"]}</text>')
-# --- P1 (ADC SPI) / P2 (mux selects) and the J1 GND pin ------------------------
+# --- P1 (ADC SPI) / P2 (mux selects) and the GND points (MD1 pin 2, J1 pin 4) ------------------------
 for ref, pins in CTL.items():
     col = f"var(--{ref.lower()})"
     xs = [p["x"] for p in pins.values()]; y = pins[1]["y"]
@@ -168,7 +170,13 @@ for ref, pins in CTL.items():
     o.append(f'<text x="{x1 + 1.2:.2f}" y="{fy(y) + 2.6:.2f}" class="hsub">{CTL_TITLE[ref]}</text>')
 g4 = J1[4]
 o.append(f'<circle cx="{g4["x"]:.2f}" cy="{fy(g4["y"]):.2f}" r="1.25" class="gnd"><title>J1 pin 4: GND (through-hole)</title></circle>')
-o.append(f'<text x="{g4["x"] + 2:.2f}" y="{fy(g4["y"]) + .7:.2f}" class="gndlab">GND</text>')
+o.append(f'<text x="{g4["x"] - 2:.2f}" y="{fy(g4["y"]) + .7:.2f}" text-anchor="end" class="gndlab">GND</text>')
+m2 = MD1[2]
+o.append(f'<circle cx="{m2["x"]:.2f}" cy="{fy(m2["y"]):.2f}" r="1.35" class="gndrec"><title>MD1 pin 2 (middle lead of the 3.3 V buck module): GND, recommended ground point</title></circle>')
+for k, cls in ((1, "mdvin"), (3, "md3v3")):
+    q = MD1[k]
+    o.append(f'<circle cx="{q["x"]:.2f}" cy="{fy(q["y"]):.2f}" r="0.6" class="{cls}"><title>MD1 pin {k}: {"VIN (supply +)" if k == 1 else "3V3 out"}</title></circle>')
+o.append(f'<text x="{m2["x"]:.2f}" y="{fy(MD1[3]["y"]) + 2.9:.2f}" text-anchor="middle" class="gndlab gndreclab">GND ★</text>')
 # scale bar
 o.append(f'<path d="M{W - 20},{H + 4.5} h10" class="scale"/><text x="{W - 15}" y="{H + 8.6}" text-anchor="middle" class="hsub">10 mm</text>')
 o.append('</svg>')

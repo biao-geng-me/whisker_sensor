@@ -49,6 +49,9 @@ svg.board { width: 100%; min-width: 560px; height: auto; display: block; }
 .cgpio { font: 600 1.35px var(--f-mono); fill: #fff; paint-order: stroke; stroke: var(--pcb); stroke-width: .5; }
 .gnd { fill: none; stroke: #fff; stroke-width: .45; stroke-dasharray: .7 .45; }
 .gndlab { font: 600 2px var(--f-mono); fill: #fff; paint-order: stroke; stroke: var(--pcb); stroke-width: .6; }
+.gndrec { fill: none; stroke: #ffe14d; stroke-width: .6; }
+.gndreclab { fill: #ffe14d; }
+.mdvin { fill: #e04a3a; } .md3v3 { fill: #e9a23b; }
 .scale { stroke: var(--fg); stroke-width: .4; }
 svg.board .scale + .hsub { fill: var(--fg); stroke: none; font-size: 2px; }
 .legend { display: flex; flex-wrap: wrap; gap: 8px 22px; font-size: .85rem; color: var(--mut); }
@@ -71,6 +74,9 @@ svg.gw { width: 100%; min-width: 420px; height: auto; display: block; }
 .gwbox { fill: var(--panel); stroke: var(--fg); stroke-width: 1.2; }
 .gwpcb { fill: var(--pcb); stroke: var(--pcb-edge); stroke-width: 1.2; }
 .gwj1 { fill: #3a4a42; stroke: #0f2b1e; }
+.gwmd { fill: #2b2f33; stroke: #0f2b1e; }
+.gw3v3 { fill: #e9a23b; }
+.gwstar { stroke: #ffe14d; stroke-width: 1.8; }
 .gwp1 { fill: var(--p1); } .gwp2 { fill: var(--p2); }
 .gwesp { fill: #1f2a44; stroke: #0e1526; stroke-width: 1.2; }
 .gwusb { fill: #b9bec6; stroke: #6f757e; }
@@ -325,7 +331,11 @@ tr.q td { color: var(--mut); font-style: italic; }
 <text x="42.98" y="28.90" class="hlab" style="fill:var(--p1)">P1</text>
 <text x="42.98" y="31.20" class="hsub">ADC SPI</text>
 <circle cx="13.51" cy="33.60" r="1.25" class="gnd"><title>J1 pin 4: GND (through-hole)</title></circle>
-<text x="15.51" y="34.30" class="gndlab">GND</text>
+<text x="11.51" y="34.30" text-anchor="end" class="gndlab">GND</text>
+<circle cx="19.70" cy="28.90" r="1.35" class="gndrec"><title>MD1 pin 2 (middle lead of the 3.3 V buck module): GND, recommended ground point</title></circle>
+<circle cx="19.70" cy="26.36" r="0.6" class="mdvin"><title>MD1 pin 1: VIN (supply +)</title></circle>
+<circle cx="19.70" cy="31.44" r="0.6" class="md3v3"><title>MD1 pin 3: 3V3 out</title></circle>
+<text x="19.70" y="34.34" text-anchor="middle" class="gndlab gndreclab">GND ★</text>
 <path d="M80.00000066,64.49999937999999 h10" class="scale"/><text x="85.00000066" y="68.59999937999999" text-anchor="middle" class="hsub">10 mm</text>
 </svg></div>
     <div class="legend">
@@ -334,7 +344,8 @@ tr.q td { color: var(--mut); font-style: italic; }
       <span><i class="sw" style="background:var(--gold);border-radius:1px"></i>Square pad = pin 1</span>
       <span><i class="sw" style="background:var(--p1)"></i>P1 ADC SPI</span>
       <span><i class="sw" style="background:var(--p2)"></i>P2 mux selects (number below each pin = ESP32 GPIO)</span>
-      <span><i class="sw" style="background:none;border:1px dashed var(--fg)"></i>J1 pin 4, the only through-hole GND</span>
+      <span><i class="sw" style="background:none;border:2px solid #e0b400"></i>GND ★ = MD1 pin 2, recommended ESP32 ground point</span>
+      <span><i class="sw" style="background:none;border:1px dashed var(--fg)"></i>J1 pin 4, the other through-hole GND</span>
       <span>Labels such as <b>1A</b> = whisker 1, gauge A (wavi_py W1_A)</span>
     </div>
   </section>
@@ -744,7 +755,7 @@ tr.q td { color: var(--mut); font-style: italic; }
       <p class="src">Pin order of the common DOIT ESP32 DevKit V1 30-pin board, with its silkscreen labels (D23 = GPIO23, RX2 = GPIO16, TX2 = GPIO17). Clones occasionally differ: check the labels printed on your board before soldering. The six P2 wires land on six adjacent left-row pins (D32, D33, D25, D26, D27, D14), but not in P2 order. The P1 wires are all on the right row. The board’s GND pins are both near the USB end (left pin 14, right pin 14), so the P1 ground wire starts at the right-row GND, just below D15.</p>
     </div>
     <ul class="notes">
-      <li><b>Neither header has a GND pin.</b> The ESP32 ground must still be tied to the PCB ground; the only through-hole GND on the board is <b>J1 pin 4</b> (and the J1 shell tabs), and mounting holes MH1–4 are not connected. See <i>Ground wiring</i> below for how to route it.</li>
+      <li><b>Neither header has a GND pin.</b> The ESP32 ground must still be tied to the PCB ground. The through-hole GND points are <b>MD1 pin 2</b> (the middle lead of the 3-pin 3.3 V buck module just right of J1; recommended, ~8 mm from P1) and <b>J1 pin 4</b> (plus the J1 shell tabs). Mounting holes MH1–4 are not connected. See <i>Ground wiring</i> below for how to route it.</li>
       <li><b>Mux 1 (SEL*_1) is the lower CD4097B</b>, the one carrying OUT1–16 for J2/J3; mux 2 (SEL*_2) is the upper one, OUT17–32 for J4/J5. Careful: the silkscreen text “MUX1” sits next to the upper chip and “MUX2” next to the lower one, the opposite of the net names. Go by the nets. Select lines A, B, C go to CD4097B pins 10, 11, 14; the firmware writes the 3-bit select value to both muxes at once.</li>
       <li><b>P1 net names are Raspberry Pi header numbers.</b> The layout calls the P1 nets PIN23 (SCLK), PIN21 (MISO), PIN19 (MOSI), PIN07 (GPCLK0 → CLKIN), PIN27 and PIN29: the 40-pin Pi header positions. The board was laid out to be driven by a Pi; the ESP32 wiring above replaces that.</li>
       <li><b>CLKIN and SCLK are the fast lines.</b> Keep the P1 wires short (under ~10 cm), use a multi-pin housing or solder, and add 33–100 Ω series resistors at the ESP32 end of SCLK, CLKIN, DIN and CS before raising the clocks.</li>
@@ -754,7 +765,7 @@ tr.q td { color: var(--mut); font-style: italic; }
   <section>
     <div>
       <h2>Ground wiring: ESP32 to PCB</h2>
-      <p class="mut">The PCB’s only accessible ground is J1 pin 4, so the ESP32 needs exactly one ground wire from there. What matters is its route: at the MHz edges of SCLK and CLKIN, each signal’s current returns along the ground path, and the area between the signal wires and that path is a loop that radiates, picks up noise and rings. Route the ground wire with the P1 wires so the loop is just the gap between adjacent wires.</p>
+      <p class="mut">The ESP32 needs one ground wire to the PCB. Take it from <b>MD1 pin 2</b>, the middle lead of the 3.3 V buck module (it sticks out on the bottom side), which is the through-hole GND closest to P1. What matters is its route: at the MHz edges of SCLK and CLKIN, each signal’s current returns along the ground path, and the area between the signal wires and that path is a loop that radiates, picks up noise and rings. Route the ground wire with the P1 wires so the loop is just the gap between adjacent wires.</p>
     </div>
     <div class="grid4">
       <div class="card"><h3>Now <small>ground branched off at the supply</small></h3><div class="scroll"><svg class="gw" viewBox="0 0 470 300" role="img" aria-label="Current ground wiring between supply, PCB and ESP32">
@@ -788,14 +799,14 @@ tr.q td { color: var(--mut); font-style: italic; }
 <text x="117" y="50" class="gwsub">+</text><text x="117" y="82" class="gwsub">−</text>
 <rect x="160" y="28" width="180" height="172" rx="6" class="gwpcb"/><text x="250" y="126" text-anchor="middle" class="gwpcbt">whisker PCB</text>
 <rect x="160" y="46" width="22" height="58" rx="2" class="gwj1"/><text x="188" y="44" class="gwpin">J1</text>
-<circle cx="171" cy="58" r="3.5" class="gwplus"/><circle cx="171" cy="94" r="4" class="gwminus"/><text x="188" y="98" class="gwpin">GND (pin 4)</text>
+<circle cx="171" cy="58" r="3.5" class="gwplus"/><circle cx="171" cy="94" r="4" class="gwminus"/><text x="188" y="98" class="gwpin">GND</text>
 <rect x="290" y="58" width="42" height="12" rx="2" class="gwp2"/><text x="311" y="52" text-anchor="middle" class="gwpin">P2</text>
 <rect x="290" y="150" width="42" height="12" rx="2" class="gwp1"/><text x="311" y="144" text-anchor="middle" class="gwpin">P1</text>
 <path d="M113,56 H168" class="gwwire gwred"/><path d="M113,88 H140 V94 H167" class="gwwire gwblk"/>
 <path d="M332,64 C355,64 368,70 392,70" class="gwbundle gwp2s"/><text x="362" y="90" text-anchor="middle" class="gwsub">×6</text>
 <path d="M332,156 C355,156 368,164 392,164" class="gwbundle gwp1s"/><text x="362" y="148" text-anchor="middle" class="gwsub">×6</text>
-<path d="M171,98 C176,170 210,177 260,177 L332,177 C355,177 368,180 392,180" class="gwwire gwgnd"/>
-<text x="250" y="218" text-anchor="middle" class="gwnote">ground wire from J1 GND, bundled with P1</text>
+<rect x="255" y="62" width="14" height="40" rx="2" class="gwmd"/><text x="262" y="56" text-anchor="middle" class="gwpin">MD1</text><circle cx="262" cy="70" r="2.6" class="gwplus"/><circle cx="262" cy="82" r="3.5" class="gwminus gwstar"/><circle cx="262" cy="94" r="2.6" class="gw3v3"/><text x="274" y="86" class="gwpin">GND (pin 2)</text><path d="M259,82 H244 C236,150 250,177 280,177 L332,177 C355,177 368,180 392,180" class="gwwire gwgnd"/>
+<text x="250" y="218" text-anchor="middle" class="gwnote">ground wire from MD1 pin 2, bundled with P1</text>
 <text x="362" y="196" text-anchor="middle" class="gwnote gwok">small loop</text>
 <rect x="392" y="36" width="60" height="214" rx="6" class="gwesp"/><text x="422" y="56" text-anchor="middle" class="gwespt">ESP32</text>
 <circle cx="395" cy="180" r="3.5" class="gwminus"/><text x="402" y="184" class="gwespp">GND</text>
@@ -804,8 +815,8 @@ tr.q td { color: var(--mut); font-style: italic; }
 </svg></div></div>
     </div>
     <ul class="notes">
-      <li><b>One ground wire, J1 pin 4 to the ESP32 GND.</b> Start it at J1 pin 4 (or where the supply negative lands on J1), not out at the supply. On the DevKit V1 use the right-row GND just below D15, the same side as the P1 pins.</li>
-      <li><b>Keep it against the P1 wires the whole way.</b> Tape or twist it into the P1 bundle. Even better: two ground wires from J1 pin 4, one twisted with SCLK (D18) and one with CLKIN (RX2/GPIO16), ending at the two ESP32 GND pins (both are tied together on the board). DRDY, CS, DIN and DOUT can run loosely alongside.</li>
+      <li><b>One ground wire, MD1 pin 2 to the ESP32 GND.</b> Solder it to the middle lead of MD1 where it sticks out on the bottom side (J1 pin 4 works too, but is farther from P1), not out at the supply. Its neighbors 2.54 mm away are VIN and 3V3: avoid bridges, cover the joint with heat-shrink or Kapton, and check it reads ~0 Ω to J1 pin 4 and no short to the outer leads. On the DevKit V1 use the right-row GND just below D15, the same side as the P1 pins.</li>
+      <li><b>Keep it against the P1 wires the whole way.</b> Tape or twist it into the P1 bundle. Even better: two ground wires from MD1 pin 2, one twisted with SCLK (D18) and one with CLKIN (RX2/GPIO16), ending at the two ESP32 GND pins (both are tied together on the board). DRDY, CS, DIN and DOUT can run loosely alongside.</li>
       <li><b>Remove the old branch from the supply lead.</b> Leaving it in parallel keeps a second, large ground loop.</li>
       <li><b>Short is still the main rule:</b> P1 wires under ~10 cm, soldered or in a multi-pin housing. P2 (mux selects) changes only once per mux step and is less critical.</li>
       <li><b>Earth loop check:</b> the ESP32 is also grounded through the laptop’s USB. A floating bench supply output is fine; if the supply ties its negative to earth and the laptop is on its charger, mains hum can enter through that loop. Running the laptop on battery is a quick test.</li>
