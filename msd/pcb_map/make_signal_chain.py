@@ -196,6 +196,91 @@ for i, s_ in enumerate(("schematic: 100 k / 100 k = 1.65 V", "(would rail every 
 o.append("</svg>")
 svg = "\n".join(o)
 
+
+
+# --- ADC explainer: delta-sigma loop diagram and bit-stream examples ------------------------
+def adc_loop_svg():
+    q = ['<svg class="dsm" viewBox="0 0 760 230" role="img" aria-label="Delta-sigma modulator loop: the input difference minus the ±1.2 V feedback is integrated, a comparator makes one bit per clock, the bit selects the feedback, and a sinc3 filter averages the bits into a 24-bit result">']
+    def box(x, y, w, h, t1, t2="", cls="chip"):
+        q.append(f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="4" class="{cls}"/>')
+        q.append(f'<text x="{x + w / 2}" y="{y + h / 2 - (4 if t2 else -4)}" text-anchor="middle" class="chipt">{t1}</text>')
+        if t2:
+            q.append(f'<text x="{x + w / 2}" y="{y + h / 2 + 12}" text-anchor="middle" class="val">{t2}</text>')
+    def arrow(x0, y0, x1, y1):
+        q.append(f'<path d="M{x0},{y0} L{x1},{y1}" class="w" marker-end="url(#ah)"/>')
+    q.append('<defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ahead"/></marker></defs>')
+    q.append('<text x="10" y="74" class="lab">AINxP</text><text x="10" y="114" class="lab">AINxN</text>')
+    box(64, 58, 96, 64, "sample", "C holds P − N")
+    arrow(52, 70, 64, 70); arrow(52, 110, 64, 110)
+    q.append('<circle cx="205" cy="90" r="14" class="sum"/><text x="205" y="95" text-anchor="middle" class="pm">Σ</text>')
+    q.append('<text x="186" y="80" class="val">+</text><text x="211" y="122" class="val">−</text>')
+    arrow(160, 90, 191, 90)
+    box(250, 62, 96, 56, "integrator", "running total")
+    arrow(219, 90, 250, 90)
+    box(380, 62, 96, 56, "comparator", "sign → 1 bit")
+    arrow(346, 90, 380, 90)
+    box(516, 62, 120, 56, "sinc3 filter", "average 128 bits")
+    arrow(476, 90, 516, 90)
+    q.append('<text x="498" y="82" text-anchor="middle" class="val">bits</text>')
+    q.append('<text x="660" y="86" class="lab">24-bit</text><text x="660" y="100" class="val">signed</text><text x="660" y="114" class="val">3125 /s</text>')
+    arrow(636, 90, 655, 90)
+    # feedback
+    box(305, 160, 170, 46, "1-bit DAC", "1 → +1.2 V, 0 → −1.2 V", "dac")
+    q.append('<path d="M498,90 L498,183 L475,183" class="w" marker-end="url(#ah)"/>')
+    q.append('<path d="M305,183 L205,183 L205,104" class="w" marker-end="url(#ah)"/>')
+    q.append('<text x="214" y="150" class="val">feedback ±V_REF</text>')
+    q.append('<text x="380" y="30" text-anchor="middle" class="note">modulator clock = CLKIN / 2 = 400 kHz now (one bit per clock); 128 bits per result (OSR 128)</text>')
+    q.append('</svg>')
+    return "\n".join(q)
+
+
+def bits_svg(n=32):
+    """First-order delta-sigma bit streams for a few input levels (illustrative)."""
+    levels = [(1.2, "+1.2 V"), (0.6, "+0.6 V"), (0.0, "0 V"), (-0.6, "−0.6 V"), (-1.2, "−1.2 V")]
+    cw, rh, x0 = 16, 26, 96
+    q = [f'<svg class="bits" viewBox="0 0 {x0 + n * cw + 120} {len(levels) * rh + 26}" role="img" aria-label="Example bit streams: the fraction of ones equals (1 + Vin / 1.2 V) / 2">']
+    q.append(f'<text x="8" y="14" class="val">P − N</text><text x="{x0}" y="14" class="val">bit stream (first {n} modulator clocks)</text>'
+             f'<text x="{x0 + n * cw + 12}" y="14" class="val">ones</text>')
+    for r, (v, lab) in enumerate(levels):
+        y = 22 + r * rh
+        acc, ones = 0.0, 0
+        q.append(f'<text x="8" y="{y + 15}" class="lab">{lab}</text>')
+        for k in range(n):
+            bit = 1 if acc >= 0 else 0
+            acc += v / 1.2 - (1 if bit else -1)
+            ones += bit
+            q.append(f'<rect x="{x0 + k * cw}" y="{y}" width="{cw - 2}" height="{rh - 6}" rx="2" class="{"b1" if bit else "b0"}"/>')
+        q.append(f'<text x="{x0 + n * cw + 12}" y="{y + 15}" class="lab">{round(100 * (1 + v / 1.2) / 2)} %</text>')
+    q.append('</svg>')
+    return "\n".join(q)
+
+
+adc_section = f"""
+  <section class="card adc">
+    <h2>How the ADC turns P − N into a signed number</h2>
+    <p>The ADS131M04 is a delta-sigma converter. It never takes an absolute value and flips the sign: it continuously balances the input difference against ±1.2 V, and the sign falls out of that balance.</p>
+    <div class="scroll">{adc_loop_svg()}</div>
+    <ol class="steps">
+      <li><b>Sample the difference.</b> A small capacitor is switched between AINxP and AINxN, so it holds a charge proportional to P − N. Only the difference is stored, which is why each pin may sit anywhere from about −1.3 V to AVDD (3.3 V) while only P − N is limited to ±1.2 V.</li>
+      <li><b>Accumulate.</b> The charge, minus the feedback from the previous step, is added to an integrator (a running total).</li>
+      <li><b>Decide one bit.</b> A comparator looks at the sign of the total: positive gives 1 and subtracts +1.2 V worth of charge next clock, negative gives 0 and adds 1.2 V worth. This repeats every modulator clock (CLKIN / 2, 400 kHz now).</li>
+      <li><b>Average the bits.</b> To keep the integrator near zero, the average feedback must equal the input, so the fraction of 1s encodes P − N: fraction = (1 + V<sub>in</sub> / 1.2 V) / 2. The sinc3 filter averages 128 bits (OSR 128) into one signed 24-bit result, 3125 per second now.</li>
+    </ol>
+    <div class="scroll">{bits_svg()}</div>
+    <div class="grid2">
+      <ul>
+        <li><b>Out of range.</b> Beyond ±1.2 V the ±1.2 V feedback can no longer balance the input, the stream becomes all 1s (or 0s) and the code saturates at 0x7FFFFF (0x800000). That is the “1200 mV / open” reading of an unconnected channel: its INA351 output heads for 3.3 V, legal for the pin but beyond 1.2 V of difference.</li>
+        <li><b>Why 3 results are discarded after a mux switch.</b> The sinc3 filter’s window spans about three result periods of bits, so the first results after a switch still contain bits from the previous channel. The firmware keeps the 4th. A faster CLKIN shortens the window proportionally.</li>
+      </ul>
+      <ul>
+        <li><b>On this board</b> AINxN is tied to GND and AINxP gets the amplifier output (0 to ~3.3 V), so only the 0 to +1.2 V half of the range is used; the amplifier cannot go below 0 V.</li>
+        <li><b>Better wiring</b> would tie AINxN to REF: the same machinery would then measure OUT − REF, signed, over the full ±1.2 V, and REF drift would cancel in hardware.</li>
+      </ul>
+    </div>
+    <p class="src">Ranges from the TI ADS131M04 datasheet (SBAS890D) §6.1 and §6.3. The bit streams are an idealized first-order loop for illustration; the ADS131M04 modulator is higher order, but its 1s-density follows the same rule.</p>
+  </section>
+"""
+
 page = f"""<!doctype html>
 <html lang="en">
 <head>
@@ -270,6 +355,15 @@ svg.sch {{ width: 100%; min-width: 900px; height: auto; display: block; }}
 ul {{ margin: 0; padding-left: 1.1em; display: grid; gap: 8px; }}
 li {{ max-width: 72ch; }}
 code {{ font: .88em var(--f-mono); }}
+svg.dsm {{ width: 100%; min-width: 640px; max-width: 900px; height: auto; display: block; margin: 8px 0; }}
+svg.bits {{ width: 100%; min-width: 640px; max-width: 820px; height: auto; display: block; margin: 6px 0 10px; }}
+.sum {{ fill: var(--chip); stroke: var(--wire); stroke-width: 1.6; }}
+.dac {{ fill: var(--chip); stroke: var(--ref); stroke-width: 1.6; }}
+.ahead {{ fill: var(--wire); }}
+.b1 {{ fill: var(--gb); }} .b0 {{ fill: var(--line); }}
+.adc {{ display: grid; gap: 12px; padding: 16px; }}
+.steps {{ margin: 0; padding-left: 1.3em; display: grid; gap: 8px; }}
+.steps li {{ max-width: 80ch; }}
 .eq {{ font: 500 .95rem var(--f-mono); background: var(--chip); border: 1px solid var(--line); border-radius: 4px; padding: 8px 10px; overflow-x: auto; white-space: nowrap; }}
 .src {{ font-size: .8rem; color: var(--mut); }}
 </style>
@@ -304,6 +398,7 @@ code {{ font: .88em var(--f-mono); }}
       </ul>
     </div>
   </section>
+{adc_section}
   <p class="src">Drawn from the traced nets of <code>PCB0603.PcbDoc</code> and the <code>MAIN</code> / <code>Amplifier_Reference</code> schematic sheets (<code>P25937_Whisker_Final.zip</code>), the mux table <code>OUT_OF</code> and timing constants in <code>msd/esp32/whisker_daq/whisker_daq.ino</code>. Generated by <code>msd/pcb_map/make_signal_chain.py</code>.</p>
 </main>
 </body>
