@@ -53,6 +53,8 @@ from wavi_py.config import (
 from wavi_py.daq.outliers import fill_outliers_linear
 from wavi_py.io.dat_writer import DatWriter, build_datalog_filename
 from wavi_py.views import FftView, ImuView, LineView, SpectrogramView
+from whisker_link.channels import SAT_CODE
+from whisker_link.esp32_frame import MV_PER_CODE
 
 
 def _default_outpath() -> Path:
@@ -371,6 +373,11 @@ class MainWindow(QMainWindow):
 
         self._connect_btn.setText("Disconnect")
         self._set_stream_buttons_enabled(True)
+        # server / esp32 samples are mV at the ADC; a railed (open) gauge reads ~ full scale
+        if client.is_event_stream:
+            self._line_view.set_value_format("mV", SAT_CODE * MV_PER_CODE)
+        else:
+            self._line_view.set_value_format("", None)
         self._record_btn.setEnabled(True)
         self._set_transport_inputs_enabled(False)
         self._path_label.setText(f"Connected to {client.endpoint_str} — output dir: {self._outpath}")

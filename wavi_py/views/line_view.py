@@ -16,15 +16,24 @@ following the newest data until Reset view. Pause and Re-zero mirror the
 control panel's Pause and Reset: the view only emits ``pauseToggled`` /
 ``resetRequested``, and the control panel pushes its state back with
 ``set_paused`` / ``set_stream_controls_enabled``.
+
+Every plot also shows the current absolute value of each gauge (raw, before V0
+and the display scale; mean of the last 0.1 s) in its corner, or on the right
+of each row in the stacked layout. Labels refresh at ~7 Hz, not every frame.
+
+Redraw cost: curves are min/max decimated to about two points per pixel column
+(one vectorized pass over all channels) and drawn with 1 px pens; only major
+grid lines are drawn. These dominate the paint time with 30 s of 32 channels.
 """
 
 from __future__ import annotations
 
 import math
+import time
 
 import numpy as np
-from PyQt6.QtCore import pyqtSignal
-from PyQt6.QtGui import QAction, QKeySequence
+from PyQt6.QtCore import QPointF, QTimer, pyqtSignal
+from PyQt6.QtGui import QAction, QFont, QFontMetricsF, QKeySequence
 from PyQt6.QtWidgets import QStackedWidget, QToolBar
 
 import pyqtgraph as pg
@@ -36,12 +45,60 @@ _RED = (220, 40, 40)
 _BLUE = (40, 80, 220)
 _PROBE_PEN = pg.mkPen((90, 90, 90), width=1, style=pg.QtCore.Qt.PenStyle.DashLine)
 _GAUGE_NAMES = ("A", "B")
+_HTML_COLOR = ("#dc2828", "#2850dc")
+_PEN_W = 1                      # stacked + grid: wider pens cost 3-6x the paint time
+_SINGLE_PEN_W = 2
+_LABEL_PERIOD_S = 0.15          # absolute-value labels refresh at ~7 Hz
+_LABEL_AVG_S = 0.1              # ...showing the mean of the last 0.1 s
+_LABEL_FILL = pg.mkBrush(255, 255, 255, 225)
 
 
 def _add_gauge_legend(plot: pg.PlotItem) -> None:
     """A / B legend in the top-right corner; curves named afterwards join it."""
     plot.addLegend(offset=(-10, 10), labelTextColor="k",
                    brush=pg.mkBrush(255, 255, 255, 200), pen=pg.mkPen(180, 180, 180))
+
+
+def _show_grid(plot: pg.PlotItem) -> None:
+    """Major grid lines only: the minor ones cost as much to paint as the data."""
+    plot.showGrid(x=True, y=True, alpha=0.2)
+    for ax in ("left", "bottom"):
+        plot.getAxis(ax).setStyle(maxTickLevel=0)
+
+
+def _peak_decimate(t: np.ndarray, y: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
+    """Min and max of each ``k``-sample block of ``y`` (N, m), interleaved.
+
+    Two points per block keep the full envelope, so a 1 px pen draws what the
+    full data would. Blocks are aligned to the absolute sample index (t / dt)
+    so they don't shimmer as the window scrolls; the newest partial block is
+    passed through as is.
+    """
+    n = len(t)
+    if k <= 1 or n < 4 * k:
+        return t, y
+    head = -int(round(t[0] * (n - 1) / (t[-1] - t[0]))) % k
+    nb = (n - head) // k
+    end = head + nb * k
+    blocks = y[head:end].reshape(nb, k, y.shape[1])
+    yd = np.empty((2 * nb + n - end, y.shape[1]), dtype=y.dtype)
+    np.min(blocks, axis=1, out=yd[0:2 * nb:2])
+    np.max(blocks, axis=1, out=yd[1:2 * nb:2])
+    yd[2 * nb:] = y[end:]
+    tb = t[head:end].reshape(nb, k)
+    td = np.empty(len(yd))
+    td[0:2 * nb:2] = tb[:, 0]
+    td[1:2 * nb:2] = tb[:, -1]
+    td[2 * nb:] = t[end:]
+    return td, yd
+
+
+def _value_label() -> pg.TextItem:
+    label = pg.TextItem(anchor=(0, 0), fill=_LABEL_FILL)
+    label.setZValue(100)
+    # text is only re-laid out at the label rate; blit it from a cache otherwise
+    label.textItem.setCacheMode(label.textItem.CacheMode.DeviceCoordinateCache)
+    return label
 
 
 _STACKED, _GRID, _SINGLE = 0, 1, 2              # pages of the QStackedWidget
@@ -62,8 +119,14 @@ class LineView(ViewWindow):
         self._follow = True                       # keep X pinned to the newest data
         self._x_range: tuple[float, float] | None = None
         self._single: int | None = None            # the maximized sensor, if any
-        self._t = np.empty(0)                      # last data shown, for the probe
-        self._y = np.empty((0, self._nch))         # (sig - v0) * scale, no offsets
+        self._t = np.empty(0)                      # last data shown (copied), for the probe
+        self._sig = np.empty((0, self._nch), dtype=np.float32)   # raw, before V0 / scale
+        self._v0 = np.zeros(self._nch, dtype=np.float32)
+        self._scale = 1.0
+        self._offsets = (np.arange(self._nch) // 2).astype(np.float32)   # stacked Y offsets
+        self._units = ""                           # absolute-value labels; see set_value_format
+        self._open_level: float | None = None
+        self._labels_t = 0.0
 
         # --- stacked: one axis, sensor i at Y-offset i
         self._stacked = pg.PlotWidget()
@@ -71,13 +134,24 @@ class LineView(ViewWindow):
         self._stacked.setLabel("bottom", "Time", units="s")
         self._stacked.setLabel("left", "Whisker")
         self._stacked.getAxis("left").setTicks([[(s, f"W{s + 1}") for s in range(self._nsensor)]])
-        self._stacked.showGrid(x=True, y=True, alpha=0.2)
+        _show_grid(self._stacked.getPlotItem())
         _add_gauge_legend(self._stacked.getPlotItem())
         self._stacked_curves: list[pg.PlotDataItem] = []
         for c in range(self._nch):
             color = _RED if (c % 2) == 0 else _BLUE
             name = _GAUGE_NAMES[c] if c < 2 else None
-            self._stacked_curves.append(self._stacked.plot(pen=pg.mkPen(color=color, width=4), name=name))
+            self._stacked_curves.append(self._stacked.plot(pen=pg.mkPen(color=color, width=_PEN_W), name=name))
+        # absolute values: a column right of the axis, one label per whisker row
+        self._stacked.showAxis("right")
+        self._value_axis = self._stacked.getAxis("right")
+        self._value_axis.setStyle(showValues=False, tickLength=0)
+        self._stacked_labels = [_value_label() for _ in range(self._nsensor)]
+        for label in self._stacked_labels:
+            label.setAnchor((0, 0.5))
+            label.setParentItem(self._value_axis)
+        vb = self._stacked.getPlotItem().getViewBox()
+        vb.sigYRangeChanged.connect(self._place_stacked_labels)
+        vb.sigResized.connect(self._place_stacked_labels)
 
         # --- grid: one tile per sensor
         self._grid = pg.GraphicsLayoutWidget()
@@ -87,7 +161,7 @@ class LineView(ViewWindow):
         self._grid_curves: list[pg.PlotDataItem] = []
         for s in range(self._nsensor):
             p = self._grid.addPlot(row=s // ncol, col=s % ncol, title=f"W{s + 1}")
-            p.showGrid(x=True, y=True, alpha=0.2)
+            _show_grid(p)
             if self._tiles:
                 p.setXLink(self._tiles[0])
             if not self._tiles:
@@ -96,17 +170,19 @@ class LineView(ViewWindow):
             for g in range(2):
                 color = _RED if g == 0 else _BLUE
                 name = _GAUGE_NAMES[g] if s == 0 else None
-                self._grid_curves.append(p.plot(pen=pg.mkPen(color=color, width=2), name=name))
+                self._grid_curves.append(p.plot(pen=pg.mkPen(color=color, width=_PEN_W), name=name))
+        self._tile_labels = [self._corner_label(p) for p in self._tiles]
 
         # --- single: one sensor filling the window (double-click to enter)
         self._single_plot = pg.PlotWidget()
         self._single_plot.setBackground("w")
         self._single_plot.setLabel("bottom", "Time", units="s")
-        self._single_plot.showGrid(x=True, y=True, alpha=0.2)
+        _show_grid(self._single_plot.getPlotItem())
         _add_gauge_legend(self._single_plot.getPlotItem())
         self._single_curves = [
-            self._single_plot.plot(pen=pg.mkPen(color=color, width=2), name=name)
+            self._single_plot.plot(pen=pg.mkPen(color=color, width=_SINGLE_PEN_W), name=name)
             for color, name in ((_RED, "A"), (_BLUE, "B"))]
+        self._single_label = self._corner_label(self._single_plot.getPlotItem())
 
         self._pages = QStackedWidget()
         self._pages.addWidget(self._stacked)
@@ -129,6 +205,7 @@ class LineView(ViewWindow):
             p.getViewBox().sigRangeChangedManually.connect(self._on_manual_range)
 
         self._build_toolbar()
+        self.set_value_format("", None)
         self._reset_view()
 
     # ------------------------------------------------------------------
@@ -208,7 +285,6 @@ class LineView(ViewWindow):
     def _on_grid_toggled(self, on: bool) -> None:
         self._leave_single()
         self._pages.setCurrentIndex(_GRID if on else _STACKED)
-        self._redraw()
         self._reset_view()
 
     def _on_mouse_clicked(self, ev) -> None:
@@ -239,6 +315,7 @@ class LineView(ViewWindow):
         self._single_plot.enableAutoRange(axis="y")
         self._show_x(x)
         self._redraw()
+        self._update_labels()
 
     def _restore(self) -> None:
         if self._single is None:
@@ -248,6 +325,7 @@ class LineView(ViewWindow):
         self._pages.setCurrentIndex(_GRID if self._act_grid.isChecked() else _STACKED)
         self._show_x(x)
         self._redraw()
+        self._update_labels()
 
     def _leave_single(self) -> None:
         self._single = None
@@ -274,6 +352,8 @@ class LineView(ViewWindow):
         if self._follow:
             self._follow = False
             self.statusBar().showMessage("Not following live data — Reset view to resume")
+        # re-decimate for the new zoom (matters while paused); after the range lands
+        QTimer.singleShot(0, self._redraw)
 
     def _reset_view(self) -> None:
         self._follow = True
@@ -282,6 +362,8 @@ class LineView(ViewWindow):
         for p in (*self._tiles, self._single_plot.getPlotItem()):
             p.enableAutoRange(axis="y")
         self._apply_x_range()
+        self._redraw()
+        self._update_labels()
 
     def _current_x_plot(self) -> pg.PlotItem:
         page = self._pages.currentIndex()
@@ -333,7 +415,7 @@ class LineView(ViewWindow):
         if not 0 <= sensor < self._nsensor:
             self.statusBar().showMessage(f"t = {self._t[i]:.3f} s")
             return
-        a, b = self._y[i, 2 * sensor], self._y[i, 2 * sensor + 1]
+        a, b = (self._sig[i, 2 * sensor:2 * sensor + 2] - self._v0[2 * sensor:2 * sensor + 2]) * self._scale
         self.statusBar().showMessage(
             f"t = {self._t[i]:.3f} s   W{sensor + 1}   A = {a:+.4g}   B = {b:+.4g}   (minus V0)")
 
@@ -368,14 +450,35 @@ class LineView(ViewWindow):
         if len(t_seconds) != sig.shape[0]:
             return
 
-        self._t = np.asarray(t_seconds)
-        self._y = (sig - v0) * float(scale)
-        self._redraw()
+        # copy: the caller's buffer is shifted in place on the next tick, also while paused
+        if self._sig.shape == sig.shape:
+            np.copyto(self._t, t_seconds)
+            np.copyto(self._sig, sig)
+        else:
+            self._t = np.array(t_seconds, dtype=float)
+            self._sig = np.array(sig, dtype=np.float32)
+        self._v0 = np.asarray(v0, dtype=np.float32)
+        self._scale = float(scale)
 
         if x_range is not None:
             self._x_range = x_range
             if self._follow:
                 self._apply_x_range()
+        self._redraw()
+        now = time.monotonic()
+        if now - self._labels_t >= _LABEL_PERIOD_S:
+            self._update_labels()
+
+    def _decimated(self, plot: pg.PlotItem, cols: slice) -> tuple[np.ndarray, np.ndarray]:
+        """``(t, (sig - v0) * scale)`` for ``cols``, ~2 points per pixel of ``plot``."""
+        vb = plot.getViewBox()
+        n_vis = self._t.size
+        if not self._follow:
+            x0, x1 = vb.viewRange()[0]
+            n_vis = int(np.searchsorted(self._t, x1) - np.searchsorted(self._t, x0))
+        k = max(1, n_vis // max(1, int(vb.width())))
+        t, y = _peak_decimate(self._t, self._sig[:, cols], k)
+        return t, (y - self._v0[cols]) * self._scale
 
     def _redraw(self) -> None:
         # Only the visible layout is drawn; switching layouts redraws the other.
@@ -383,13 +486,99 @@ class LineView(ViewWindow):
             return
         page = self._pages.currentIndex()
         if page == _STACKED:
-            for c in range(self._nch):
-                self._stacked_curves[c].setData(self._t, self._y[:, c] + float(c // 2))
+            t, y = self._decimated(self._stacked.getPlotItem(), slice(None))
+            y = (y + self._offsets).T.copy()      # contiguous rows, one per curve
+            finite = bool(np.isfinite(y).all())
+            for c, curve in enumerate(self._stacked_curves):
+                curve.setData(t, y[c], skipFiniteCheck=finite)
         elif page == _GRID:
-            for c in range(self._nch):
-                self._grid_curves[c].setData(self._t, self._y[:, c])
+            t, y = self._decimated(self._tiles[0], slice(None))
+            y = y.T.copy()
+            finite = bool(np.isfinite(y).all())
+            for c, curve in enumerate(self._grid_curves):
+                curve.setData(t, y[c], skipFiniteCheck=finite)
         elif self._single is not None:
-            for g, curve in enumerate(self._single_curves):
-                c = 2 * self._single + g
-                if c < self._nch:
-                    curve.setData(self._t, self._y[:, c])
+            c0 = 2 * self._single
+            t, y = self._decimated(self._single_plot.getPlotItem(), slice(c0, min(c0 + 2, self._nch)))
+            for g in range(y.shape[1]):
+                self._single_curves[g].setData(t, y[:, g])
+
+    # ------------------------------------------------------------------
+    # absolute-value labels
+    # ------------------------------------------------------------------
+
+    def set_value_format(self, units: str, open_level: float | None) -> None:
+        """Units of the raw samples, and the absolute level at or above which a
+        gauge reads "open" (railed: nothing plugged in); None = never."""
+        self._units = units
+        self._open_level = open_level
+        self._value_axis.setLabel(f"absolute ({units})" if units else "absolute")
+        self._update_labels()
+
+    def _corner_label(self, plot: pg.PlotItem) -> pg.TextItem:
+        """Top-left of ``plot``'s view box, font sized to the plot."""
+        label = _value_label()
+        vb = plot.getViewBox()
+        label.setParentItem(vb)
+        label.setPos(2, 2)
+
+        def resize() -> None:
+            label.setFont(_px_font(round(0.07 * vb.height()), 8, 16))
+        vb.sigResized.connect(resize)
+        resize()
+        return label
+
+    def _place_stacked_labels(self) -> None:
+        vb = self._stacked.getPlotItem().getViewBox()
+        y0, y1 = vb.viewRange()[1]
+        row_px = vb.height() / max(y1 - y0, 1e-9)
+        font = _px_font(round(0.45 * row_px), 7, 14)
+        width = math.ceil(QFontMetricsF(font).horizontalAdvance("A -0000.0   B -0000.0")) + 12
+        if self._value_axis.width() != width:
+            self._value_axis.setWidth(width)
+        for s, label in enumerate(self._stacked_labels):
+            y = self._value_axis.mapFromScene(vb.mapViewToScene(QPointF(0, s))).y()
+            label.setVisible(0 <= y <= self._value_axis.height())
+            label.setFont(font)
+            label.setPos(4, y)
+
+    def _update_labels(self) -> None:
+        """Refresh the visible page's absolute-value labels."""
+        self._labels_t = time.monotonic()
+        if self._t.size == 0:
+            vals = np.full(self._nch, np.nan)
+        else:
+            i0 = int(np.searchsorted(self._t, self._t[-1] - _LABEL_AVG_S))
+            vals = self._sig[i0:].mean(axis=0)
+        page = self._pages.currentIndex()
+        if page == _STACKED:
+            for s, label in enumerate(self._stacked_labels):
+                label.setHtml(self._value_html(vals, s, unit=False))
+        elif page == _GRID:
+            for s, label in enumerate(self._tile_labels):
+                label.setHtml(self._value_html(vals, s))
+        elif self._single is not None:
+            self._single_label.setHtml(self._value_html(vals, self._single))
+
+    def _value_html(self, vals: np.ndarray, sensor: int, unit: bool = True) -> str:
+        parts = []
+        for g in range(2):
+            c = 2 * sensor + g
+            v = vals[c] if c < self._nch else np.nan
+            if not np.isfinite(v):
+                text = "–"
+            elif self._open_level is not None and abs(v) >= self._open_level:
+                text = "open"
+            else:
+                text = f"{v:.1f}"
+            parts.append(f"<span style='color:{_HTML_COLOR[g]}'>{_GAUGE_NAMES[g]}&nbsp;{text}</span>")
+        html = "&nbsp;&nbsp;".join(parts)
+        if unit and self._units:
+            html += f"&nbsp;<span style='color:#666'>{self._units}</span>"
+        return html
+
+
+def _px_font(px: int, lo: int, hi: int) -> QFont:
+    font = QFont()
+    font.setPixelSize(int(min(max(px, lo), hi)))
+    return font
