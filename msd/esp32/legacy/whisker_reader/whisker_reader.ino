@@ -744,8 +744,10 @@ void setup() {
         Serial.printf("Boot recovery: %s\n", lvl ? "OK" : "FAILED");
         cfg = (g_clockRb & CLOCK_MASK) == (CLOCK_ALL_CH_OSR128 & CLOCK_MASK);
     }
+    // ID register (SBAS890D): bits 15:12 = 0010b, CHANCNT 11:8 = 4 -> 0x24xx.
     Serial.printf("Device ID      = 0x%04X  %s\n", g_id,
-                  ((g_id >> 8) == 0x22 || (g_id >> 8) == 0x20) ? "(responding)" : "(NO RESPONSE)");
+                  (g_id >> 8) == 0x24 ? "(ADS131M04)" :
+                  (g_id == 0x0000 || g_id == 0xFFFF) ? "(NO RESPONSE)" : "(unexpected ID)");
     Serial.printf("CLOCK readback = 0x%04X  %s\n", g_clockRb,
                   cfg ? "(config ACCEPTED)" : "(NOT accepted)");
 
