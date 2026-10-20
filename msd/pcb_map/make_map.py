@@ -88,6 +88,23 @@ for n, p in CTL["P2"].items():
                             chip=f"CD4097B #{m} pin {mux[name]}", gpio=FW_GPIO[name], dir="ESP32 → mux")
 assert J1[4]["net"] == "GND" and MD1[2]["net"] == "GND"
 
+# INA351 REF divider: MAIN.SchDoc places the Amplifier_Reference sheet twice, so there are two
+# identical copies (R7 3V3->REF, R8 REF->GND, C4 REF->GND), both on the one AMP_REF_3V3 net.
+REFDIV = []   # [{R7: part, R8: part, C4: part}] per copy, part = dict(x, y, nets)
+_parts = []
+for i, c in enumerate(comps):
+    d = c["SOURCEDESIGNATOR"]
+    if d in ("R7", "R8", "C4"):
+        _parts.append(dict(d=d, x=float(c["X"][:-3]) * MM, y=float(c["Y"][:-3]) * MM, rot=float(c["ROTATION"]),
+                           nets={q["name"]: nets[q["net"]] for q in pads if q["comp"] == i and q["net"] < len(nets)}))
+for yc in sorted({round(p["y"] / 10) for p in _parts}):
+    REFDIV.append({p["d"]: p for p in _parts if round(p["y"] / 10) == yc})
+for cp in REFDIV:
+    assert set(cp) == {"R7", "R8", "C4"}
+    assert sorted(cp["R7"]["nets"].values()) == ["3V3", "AMP_REF_3V3"]
+    assert sorted(cp["R8"]["nets"].values()) == ["AMP_REF_3V3", "GND"]
+    assert sorted(cp["C4"]["nets"].values()) == ["AMP_REF_3V3", "GND"]
+
 # gauge = (signal pin, 3V3 pin). Schematic MAIN sheet: CONN(4k+1)->pin 4k+3, CONN(4k+3)->pin 4k+2;
 # the odd CONN nets are 3V3 on the PCB, the even ones carry the signal.
 gauges = []
@@ -171,6 +188,19 @@ for ref, pins in CTL.items():
 g4 = J1[4]
 o.append(f'<circle cx="{g4["x"]:.2f}" cy="{fy(g4["y"]):.2f}" r="1.25" class="gnd"><title>J1 pin 4: GND (through-hole)</title></circle>')
 o.append(f'<text x="{g4["x"] - 2:.2f}" y="{fy(g4["y"]) + .7:.2f}" text-anchor="end" class="gndlab">GND</text>')
+for cp in REFDIV:
+    xs = [p["x"] for p in cp.values()]; yc = sum(p["y"] for p in cp.values()) / 3
+    o.append(f'<rect x="{min(xs) - 1.6:.2f}" y="{fy(yc) - 1.3:.2f}" width="{max(xs) - min(xs) + 3.2:.2f}" height="2.6" rx=".5" class="refbox">'
+             f'<title>INA351 REF divider (one of two identical copies on the AMP_REF_3V3 net)</title></rect>')
+    for d, p in sorted(cp.items(), key=lambda kv: kv[1]["x"]):
+        w, h = (1.6, 0.8) if abs(p["rot"]) % 180 < 1 else (0.8, 1.6)
+        role = {"R7": "3V3 → REF", "R8": "REF → GND", "C4": "1 µF, REF → GND"}[d]
+        o.append(f'<rect x="{p["x"] - w / 2:.2f}" y="{fy(p["y"]) - h / 2:.2f}" width="{w}" height="{h}" class="refpart refpart-{d.lower()}">'
+                 f'<title>{d}: {role}</title></rect>')
+        ty = fy(yc) + (3.6 if yc > H / 2 else -2.4)
+        o.append(f'<text x="{p["x"]:.2f}" y="{ty:.2f}" text-anchor="middle" class="reflab">{d}</text>')
+    top = yc > H / 2
+    o.append(f'<text x="{(min(xs) + max(xs)) / 2:.2f}" y="{fy(yc) + (5.6 if top else -4.4):.2f}" text-anchor="middle" class="reftitle">REF divider</text>')
 m2 = MD1[2]
 o.append(f'<circle cx="{m2["x"]:.2f}" cy="{fy(m2["y"]):.2f}" r="1.35" class="gndrec"><title>MD1 pin 2 (middle lead of the 3.3 V buck module): GND, recommended ground point</title></circle>')
 for k, cls in ((1, "mdvin"), (3, "md3v3")):
