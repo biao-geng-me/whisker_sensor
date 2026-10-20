@@ -1,0 +1,267 @@
+<title>Whisker PCB Header Map</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@600&display=swap">
+<style>
+/* Layout: board overview to scale on top, then the four headers as zoomed pinouts placed where they sit on the board, then a lookup table. */
+:root {
+  --bg: #f3f5f2; --panel: #ffffff; --fg: #18211c; --mut: #5d6a62; --line: #d5ddd7;
+  --pcb: #1d4d36; --pcb-edge: #0f2b1e; --silk: #e9efe9; --gold: #c9a24a; --housing: #23272a;
+  --h1: #e2793b; --h2: #3d8fd6; --h3: #b35fc9; --h4: #2fa37a; --p1: #e0507a; --p2: #22b3c4; --gnd: #111;
+  --f-display: "IBM Plex Sans Condensed", "Arial Narrow", sans-serif;
+  --f-body: "IBM Plex Sans", system-ui, sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #121815; --panel: #1a221e; --fg: #e3ebe5; --mut: #93a299; --line: #2c3832;
+  --h1: #f08d52; --h2: #5aa6ea; --h3: #c77ddb; --h4: #45bd92; --p1: #f0708f; --p2: #45c9d8; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #121815; --panel: #1a221e; --fg: #e3ebe5; --mut: #93a299; --line: #2c3832;
+  --h1: #f08d52; --h2: #5aa6ea; --h3: #c77ddb; --h4: #45bd92; --p1: #f0708f; --p2: #45c9d8; color-scheme: dark }
+body { background: var(--bg); color: var(--fg); font: 15px/1.55 var(--f-body);
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 28px 56px; }
+main { max-width: 1080px; margin: 0 auto; display: grid; gap: 36px; }
+h1 { font: 600 2rem/1.1 var(--f-display); letter-spacing: .01em; margin: 0; text-wrap: balance; }
+h2 { font: 600 1.25rem/1.2 var(--f-display); margin: 0 0 4px; letter-spacing: .02em; }
+p { margin: 0; max-width: 68ch; }
+.lede { color: var(--mut); margin-top: 8px; }
+header { display: grid; gap: 4px; }
+.eyebrow { font: 500 .75rem var(--f-mono); letter-spacing: .08em; text-transform: uppercase; color: var(--mut); }
+section { display: grid; gap: 14px; min-width: 0; }
+.scroll { overflow-x: auto; }
+svg.board { width: 100%; min-width: 560px; height: auto; display: block; }
+.pcb { fill: var(--pcb); stroke: var(--pcb-edge); stroke-width: .4; }
+.mh { fill: var(--bg); stroke: var(--gold); stroke-width: .5; }
+.silk { fill: none; stroke: var(--silk); stroke-width: .18; stroke-linecap: round; stroke-linejoin: round; opacity: .55; }
+.silkfill { fill: var(--silk); opacity: .55; }
+.hbox { fill: none; stroke-width: .55; }
+.psig { stroke: var(--housing); stroke-width: .15; }
+.pvcc { fill: var(--gold); stroke: var(--housing); stroke-width: .15; }
+.pair { stroke-width: 2.1; stroke-linecap: round; opacity: .35; fill: none; }
+.glab { font: 600 1.45px var(--f-mono); fill: var(--silk); paint-order: stroke; stroke: var(--pcb); stroke-width: .5; }
+.hlab { font: 600 3.2px var(--f-display); paint-order: stroke; stroke: var(--pcb); stroke-width: .8; }
+.hsub { font: 500 1.9px var(--f-mono); fill: var(--silk); paint-order: stroke; stroke: var(--pcb); stroke-width: .6; }
+.clab { font: 600 1.25px var(--f-mono); fill: var(--silk); paint-order: stroke; stroke: var(--pcb); stroke-width: .45; }
+.cgpio { font: 600 1.35px var(--f-mono); fill: #fff; paint-order: stroke; stroke: var(--pcb); stroke-width: .5; }
+.gnd { fill: none; stroke: #fff; stroke-width: .45; stroke-dasharray: .7 .45; }
+.gndlab { font: 600 2px var(--f-mono); fill: #fff; paint-order: stroke; stroke: var(--pcb); stroke-width: .6; }
+.scale { stroke: var(--fg); stroke-width: .4; }
+svg.board .scale + .hsub { fill: var(--fg); stroke: none; font-size: 2px; }
+.legend { display: flex; flex-wrap: wrap; gap: 8px 22px; font-size: .85rem; color: var(--mut); }
+svg.dk { width: 100%; max-width: 760px; min-width: 520px; height: auto; display: block; margin: 0 auto; }
+.dkpcb { fill: #1f2a44; stroke: #0e1526; stroke-width: 1.5; }
+.dkmod { fill: #c9ccd1; stroke: #8a8f97; }
+.dkusb { fill: #b9bec6; stroke: #6f757e; }
+.dkt { font: 500 10px var(--f-mono); fill: var(--mut); }
+.dkmod + .dkt { fill: #3b4048; }
+.dkw { fill: #8f99ad; }
+.dkpin { stroke: #0e1526; stroke-width: 1.2; }
+.dkoff { fill: #8b929c; }
+.dkgnd { fill: #111; stroke: #fff; stroke-width: 1.6; }
+.dklab { font: 600 11px var(--f-mono); fill: #eef2f8; }
+.dkdim { fill: #8f99ad; font-weight: 400; }
+.dkuse { font: 600 11.5px var(--f-body); }
+.dkg { fill: var(--fg); }
+.dklead { stroke-width: 1.4; fill: none; }
+svg.gw { width: 100%; min-width: 420px; height: auto; display: block; }
+.gwbox { fill: var(--panel); stroke: var(--fg); stroke-width: 1.2; }
+.gwpcb { fill: var(--pcb); stroke: var(--pcb-edge); stroke-width: 1.2; }
+.gwj1 { fill: #3a4a42; stroke: #0f2b1e; }
+.gwp1 { fill: var(--p1); } .gwp2 { fill: var(--p2); }
+.gwesp { fill: #1f2a44; stroke: #0e1526; stroke-width: 1.2; }
+.gwusb { fill: #b9bec6; stroke: #6f757e; }
+.gwt { font: 600 11px var(--f-body); fill: var(--fg); }
+.gwsub { font: 500 10px var(--f-mono); fill: var(--mut); }
+.gwpcbt { font: 600 11px var(--f-mono); fill: #cfe0d6; opacity: .7; }
+.gwespt { font: 600 11px var(--f-mono); fill: #dfe6f2; }
+.gwpin { font: 600 10px var(--f-mono); fill: #e9efe9; }
+.gwespp { font: 600 9.5px var(--f-mono); fill: #e9efe9; }
+.gwplus { fill: #d33; } .gwminus { fill: #111; stroke: #fff; stroke-width: 1.2; }
+.gwwire { fill: none; stroke-width: 2.6; stroke-linecap: round; stroke-linejoin: round; }
+.gwred { stroke: #d33; } .gwblk { stroke: #222; }
+.gwgnd { stroke: var(--fg); stroke-width: 3; }
+.gwbundle { fill: none; stroke-width: 7; stroke-linecap: round; opacity: .9; }
+.gwp1s { stroke: var(--p1); } .gwp2s { stroke: var(--p2); }
+.gwloopbg { fill: transparent; } .gwhatch { stroke-width: 2.2; }
+#hatch0 .gwhatch { stroke: rgba(224, 80, 122, .35); } #hatch1 .gwhatch { stroke: rgba(47, 163, 122, .45); }
+.gwnote { font: 600 10.5px var(--f-body); fill: var(--fg); }
+.gwbad { fill: var(--p1); } .gwok { fill: var(--h4); }
+.legend span { display: inline-flex; align-items: center; gap: 7px; }
+.sw { width: 12px; height: 12px; border-radius: 50%; display: inline-block; border: 1px solid var(--housing); }
+.grid4 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+@media (max-width: 760px) { .grid4 { grid-template-columns: 1fr; } }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 14px 14px 8px; display: grid; gap: 4px; min-width: 0; }
+.card h3 { margin: 0; font: 600 1.05rem var(--f-display); display: flex; gap: 10px; align-items: baseline; }
+.card h3 small { font: 400 .78rem var(--f-mono); color: var(--mut); }
+svg.hdr { width: 100%; min-width: 420px; height: auto; display: block; }
+.housing { fill: var(--housing); }
+.cap { fill: none; stroke-width: 2; }
+.capq { stroke-dasharray: 4 3; }
+.lead { stroke-width: 1; fill: none; opacity: .7; }
+.pnum { font: 500 8px var(--f-mono); fill: var(--housing); }
+.pnumd { fill: #fff; }
+.wname { font: 600 12.5px var(--f-body); fill: var(--fg); }
+.wq { fill: var(--mut); font-style: italic; }
+.wmeta { font: 400 9.5px var(--f-mono); fill: var(--mut); }
+.edge { font: 400 9px var(--f-mono); fill: var(--mut); }
+.notes { display: grid; gap: 10px; padding-left: 1.1em; margin: 0; }
+.notes li { max-width: 72ch; }
+.notes b { font-weight: 600; }
+code { font: .88em var(--f-mono); }
+.stack { display: grid; gap: 16px; }
+table.ctl { min-width: 760px; }
+table { border-collapse: collapse; font-size: .86rem; width: 100%; min-width: 560px; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 5px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th { font: 500 .72rem var(--f-mono); letter-spacing: .06em; text-transform: uppercase; color: var(--mut); }
+td:first-child { font-weight: 600; }
+tr.q td { color: var(--mut); font-style: italic; }
+.mut { color: var(--mut); }
+.dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+.src { font-size: .8rem; color: var(--mut); }
+</style>
+
+<main>
+  <header>
+    <div class="eyebrow">MSD P25937 · Whisker PCB rev 2 · top view</div>
+    <h1>Whisker PCB header map</h1>
+    <p class="lede">Which header pins each strain gauge plugs into, from the Altium layout. It also shows the two ESP32 control headers, P1 (ADC SPI) and P2 (mux selects), with the ESP32 GPIO each pin is wired to in the current firmware. Every view is from the top (component) side, with the J1 power jack on the left and the silkscreen reading normally.</p>
+  </header>
+
+  <section>
+    <div class="scroll">{{BOARD}}</div>
+    <div class="legend">
+      <span><i class="sw" style="background:var(--gold)"></i>3V3 pin (gauge supply side, odd CONN)</span>
+      <span><i class="sw" style="background:var(--h1)"></i>Sense pin (even CONN → INA351 IN−), colored by header</span>
+      <span><i class="sw" style="background:var(--gold);border-radius:1px"></i>Square pad = pin 1</span>
+      <span><i class="sw" style="background:var(--p1)"></i>P1 ADC SPI</span>
+      <span><i class="sw" style="background:var(--p2)"></i>P2 mux selects (number below each pin = ESP32 GPIO)</span>
+      <span><i class="sw" style="background:none;border:1px dashed var(--fg)"></i>J1 pin 4, the only through-hole GND</span>
+      <span>Labels such as <b>1A</b> = whisker 1, gauge A (wavi_py W1_A)</span>
+    </div>
+  </section>
+
+  <section>
+    <div>
+      <h2>Pinouts</h2>
+      <p class="mut">Each ring is one gauge: two vertically adjacent pins in the same column, one 3V3 and one sense. The panels are arranged as the headers sit on the board.</p>
+    </div>
+    <div class="grid4">
+      <div class="card"><h3>J5 <small>upper left · W13–W16</small></h3><div class="scroll">{{J5}}</div></div>
+      <div class="card"><h3>J4 <small>upper right · W9–W12</small></h3><div class="scroll">{{J4}}</div></div>
+      <div class="card"><h3>J2 <small>lower left · W1–W4</small></h3><div class="scroll">{{J2}}</div></div>
+      <div class="card"><h3>J3 <small>lower right · W5–W8</small></h3><div class="scroll">{{J3}}</div></div>
+    </div>
+  </section>
+
+  <section>
+    <div>
+      <h2>ESP32 connections: P1 and P2</h2>
+      <p class="mut">Both are 6-pin single-row headers; pin 1 is the square pad at the right-hand end in the top view. GPIO numbers are the <code>PIN_*</code> defines in <code>msd/esp32/whisker_daq/whisker_daq.ino</code> (the legacy <code>whisker_reader.ino</code> uses the same pins).</p>
+    </div>
+    <div class="stack">
+      <div class="card"><h3>P1 <small>ADC SPI · to ADS131M04 (U4)</small></h3><div class="scroll"><table class="ctl">
+        <thead><tr><th>Pin</th><th>Signal</th><th>ESP32</th><th>Board pin</th><th>Direction</th><th>Chip pin</th><th>Role</th></tr></thead>
+        <tbody>
+{{P1ROWS}}
+        </tbody></table></div></div>
+      <div class="card"><h3>P2 <small>mux selects · to CD4097B (U3)</small></h3><div class="scroll"><table class="ctl">
+        <thead><tr><th>Pin</th><th>Signal</th><th>ESP32</th><th>Board pin</th><th>Direction</th><th>Chip pin</th><th>Role</th></tr></thead>
+        <tbody>
+{{P2ROWS}}
+        </tbody></table></div></div>
+    </div>
+    <div class="card"><h3>ESP32 board <small>ESP32 DevKit V1, 30-pin (DOIT layout) · top view, antenna up</small></h3>
+      <div class="scroll">{{DEVKIT}}</div>
+      <p class="src">Pin order of the common DOIT ESP32 DevKit V1 30-pin board, with its silkscreen labels (D23 = GPIO23, RX2 = GPIO16, TX2 = GPIO17). Clones occasionally differ: check the labels printed on your board before soldering. The six P2 wires land on six adjacent left-row pins (D32, D33, D25, D26, D27, D14), but not in P2 order. The P1 wires are all on the right row. The board’s GND pins are both near the USB end (left pin 14, right pin 14), so the P1 ground wire starts at the right-row GND, just below D15.</p>
+    </div>
+    <ul class="notes">
+      <li><b>Neither header has a GND pin.</b> The ESP32 ground must still be tied to the PCB ground; the only through-hole GND on the board is <b>J1 pin 4</b> (and the J1 shell tabs), and mounting holes MH1–4 are not connected. See <i>Ground wiring</i> below for how to route it.</li>
+      <li><b>Mux 1 (SEL*_1) is the lower CD4097B</b>, the one carrying OUT1–16 for J2/J3; mux 2 (SEL*_2) is the upper one, OUT17–32 for J4/J5. Careful: the silkscreen text “MUX1” sits next to the upper chip and “MUX2” next to the lower one, the opposite of the net names. Go by the nets. Select lines A, B, C go to CD4097B pins 10, 11, 14; the firmware writes the 3-bit select value to both muxes at once.</li>
+      <li><b>P1 net names are Raspberry Pi header numbers.</b> The layout calls the P1 nets PIN23 (SCLK), PIN21 (MISO), PIN19 (MOSI), PIN07 (GPCLK0 → CLKIN), PIN27 and PIN29: the 40-pin Pi header positions. The board was laid out to be driven by a Pi; the ESP32 wiring above replaces that.</li>
+      <li><b>CLKIN and SCLK are the fast lines.</b> Keep the P1 wires short (under ~10 cm), use a multi-pin housing or solder, and add 33–100 Ω series resistors at the ESP32 end of SCLK, CLKIN, DIN and CS before raising the clocks.</li>
+    </ul>
+  </section>
+
+  <section>
+    <div>
+      <h2>Ground wiring: ESP32 to PCB</h2>
+      <p class="mut">The PCB’s only accessible ground is J1 pin 4, so the ESP32 needs exactly one ground wire from there. What matters is its route: at the MHz edges of SCLK and CLKIN, each signal’s current returns along the ground path, and the area between the signal wires and that path is a loop that radiates, picks up noise and rings. Route the ground wire with the P1 wires so the loop is just the gap between adjacent wires.</p>
+    </div>
+    <div class="grid4">
+      <div class="card"><h3>Now <small>ground branched off at the supply</small></h3><div class="scroll"><svg class="gw" viewBox="0 0 470 300" role="img" aria-label="Current ground wiring between supply, PCB and ESP32">
+<defs><pattern id="hatch0" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><path d="M0,0 V6" class="gwhatch"/></pattern></defs>
+<path d="M332,160 L392,166 L392,236 L360,236 L360,272 L140,272 L140,88 L171,94 L290,156 Z" fill="url(#hatch0)"/>
+<rect x="14" y="36" width="96" height="66" rx="5" class="gwbox"/><text x="62" y="62" text-anchor="middle" class="gwt">bench supply</text><text x="62" y="78" text-anchor="middle" class="gwsub">5.5 V</text>
+<circle cx="110" cy="56" r="3.5" class="gwplus"/><circle cx="110" cy="88" r="3.5" class="gwminus"/>
+<text x="117" y="50" class="gwsub">+</text><text x="117" y="82" class="gwsub">−</text>
+<rect x="160" y="28" width="180" height="172" rx="6" class="gwpcb"/><text x="250" y="126" text-anchor="middle" class="gwpcbt">whisker PCB</text>
+<rect x="160" y="46" width="22" height="58" rx="2" class="gwj1"/><text x="188" y="44" class="gwpin">J1</text>
+<circle cx="171" cy="58" r="3.5" class="gwplus"/><circle cx="171" cy="94" r="4" class="gwminus"/><text x="188" y="98" class="gwpin">GND (pin 4)</text>
+<rect x="290" y="58" width="42" height="12" rx="2" class="gwp2"/><text x="311" y="52" text-anchor="middle" class="gwpin">P2</text>
+<rect x="290" y="150" width="42" height="12" rx="2" class="gwp1"/><text x="311" y="144" text-anchor="middle" class="gwpin">P1</text>
+<path d="M113,56 H168" class="gwwire gwred"/><path d="M113,88 H140 V94 H167" class="gwwire gwblk"/>
+<path d="M332,64 C355,64 368,70 392,70" class="gwbundle gwp2s"/><text x="362" y="90" text-anchor="middle" class="gwsub">×6</text>
+<path d="M332,156 C355,156 368,164 392,164" class="gwbundle gwp1s"/><text x="362" y="148" text-anchor="middle" class="gwsub">×6</text>
+<path d="M140,88 V272 H360 V236 H392" class="gwwire gwgnd"/>
+<circle cx="140" cy="88" r="3" class="gwminus"/>
+<text x="250" y="264" text-anchor="middle" class="gwnote">branch off the supply lead to ESP32 GND</text>
+<text x="250" y="222" text-anchor="middle" class="gwnote gwbad">large loop = antenna</text>
+<rect x="392" y="36" width="60" height="214" rx="6" class="gwesp"/><text x="422" y="56" text-anchor="middle" class="gwespt">ESP32</text>
+<circle cx="395" cy="236" r="3.5" class="gwminus"/><text x="402" y="240" class="gwespp">GND</text>
+<text x="402" y="74" class="gwespp">P2</text><text x="402" y="168" class="gwespp">P1</text>
+<rect x="410" y="250" width="24" height="12" rx="2" class="gwusb"/><text x="422" y="282" text-anchor="middle" class="gwsub">USB → laptop</text>
+</svg></div></div>
+      <div class="card"><h3>Recommended <small>ground wire runs with P1</small></h3><div class="scroll"><svg class="gw" viewBox="0 0 470 300" role="img" aria-label="Recommended ground wiring between supply, PCB and ESP32">
+<defs><pattern id="hatch1" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><path d="M0,0 V6" class="gwhatch"/></pattern></defs>
+<path d="M332,160 L392,160 L392,182 L332,182 Z" fill="url(#hatch1)"/>
+<rect x="14" y="36" width="96" height="66" rx="5" class="gwbox"/><text x="62" y="62" text-anchor="middle" class="gwt">bench supply</text><text x="62" y="78" text-anchor="middle" class="gwsub">5.5 V</text>
+<circle cx="110" cy="56" r="3.5" class="gwplus"/><circle cx="110" cy="88" r="3.5" class="gwminus"/>
+<text x="117" y="50" class="gwsub">+</text><text x="117" y="82" class="gwsub">−</text>
+<rect x="160" y="28" width="180" height="172" rx="6" class="gwpcb"/><text x="250" y="126" text-anchor="middle" class="gwpcbt">whisker PCB</text>
+<rect x="160" y="46" width="22" height="58" rx="2" class="gwj1"/><text x="188" y="44" class="gwpin">J1</text>
+<circle cx="171" cy="58" r="3.5" class="gwplus"/><circle cx="171" cy="94" r="4" class="gwminus"/><text x="188" y="98" class="gwpin">GND (pin 4)</text>
+<rect x="290" y="58" width="42" height="12" rx="2" class="gwp2"/><text x="311" y="52" text-anchor="middle" class="gwpin">P2</text>
+<rect x="290" y="150" width="42" height="12" rx="2" class="gwp1"/><text x="311" y="144" text-anchor="middle" class="gwpin">P1</text>
+<path d="M113,56 H168" class="gwwire gwred"/><path d="M113,88 H140 V94 H167" class="gwwire gwblk"/>
+<path d="M332,64 C355,64 368,70 392,70" class="gwbundle gwp2s"/><text x="362" y="90" text-anchor="middle" class="gwsub">×6</text>
+<path d="M332,156 C355,156 368,164 392,164" class="gwbundle gwp1s"/><text x="362" y="148" text-anchor="middle" class="gwsub">×6</text>
+<path d="M171,98 C176,170 210,177 260,177 L332,177 C355,177 368,180 392,180" class="gwwire gwgnd"/>
+<text x="250" y="218" text-anchor="middle" class="gwnote">ground wire from J1 GND, bundled with P1</text>
+<text x="362" y="196" text-anchor="middle" class="gwnote gwok">small loop</text>
+<rect x="392" y="36" width="60" height="214" rx="6" class="gwesp"/><text x="422" y="56" text-anchor="middle" class="gwespt">ESP32</text>
+<circle cx="395" cy="180" r="3.5" class="gwminus"/><text x="402" y="184" class="gwespp">GND</text>
+<text x="402" y="74" class="gwespp">P2</text><text x="402" y="168" class="gwespp">P1</text>
+<rect x="410" y="250" width="24" height="12" rx="2" class="gwusb"/><text x="422" y="282" text-anchor="middle" class="gwsub">USB → laptop</text>
+</svg></div></div>
+    </div>
+    <ul class="notes">
+      <li><b>One ground wire, J1 pin 4 to the ESP32 GND.</b> Start it at J1 pin 4 (or where the supply negative lands on J1), not out at the supply. On the DevKit V1 use the right-row GND just below D15, the same side as the P1 pins.</li>
+      <li><b>Keep it against the P1 wires the whole way.</b> Tape or twist it into the P1 bundle. Even better: two ground wires from J1 pin 4, one twisted with SCLK (D18) and one with CLKIN (RX2/GPIO16), ending at the two ESP32 GND pins (both are tied together on the board). DRDY, CS, DIN and DOUT can run loosely alongside.</li>
+      <li><b>Remove the old branch from the supply lead.</b> Leaving it in parallel keeps a second, large ground loop.</li>
+      <li><b>Short is still the main rule:</b> P1 wires under ~10 cm, soldered or in a multi-pin housing. P2 (mux selects) changes only once per mux step and is less critical.</li>
+      <li><b>Earth loop check:</b> the ESP32 is also grounded through the laptop’s USB. A floating bench supply output is fine; if the supply ties its negative to earth and the laptop is on its charger, mains hum can enter through that loop. Running the laptop on battery is a quick test.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Read before wiring</h2>
+    <ul class="notes">
+      <li><b>Pin pattern is the same on all four headers.</b> Pin 1 is the square pad at the bottom of the right-hand column; odd pins run up the right column, even pins up the left. Gauges take pins 1+3, 2+4, 5+7, 6+8 and so on. The 3V3 and sense pins alternate in a checkerboard, so a gauge never shares a pin with its neighbor.</li>
+      <li><b>Gauge polarity does not matter.</b> A gauge is a single resistor between 3V3 and the sense node (352 Ω R3/R6 to GND completes the half bridge). Either wire can go on either pin of its pair.</li>
+      <li><b>The odd CONN numbers do not exist on the PCB.</b> In the schematic CONN1, CONN3, … are labels on the 3V3 pins; in the layout they are merged into the 3V3 net. Only CONN2, 4, … 64 appear as nets.</li>
+      <li><b>Labels are the firmware / wavi_py names.</b> Whisker <i>n</i> gauge A is OUT(2<i>n</i>−1) and gauge B is OUT(2<i>n</i>), as in <code>whisker_link/channels.py</code>. On each header, whisker numbers count up from the pin-1 end, A is the right-hand column and B the left. A bench test (J2 pins 1–4 show as W1 in wavi_py) confirms this.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Lookup by gauge</h2>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Gauge</th><th>wavi_py</th><th>Output</th><th>Header</th><th>Sense pin</th><th>3V3 pin</th></tr></thead>
+        <tbody>
+{{ROWS}}
+        </tbody>
+      </table>
+    </div>
+    <p class="src">Sources: pad nets and positions from <code>PCB0603.PcbDoc</code> and the CONN-to-pin labels from <code>MAIN.SchDoc</code> (both in <code>P25937_Whisker_Final.zip</code>), silkscreen from <code>REV2_GERBER.zip</code>, channel names from <code>whisker_link/channels.py</code>. The sense net was traced through each INA351 and its output resistor to the OUT net that feeds the CD4097B mux.</p>
+  </section>
+</main>
