@@ -43,10 +43,11 @@ From §6.1 and §6.3 of the datasheet:
 |---|---|
 | Supply voltage (AVDD = DVDD) | 2.7 V min – 3.6 V max |
 | Reference voltage (internal) | 1.2 V |
-| Full-scale differential input | ±FSR where FSR = 1.2 V / Gain |
-| Any analog input pin | AVSS − 0.3 V to AVDD + 0.3 V (absolute max) |
+| Full-scale differential input | V(AINxP) − V(AINxN) = ±FSR where FSR = 1.2 V / Gain (§6.3) |
+| Any analog input pin, operating | AGND − 1.3 V to AVDD at gain 1, 2, 4; AGND − 1.3 V to AVDD − 1.8 V at gain ≥ 8 (§6.3) |
+| Any analog input pin, absolute max | AGND − 1.6 V to AVDD + 0.3 V (§6.1) |
 | Any digital input pin | DVSS − 0.3 V to DVDD + 0.3 V (absolute max) |
-| CLKIN frequency | typical 8.192 MHz; spec range allows higher |
+| CLKIN frequency | 0.3 – 8.4 MHz, nominal 8.192 MHz in high-resolution mode (§6.3) |
 
 **Important:** Never drive a digital input (CS, SCLK, DIN, SYNC/RESET) above DVDD + 0.3 V. This is the classic *latch-up* failure mode and is why the power-on sequence (analog board first, Pi second) matters.
 
