@@ -136,6 +136,10 @@ class MainWindow(QMainWindow):
             v.hide()
             # closing a view window unchecks its button (setChecked is a no-op if already off)
             v.closed.connect(lambda b=btn: b.setChecked(False))
+        # the line window's Pause / Re-zero drive the panel's buttons (state flows back
+        # through _on_pause_toggled / _set_stream_buttons_enabled)
+        self._line_view.pauseToggled.connect(self._pause_btn.setChecked)
+        self._line_view.resetRequested.connect(self._on_reset_clicked)
         # IMU rolling buffer (server transport only)
         self._imu_last_seq = 0
         self._imu_rows = np.empty((0, 9), dtype=np.float32)
@@ -366,8 +370,7 @@ class MainWindow(QMainWindow):
         self._imu_rows = np.empty((0, 9), dtype=np.float32)
 
         self._connect_btn.setText("Disconnect")
-        self._pause_btn.setEnabled(True)
-        self._reset_btn.setEnabled(True)
+        self._set_stream_buttons_enabled(True)
         self._record_btn.setEnabled(True)
         self._set_transport_inputs_enabled(False)
         self._path_label.setText(f"Connected to {client.endpoint_str} — output dir: {self._outpath}")
@@ -382,9 +385,8 @@ class MainWindow(QMainWindow):
             self._client = None
 
         self._connect_btn.setText("Connect")
-        self._pause_btn.setEnabled(False)
         self._pause_btn.setChecked(False)
-        self._reset_btn.setEnabled(False)
+        self._set_stream_buttons_enabled(False)
         self._record_btn.setEnabled(False)
         self._set_transport_inputs_enabled(True)
         self._path_label.setText(f"Disconnected. Output dir: {self._outpath}")
@@ -418,9 +420,15 @@ class MainWindow(QMainWindow):
         else:
             win.hide()
 
+    def _set_stream_buttons_enabled(self, on: bool) -> None:
+        self._pause_btn.setEnabled(on)
+        self._reset_btn.setEnabled(on)
+        self._line_view.set_stream_controls_enabled(on)
+
     def _on_pause_toggled(self, on: bool) -> None:
         self._is_paused = on
         self._pause_btn.setText("Resume" if on else "Pause")
+        self._line_view.set_paused(on)
 
     def _on_reset_clicked(self) -> None:
         if self._client is None or not self._client.is_running:

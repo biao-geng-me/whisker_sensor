@@ -44,6 +44,8 @@ python -m wavi_py --transport serial --serial-port COM3 --nsensor 9 --fs 80
 
 Click **Connect**. Toggle **Line / FFT / Spec** to bring up plot windows. **Pause** freezes plot updates while data keeps flowing (and recording continues). **Rec** writes a `.dat` file using the exact MATLAB filename / line format, so existing tools under [`data_processing/`](../data_processing/) keep working unchanged.
 
+The **Line** window has its own **Pause** and **Re-zero** buttons, which are the control panel's Pause and Reset (re-capture the V0 baseline) and stay in sync with them; **Reset view** only resets zoom and live following. **Grid** shows one tile per whisker; double-click a tile (or, in the stacked layout, near a whisker's trace) to show that whisker alone, and double-click again, press Esc or click **All whiskers** to go back.
+
 ## Run (library / headless)
 
 ```python
