@@ -71,6 +71,7 @@ svg.mx { width: 100%; max-width: 650px; height: auto; display: block; }
 .mxfn { font: 500 11px var(--f-mono); fill: #aab3ad; }
 .mxwho { font: 500 12px var(--f-mono); fill: var(--fg); }
 .mxwhobad { fill: #e03131; font-weight: 700; }
+.warnnote { border-left: 3px solid #e0a020; padding: 6px 10px; background: color-mix(in srgb, #e0a020 10%, transparent); }
 .mdvin { fill: #e04a3a; } .md3v3 { fill: #e9a23b; }
 .scale { stroke: var(--fg); stroke-width: .4; }
 svg.board .scale + .hsub { fill: var(--fg); stroke: none; font-size: 2px; }
@@ -236,6 +237,7 @@ tr.q td { color: var(--mut); font-style: italic; }
     <div>
       <h2>Ground wiring: ESP32 to PCB</h2>
       <p class="mut">The ESP32 needs one ground wire to the PCB. Take it from <b>MD1 pin 2</b>, the middle lead of the 3.3 V buck module (it sticks out on the bottom side), which is the through-hole GND closest to P1. What matters is its route: at the MHz edges of SCLK and CLKIN, each signal’s current returns along the ground path, and the area between the signal wires and that path is a loop that radiates, picks up noise and rings. Route the ground wire with the P1 wires so the loop is just the gap between adjacent wires.</p>
+      <p class="warnnote"><b>Bench result, 2026-10-21: the recommendation below did not hold up on this board.</b> With two ground wires from MD1 pin 2, one twisted around CLKIN and one around SCLK, to the two ESP32 GND pins, the ADC CRC and stale counters climbed continuously (tens of thousands). With those wires disconnected and only the original single wire (branched off the supply negative lead to one ESP32 GND), both counters stay at 0 after a power cycle. Use the single original wire, and only one ground wire at a time. The cause is not pinned down; the likely suspects are crosstalk from tight twisting with the clocks and a second ground loop through the ESP32 board.</p>
     </div>
     <div class="grid4">
       <div class="card"><h3>Now <small>ground branched off at the supply</small></h3><div class="scroll"><svg class="gw" viewBox="0 0 470 300" role="img" aria-label="Current ground wiring between supply, PCB and ESP32">
