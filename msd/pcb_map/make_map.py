@@ -105,6 +105,9 @@ for cp in REFDIV:
     assert sorted(cp["R8"]["nets"].values()) == ["AMP_REF_3V3", "GND"]
     assert sorted(cp["C4"]["nets"].values()) == ["AMP_REF_3V3", "GND"]
 
+# Bench state of this board (hand-entered, 2026-10-21): what is fitted on each copy.
+REFDIV_STATUS = {"top": "fitted: 45k + 100k", "bottom": "not populated"}
+
 # gauge = (signal pin, 3V3 pin). Schematic MAIN sheet: CONN(4k+1)->pin 4k+3, CONN(4k+3)->pin 4k+2;
 # the odd CONN nets are 3V3 on the PCB, the even ones carry the signal.
 gauges = []
@@ -200,7 +203,9 @@ for cp in REFDIV:
         ty = fy(yc) + (3.6 if yc > H / 2 else -2.4)
         o.append(f'<text x="{p["x"]:.2f}" y="{ty:.2f}" text-anchor="middle" class="reflab">{d}</text>')
     top = yc > H / 2
-    o.append(f'<text x="{(min(xs) + max(xs)) / 2:.2f}" y="{fy(yc) + (5.6 if top else -4.4):.2f}" text-anchor="middle" class="reftitle">REF divider</text>')
+    xm = (min(xs) + max(xs)) / 2
+    o.append(f'<text x="{xm:.2f}" y="{fy(yc) + (5.6 if top else -6.1):.2f}" text-anchor="middle" class="reftitle">REF divider</text>')
+    o.append(f'<text x="{xm:.2f}" y="{fy(yc) + (7.4 if top else -4.3):.2f}" text-anchor="middle" class="refstat">{REFDIV_STATUS["top" if top else "bottom"]}</text>')
 m2 = MD1[2]
 o.append(f'<circle cx="{m2["x"]:.2f}" cy="{fy(m2["y"]):.2f}" r="1.35" class="gndrec"><title>MD1 pin 2 (middle lead of the 3.3 V buck module): GND, recommended ground point</title></circle>')
 for k, cls in ((1, "mdvin"), (3, "md3v3")):
