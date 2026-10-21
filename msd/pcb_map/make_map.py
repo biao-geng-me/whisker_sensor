@@ -96,7 +96,8 @@ for i, c in enumerate(comps):
     d = c["SOURCEDESIGNATOR"]
     if d in ("R7", "R8", "C4"):
         _parts.append(dict(d=d, x=float(c["X"][:-3]) * MM, y=float(c["Y"][:-3]) * MM, rot=float(c["ROTATION"]),
-                           nets={q["name"]: nets[q["net"]] for q in pads if q["comp"] == i and q["net"] < len(nets)}))
+                           nets={q["name"]: nets[q["net"]] for q in pads if q["comp"] == i and q["net"] < len(nets)},
+                           pads={nets[q["net"]]: (q["x"] * MM, q["y"] * MM) for q in pads if q["comp"] == i and q["net"] < len(nets)}))
 for yc in sorted({round(p["y"] / 10) for p in _parts}):
     REFDIV.append({p["d"]: p for p in _parts if round(p["y"] / 10) == yc})
 for cp in REFDIV:
@@ -247,6 +248,13 @@ for cp in REFDIV:
         ty = fy(yc) + (3.6 if yc > H / 2 else -2.4)
         o.append(f'<text x="{p["x"]:.2f}" y="{ty:.2f}" text-anchor="middle" class="reflab">{d}</text>')
     top = yc > H / 2
+    # the C4 end on the REF net: the measuring / tack point for REF
+    rx, ry = cp["C4"]["pads"]["AMP_REF_3V3"]
+    rleft = cp["C4"]["x"] < cp["R7"]["x"]        # C4 is the outer part: label on its outer side
+    o.append(f'<circle cx="{rx:.2f}" cy="{fy(ry):.2f}" r=".5" class="refpt"><title>C4 REF end (AMP_REF_3V3): measure REF here</title></circle>')
+    o.append(f'<text x="{rx + (-2.2 if rleft else 2.2):.2f}" y="{fy(ry) + .5:.2f}" text-anchor="{"end" if rleft else "start"}" class="refptlab">REF ▸</text>'
+             if rleft else
+             f'<text x="{rx + 2.2:.2f}" y="{fy(ry) + .5:.2f}" text-anchor="start" class="refptlab">◂ REF</text>')
     xm = (min(xs) + max(xs)) / 2
     o.append(f'<text x="{xm:.2f}" y="{fy(yc) + (5.6 if top else -6.1):.2f}" text-anchor="middle" class="reftitle">REF divider</text>')
     o.append(f'<text x="{xm:.2f}" y="{fy(yc) + (7.4 if top else -4.3):.2f}" text-anchor="middle" class="refstat">{REFDIV_STATUS["top" if top else "bottom"]}</text>')

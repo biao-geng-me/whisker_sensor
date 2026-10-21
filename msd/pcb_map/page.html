@@ -49,6 +49,8 @@ svg.board { width: 100%; min-width: 560px; height: auto; display: block; }
 .refbox { fill: none; stroke: #ff9ad5; stroke-width: .35; stroke-dasharray: .8 .4; }
 .refpart { stroke: #111; stroke-width: .12; } .refpart-r7 { fill: #ff9ad5; } .refpart-r8 { fill: #f4f4f4; } .refpart-c4 { fill: #c9b48a; }
 .reflab { font: 600 1.35px var(--f-mono); fill: #ff9ad5; paint-order: stroke; stroke: var(--pcb); stroke-width: .45; }
+.refpt { fill: #ffe14d; stroke: #111; stroke-width: .12; }
+.refptlab { font: 700 1.35px var(--f-mono); fill: #ffe14d; paint-order: stroke; stroke: var(--pcb); stroke-width: .5; }
 .refstat { font: 500 1.2px var(--f-mono); fill: #ffd0ea; paint-order: stroke; stroke: var(--pcb); stroke-width: .45; }
 .reftitle { font: 600 1.45px var(--f-mono); fill: #ff9ad5; paint-order: stroke; stroke: var(--pcb); stroke-width: .5; }
 .mxpad { fill: #b9c2bc; stroke: var(--pcb-edge); stroke-width: .08; } .mxout { fill: var(--gold); } .mxcom { fill: #7fd1ff; }
@@ -165,7 +167,7 @@ tr.q td { color: var(--mut); font-style: italic; }
       <span><i class="sw" style="background:var(--p1)"></i>P1 ADC SPI</span>
       <span><i class="sw" style="background:var(--p2)"></i>P2 mux selects (number below each pin = ESP32 GPIO)</span>
       <span><i class="sw" style="background:none;border:2px solid #e0b400"></i>GND ★ = MD1 pin 2, recommended ESP32 ground point</span>
-      <span><i class="sw" style="background:#ff9ad5;border-radius:1px"></i>REF divider: R7 (3V3 → REF), R8 (REF → GND), C4 (1 µF); two copies, top and bottom edge</span>
+      <span><i class="sw" style="background:#ff9ad5;border-radius:1px"></i>REF divider: R7 (3V3 → REF), R8 (REF → GND), C4 (1 µF); two copies, top and bottom edge; <b style="color:#c9a400">REF ▸</b> = the C4 end on the REF net (measure REF here)</span>
       <span><i class="sw" style="background:#b9c2bc;border-radius:1px"></i>CD4097B mux pads (gold = OUT input, blue = COM to ADC); <b style="color:#e03131">red ring</b> = suspect channel</span>
       <span><i class="sw" style="background:none;border:1px dashed var(--fg)"></i>J1 pin 4, the other through-hole GND</span>
       <span>Labels such as <b>1A</b> = whisker 1, gauge A (wavi_py W1_A)</span>
