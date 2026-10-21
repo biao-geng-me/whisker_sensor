@@ -191,7 +191,7 @@ for title, x, state in copies:
     dot(x, ry)
     if state == "fitted":
         res_v(x, ry, yref, "R7", "≈46 k ✓")
-        res_v(x, yref, yref + 70, "R8", "open ✗", dash=True)
+        res_v(x, yref, yref + 70, "R8", "removed (was open)", dash=True)
         cap_v(x + 100, yref, yref + 50, "C4", "1 µF ✓")
     else:
         res_v(x, ry, yref, "R7", "empty", dash=True)
@@ -406,7 +406,7 @@ svg.bits {{ width: 100%; min-width: 640px; max-width: 820px; height: auto; displ
     <div>
       <h2>Shared parts</h2>
       <ul>
-        <li><b>REF</b> (<code>AMP_REF_3V3</code>) is one net for all 32 INA351s, set by R7/R8 with C4. It sets where zero bridge signal sits on the output. The ADC measures OUT against GND (AINxN grounded), so REF drift shows on every channel at once. The layout has two copies of the divider (the schematic places the <code>Amplifier_Reference</code> sheet twice): pads at the top and bottom board edges, wired in parallel onto that one net, so either copy sets REF. As built (bench, 2026-10-21): bottom copy empty; top copy R7 ≈ 46 k (joint reflowed), R8 not conducting, C4 fitted, so REF sits at 3.28 V and every channel rails. Before the reflow R7 was intermittent too and REF floated on C4. Fix: a 10 k on the empty bottom R8 pads (or across the top R8) → REF ≈ 0.59 V.</li>
+        <li><b>REF</b> (<code>AMP_REF_3V3</code>) is one net for all 32 INA351s, set by R7/R8 with C4. It sets where zero bridge signal sits on the output. The ADC measures OUT against GND (AINxN grounded), so REF drift shows on every channel at once. The layout has two copies of the divider (the schematic places the <code>Amplifier_Reference</code> sheet twice): pads at the top and bottom board edges, wired in parallel onto that one net, so either copy sets REF. As built (bench, 2026-10-21): bottom copy empty; top copy R7 ≈ 46 k (joint reflowed), R8 open (removed: the part itself measured open), C4 fitted, so REF sits at 3.28 V and every channel rails. Before the reflow R7 was intermittent too and REF floated on C4. Fix: a 10 k on the empty bottom R8 pads (or across the top R8) → REF ≈ 0.59 V.</li>
         <li><b>Mux and ADC.</b> Two CD4097B (X and Y sections each) feed the four ADC inputs: mux #1 X → AIN2, Y → AIN3 (OUT1–16); mux #2 X → AIN0, Y → AIN1 (OUT17–32). Each mux has its own three select lines (P2), and the firmware sets both to the same select, so 8 selects × 4 ADC channels = 32 gauges per scan.</li>
         <li><b>ADC</b> ADS131M04: ±1.2 V full scale, gain 1, internal 1.2 V reference, OSR 128 at CLKIN 0.8 MHz (from ESP32 GPIO16) → 320 µs per conversion. Per select the firmware settles 250 µs, drops 3 conversions and keeps the 4th (sinc3 filter flushed), ≈1.6 ms per select, ≈76 scans/s.</li>
         <li><b>Power</b>: 5.5 V bench supply → J1 → MD1 buck → 3V3 for the bridges, amplifiers, muxes and ADC. The ESP32 is powered by USB and shares ground through a wire from MD1 pin 2.</li>

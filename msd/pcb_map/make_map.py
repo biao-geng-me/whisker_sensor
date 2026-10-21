@@ -107,7 +107,7 @@ for cp in REFDIV:
     assert sorted(cp["C4"]["nets"].values()) == ["AMP_REF_3V3", "GND"]
 
 # Bench state of this board (hand-entered, 2026-10-21): what is fitted on each copy.
-REFDIV_STATUS = {"top": "R7 ≈46k ✓, R8 open ✗", "bottom": "not populated"}
+REFDIV_STATUS = {"top": "R7 ≈46k ✓, R8 removed", "bottom": "not populated"}
 
 # --- CD4097B analog muxes (two U3 instances, SOIC-24) ----------------------------------------
 # Pin functions from the CD4097B datasheet; INH (13) is tied to GND on this board.
