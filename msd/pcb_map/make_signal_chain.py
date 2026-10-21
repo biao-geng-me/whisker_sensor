@@ -26,14 +26,15 @@ def dot(x, y):
     o.append(f'<circle cx="{x}" cy="{y}" r="3" class="dot"/>')
 
 
-def res_v(x, y0, y1, label, val, side="r", col=None):
-    """Vertical resistor between (x,y0) and (x,y1), IEC box in the middle."""
+def res_v(x, y0, y1, label, val, side="r", col=None, dash=False, hl=False):
+    """Vertical resistor between (x,y0) and (x,y1), IEC box in the middle (dashed = not fitted / open)."""
     m = (y0 + y1) / 2
     line((x, y0), (x, m - 18), col=col); line((x, m + 18), (x, y1), col=col)
-    o.append(f'<rect x="{x - 6}" y="{m - 18}" width="12" height="36" class="res"' + (f' style="stroke:{col}"' if col else "") + "/>")
+    o.append(f'<rect x="{x - 6}" y="{m - 18}" width="12" height="36" class="res{" empty" if dash else ""}{" hl" if hl else ""}"'
+             + (f' style="stroke:{col}"' if col else "") + "/>")
     dx, a = (12, "start") if side == "r" else (-12, "end")
     text(x + dx, m - 2, label, "lab", a)
-    text(x + dx, m + 12, val, "val", a)
+    text(x + dx, m + 12, val, "notehl" if hl else "val", a)
 
 
 def res_h(x0, x1, y, label, val):
@@ -43,10 +44,11 @@ def res_h(x0, x1, y, label, val):
     text(m, y - 11, label, "lab", "middle"); text(m, y + 22, val, "val", "middle")
 
 
-def cap_v(x, y0, y1, label, val):
+def cap_v(x, y0, y1, label, val, dash=False):
     m = (y0 + y1) / 2
     line((x, y0), (x, m - 4)); line((x, m + 4), (x, y1))
-    line((x - 11, m - 4), (x + 11, m - 4), cls="plate"); line((x - 11, m + 4), (x + 11, m + 4), cls="plate")
+    pc = "plate empty" if dash else "plate"
+    line((x - 11, m - 4), (x + 11, m - 4), cls=pc); line((x - 11, m + 4), (x + 11, m + 4), cls=pc)
     text(x + 16, m - 2, label, "lab"); text(x + 16, m + 12, val, "val")
 
 
@@ -112,11 +114,11 @@ def channel(oy, g, col, out, sens_pin, vcc_pin, conn, sel):
     return ya
 
 
-W, H = 1260, 860
+W, H = 1260, 930
 o.append(f'<svg class="sch" viewBox="0 0 {W} {H}" role="img" aria-label="Signal chain schematic for whisker W1: two strain gauges through quarter bridges, INA351 amplifiers, RC filters, the CD4097B mux and the ADS131M04 ADC to the ESP32">')
 
-o.append('<rect x="132" y="40" width="930" height="800" rx="10" class="board"/>')
-text(146, 830, "whisker PCB (P25937 rev 2)", "blk")
+o.append('<rect x="132" y="40" width="930" height="870" rx="10" class="board"/>')
+text(146, 900, "whisker PCB (P25937 rev 2)", "blk")
 o.append('<rect x="14" y="62" width="100" height="440" rx="14" class="whisker"/>')
 text(64, 522, "whisker W1", "blk", "middle"); text(64, 538, "(off board)", "note", "middle")
 # chip bodies first, so the pin labels drawn later sit on top
@@ -169,30 +171,40 @@ for i, (x, (s_, g)) in enumerate(zip(selx, (("SELA_1", "GPIO25"), ("SELB_1", "GP
     text(1150 + i * 20 + 4, yb + 36 - i * 16 + 14, "", "val")
 text(1240, 628, "P2: SELA_1 / SELB_1 / SELC_1", "p2t", "end")
 text(1240, 642, "= GPIO25 / 26 / 27", "p2t", "end")
-text(1240, 658, "same 3-bit select also drives mux #2", "note", "end")
+text(1240, 658, "firmware puts the same select on mux #2 (own GPIOs)", "note", "end")
 
 # power (lower left, on the board)
 o.append('<rect x="150" y="600" width="210" height="70" rx="6" class="pwr"/>')
 text(160, 620, "5.5 V bench supply", "lab"); text(160, 637, "→ J1 (pin 1 +, pin 4 GND)", "val")
 text(160, 653, "→ MD1 buck (TPSM84203)", "val")
 line((360, 635), (400, 635)); flag(400, 635, "3V3")
-text(412, 652, "bridges, INA351s,", "note"); text(412, 665, "muxes, ADC", "note")
+text(372, 655, "bridges, INA351s,", "note"); text(372, 668, "muxes, ADC", "note")
 text(160, 692, "ESP32 GND ← wire from MD1 pin 2", "note")
-# REF divider
-rx, ry = 620, 640
-text(rx - 40, 604, "REF divider (AMP_REF_3V3): one net for all 32 INA351 REF pins", "blk")
-flag(rx, ry, "3V3")
-res_v(rx, ry, ry + 80, "R7", "47 k (target)")
-dot(rx, ry + 80)
-res_v(rx, ry + 80, ry + 160, "R8", "10 k (target)"); gnd(rx, ry + 160)
-line((rx, ry + 80), (rx + 150, ry + 80)); dot(rx + 150, ry + 80)
-cap_v(rx + 150, ry + 80, ry + 140, "C4", "1 µF"); gnd(rx + 150, ry + 140)
-line((rx + 150, ry + 80), (rx + 200, ry + 80))
-o.append(f'<rect x="{rx + 200}" y="{ry + 72}" width="38" height="16" rx="3" class="fref"/>'); text(rx + 219, ry + 84, "REF", "flagt", "middle")
-text(rx + 75, ry + 74, "≈ 0.58 V", "net", "middle")
-for i, s_ in enumerate(("schematic: 100 k / 100 k = 1.65 V", "(would rail every channel)", "as built: one copy empty, the", "other modified; REF floats",
-                        "two copies on the board;", "one is enough")):
-    text(870, 676 + i * 14 + (8 if i >= 2 else 0) + (8 if i >= 4 else 0), s_, "note")
+# REF net: two copies of the Amplifier_Reference sheet, both on the one AMP_REF_3V3 net
+text(480, 604, "REF net (AMP_REF_3V3): two divider copies in parallel, one net for all 32 INA351 REF pins", "blk")
+ry, yref = 650, 730            # 3V3 rail, REF bus
+copies = (("top copy (above mux 2)", 560, "fitted"), ("bottom copy (below mux 1)", 770, "empty"))
+line((490, ry), (770, ry)); flag(490, ry, "3V3")
+line((560, yref), (900, yref), cls="w refw")
+for title, x, state in copies:
+    text(x - 20, ry - 24, title, "lab")
+    dot(x, ry)
+    if state == "fitted":
+        res_v(x, ry, yref, "R7", "≈46 k ✓")
+        res_v(x, yref, yref + 70, "R8", "open ✗", dash=True)
+        cap_v(x + 100, yref, yref + 50, "C4", "1 µF ✓")
+    else:
+        res_v(x, ry, yref, "R7", "empty", dash=True)
+        res_v(x, yref, yref + 70, "R8", "empty → fit 10 k", dash=True, hl=True)
+        cap_v(x + 100, yref, yref + 50, "C4", "empty", dash=True)
+    gnd(x, yref + 70); gnd(x + 100, yref + 50)
+    dot(x, yref); dot(x + 100, yref)
+o.append(f'<rect x="900" y="{yref - 8}" width="38" height="16" rx="3" class="fref"/>'); text(919, yref + 4, "REF", "flagt", "middle")
+text(944, yref - 4, "→ pin 5 of all", "note"); text(944, yref + 9, "32 INA351s", "note")
+text(615, yref - 6, "REF bus", "net", "middle")
+for i, s_ in enumerate(("Every “REF” flag on this page is", "this one copper net. The two", "copies are pads in parallel;", "either one (or both, same values)", "sets REF.",
+                        "", "as measured: REF = 3.28 V (R8 open,", "R7 pulls it to 3V3). With a 10 k R8:", "REF = 3.3 × 10/(46+10) ≈ 0.59 V")):
+    text(560, 822 + i * 13 if i < 6 else 822 + (i - 6) * 13, s_, "note" if i < 6 else "notehl") if i < 6 else text(800, 822 + (i - 6) * 13, s_, "notehl")
 o.append("</svg>")
 svg = "\n".join(o)
 
@@ -321,6 +333,9 @@ svg.sch {{ width: 100%; min-width: 900px; height: auto; display: block; }}
 .lead {{ fill: none; stroke-width: 2.4; stroke-dasharray: 6 3; }}
 .p1w {{ stroke: var(--p1); }} .p2w {{ stroke: var(--p2); }}
 .res {{ fill: var(--panel); stroke: var(--wire); stroke-width: 1.6; }}
+.empty {{ stroke-dasharray: 3 2.5; opacity: .6; }} .res.hl {{ stroke: var(--ref); opacity: 1; }}
+.refw {{ stroke: var(--ref); stroke-width: 2.4; }}
+.notehl {{ font: 600 10.5px var(--f-body); fill: var(--ref); }}
 .plate {{ stroke: var(--wire); stroke-width: 2.4; }}
 .g {{ stroke: var(--wire); stroke-width: 1.6; }}
 .dot {{ fill: var(--wire); }}
@@ -391,8 +406,8 @@ svg.bits {{ width: 100%; min-width: 640px; max-width: 820px; height: auto; displ
     <div>
       <h2>Shared parts</h2>
       <ul>
-        <li><b>REF</b> (<code>AMP_REF_3V3</code>) is one net for all 32 INA351s, set by R7/R8 with C4. It sets where zero bridge signal sits on the output. The ADC measures OUT against GND (AINxN grounded), so REF drift shows on every channel at once. Target 0.58 V (47 k / 10 k); as built it is unreliable (one divider copy empty, the other modified).</li>
-        <li><b>Mux and ADC.</b> Two CD4097B (X and Y sections each) feed the four ADC inputs: mux #1 X → AIN2, Y → AIN3 (OUT1–16); mux #2 X → AIN0, Y → AIN1 (OUT17–32). One 3-bit select drives both muxes, so 8 selects × 4 ADC channels = 32 gauges per scan.</li>
+        <li><b>REF</b> (<code>AMP_REF_3V3</code>) is one net for all 32 INA351s, set by R7/R8 with C4. It sets where zero bridge signal sits on the output. The ADC measures OUT against GND (AINxN grounded), so REF drift shows on every channel at once. The layout has two copies of the divider (the schematic places the <code>Amplifier_Reference</code> sheet twice): pads at the top and bottom board edges, wired in parallel onto that one net, so either copy sets REF. As built (bench, 2026-10-21): bottom copy empty; top copy R7 ≈ 46 k (joint reflowed), R8 not conducting, C4 fitted, so REF sits at 3.28 V and every channel rails. Before the reflow R7 was intermittent too and REF floated on C4. Fix: a 10 k on the empty bottom R8 pads (or across the top R8) → REF ≈ 0.59 V.</li>
+        <li><b>Mux and ADC.</b> Two CD4097B (X and Y sections each) feed the four ADC inputs: mux #1 X → AIN2, Y → AIN3 (OUT1–16); mux #2 X → AIN0, Y → AIN1 (OUT17–32). Each mux has its own three select lines (P2), and the firmware sets both to the same select, so 8 selects × 4 ADC channels = 32 gauges per scan.</li>
         <li><b>ADC</b> ADS131M04: ±1.2 V full scale, gain 1, internal 1.2 V reference, OSR 128 at CLKIN 0.8 MHz (from ESP32 GPIO16) → 320 µs per conversion. Per select the firmware settles 250 µs, drops 3 conversions and keeps the 4th (sinc3 filter flushed), ≈1.6 ms per select, ≈76 scans/s.</li>
         <li><b>Power</b>: 5.5 V bench supply → J1 → MD1 buck → 3V3 for the bridges, amplifiers, muxes and ADC. The ESP32 is powered by USB and shares ground through a wire from MD1 pin 2.</li>
       </ul>

@@ -38,6 +38,9 @@ svg.sch { width: 100%; min-width: 900px; height: auto; display: block; }
 .lead { fill: none; stroke-width: 2.4; stroke-dasharray: 6 3; }
 .p1w { stroke: var(--p1); } .p2w { stroke: var(--p2); }
 .res { fill: var(--panel); stroke: var(--wire); stroke-width: 1.6; }
+.empty { stroke-dasharray: 3 2.5; opacity: .6; } .res.hl { stroke: var(--ref); opacity: 1; }
+.refw { stroke: var(--ref); stroke-width: 2.4; }
+.notehl { font: 600 10.5px var(--f-body); fill: var(--ref); }
 .plate { stroke: var(--wire); stroke-width: 2.4; }
 .g { stroke: var(--wire); stroke-width: 1.6; }
 .dot { fill: var(--wire); }
@@ -93,9 +96,9 @@ svg.bits { width: 100%; min-width: 640px; max-width: 820px; height: auto; displa
     <p class="lede">How one whisker (W1, gauges A and B) travels through the board: quarter bridge, INA351 amplifier, RC filter, CD4097B mux and ADS131M04 ADC to the ESP32 and the host. The other 15 whiskers are identical copies on other mux inputs. For where things plug in, see the <a href="whisker_header_map.html">header map</a>.</p>
   </header>
 
-  <section class="card"><div class="scroll"><svg class="sch" viewBox="0 0 1260 860" role="img" aria-label="Signal chain schematic for whisker W1: two strain gauges through quarter bridges, INA351 amplifiers, RC filters, the CD4097B mux and the ADS131M04 ADC to the ESP32">
-<rect x="132" y="40" width="930" height="800" rx="10" class="board"/>
-<text x="146" y="830" class="blk" text-anchor="start">whisker PCB (P25937 rev 2)</text>
+  <section class="card"><div class="scroll"><svg class="sch" viewBox="0 0 1260 930" role="img" aria-label="Signal chain schematic for whisker W1: two strain gauges through quarter bridges, INA351 amplifiers, RC filters, the CD4097B mux and the ADS131M04 ADC to the ESP32">
+<rect x="132" y="40" width="930" height="870" rx="10" class="board"/>
+<text x="146" y="900" class="blk" text-anchor="start">whisker PCB (P25937 rev 2)</text>
 <rect x="14" y="62" width="100" height="440" rx="14" class="whisker"/>
 <text x="64" y="522" class="blk" text-anchor="middle">whisker W1</text>
 <text x="64" y="538" class="note" text-anchor="middle">(off board)</text>
@@ -328,7 +331,7 @@ svg.bits { width: 100%; min-width: 640px; max-width: 820px; height: auto; displa
 <text x="1194" y="610" class="val" text-anchor="start"></text>
 <text x="1240" y="628" class="p2t" text-anchor="end">P2: SELA_1 / SELB_1 / SELC_1</text>
 <text x="1240" y="642" class="p2t" text-anchor="end">= GPIO25 / 26 / 27</text>
-<text x="1240" y="658" class="note" text-anchor="end">same 3-bit select also drives mux #2</text>
+<text x="1240" y="658" class="note" text-anchor="end">firmware puts the same select on mux #2 (own GPIOs)</text>
 <rect x="150" y="600" width="210" height="70" rx="6" class="pwr"/>
 <text x="160" y="620" class="lab" text-anchor="start">5.5 V bench supply</text>
 <text x="160" y="637" class="val" text-anchor="start">→ J1 (pin 1 +, pin 4 GND)</text>
@@ -337,48 +340,81 @@ svg.bits { width: 100%; min-width: 640px; max-width: 820px; height: auto; displa
 <path d="M400,635 L400,625" class="w"/>
 <rect x="381" y="609" width="38" height="16" rx="3" class="f3v3"/>
 <text x="400" y="621" class="flagt" text-anchor="middle">3V3</text>
-<text x="412" y="652" class="note" text-anchor="start">bridges, INA351s,</text>
-<text x="412" y="665" class="note" text-anchor="start">muxes, ADC</text>
+<text x="372" y="655" class="note" text-anchor="start">bridges, INA351s,</text>
+<text x="372" y="668" class="note" text-anchor="start">muxes, ADC</text>
 <text x="160" y="692" class="note" text-anchor="start">ESP32 GND ← wire from MD1 pin 2</text>
-<text x="580" y="604" class="blk" text-anchor="start">REF divider (AMP_REF_3V3): one net for all 32 INA351 REF pins</text>
-<path d="M620,640 L620,630" class="w"/>
-<rect x="601" y="614" width="38" height="16" rx="3" class="f3v3"/>
-<text x="620" y="626" class="flagt" text-anchor="middle">3V3</text>
-<path d="M620,640 L620,662.0" class="w"/>
-<path d="M620,698.0 L620,720" class="w"/>
-<rect x="614" y="662.0" width="12" height="36" class="res"/>
-<text x="632" y="678.0" class="lab" text-anchor="start">R7</text>
-<text x="632" y="692.0" class="val" text-anchor="start">47 k (target)</text>
-<circle cx="620" cy="720" r="3" class="dot"/>
-<path d="M620,720 L620,742.0" class="w"/>
-<path d="M620,778.0 L620,800" class="w"/>
-<rect x="614" y="742.0" width="12" height="36" class="res"/>
-<text x="632" y="758.0" class="lab" text-anchor="start">R8</text>
-<text x="632" y="772.0" class="val" text-anchor="start">10 k (target)</text>
-<path d="M610,800 L630,800" class="g"/>
-<path d="M614,804 L626,804" class="g"/>
-<path d="M618,808 L622,808" class="g"/>
-<path d="M620,720 L770,720" class="w"/>
-<circle cx="770" cy="720" r="3" class="dot"/>
-<path d="M770,720 L770,746.0" class="w"/>
-<path d="M770,754.0 L770,780" class="w"/>
-<path d="M759,746.0 L781,746.0" class="plate"/>
-<path d="M759,754.0 L781,754.0" class="plate"/>
-<text x="786" y="748.0" class="lab" text-anchor="start">C4</text>
-<text x="786" y="762.0" class="val" text-anchor="start">1 µF</text>
-<path d="M760,780 L780,780" class="g"/>
-<path d="M764,784 L776,784" class="g"/>
-<path d="M768,788 L772,788" class="g"/>
-<path d="M770,720 L820,720" class="w"/>
-<rect x="820" y="712" width="38" height="16" rx="3" class="fref"/>
-<text x="839" y="724" class="flagt" text-anchor="middle">REF</text>
-<text x="695" y="714" class="net" text-anchor="middle">≈ 0.58 V</text>
-<text x="870" y="676" class="note" text-anchor="start">schematic: 100 k / 100 k = 1.65 V</text>
-<text x="870" y="690" class="note" text-anchor="start">(would rail every channel)</text>
-<text x="870" y="712" class="note" text-anchor="start">as built: one copy empty, the</text>
-<text x="870" y="726" class="note" text-anchor="start">other modified; REF floats</text>
-<text x="870" y="748" class="note" text-anchor="start">two copies on the board;</text>
-<text x="870" y="762" class="note" text-anchor="start">one is enough</text>
+<text x="480" y="604" class="blk" text-anchor="start">REF net (AMP_REF_3V3): two divider copies in parallel, one net for all 32 INA351 REF pins</text>
+<path d="M490,650 L770,650" class="w"/>
+<path d="M490,650 L490,640" class="w"/>
+<rect x="471" y="624" width="38" height="16" rx="3" class="f3v3"/>
+<text x="490" y="636" class="flagt" text-anchor="middle">3V3</text>
+<path d="M560,730 L900,730" class="w refw"/>
+<text x="540" y="626" class="lab" text-anchor="start">top copy (above mux 2)</text>
+<circle cx="560" cy="650" r="3" class="dot"/>
+<path d="M560,650 L560,672.0" class="w"/>
+<path d="M560,708.0 L560,730" class="w"/>
+<rect x="554" y="672.0" width="12" height="36" class="res"/>
+<text x="572" y="688.0" class="lab" text-anchor="start">R7</text>
+<text x="572" y="702.0" class="val" text-anchor="start">≈46 k ✓</text>
+<path d="M560,730 L560,747.0" class="w"/>
+<path d="M560,783.0 L560,800" class="w"/>
+<rect x="554" y="747.0" width="12" height="36" class="res empty"/>
+<text x="572" y="763.0" class="lab" text-anchor="start">R8</text>
+<text x="572" y="777.0" class="val" text-anchor="start">open ✗</text>
+<path d="M660,730 L660,751.0" class="w"/>
+<path d="M660,759.0 L660,780" class="w"/>
+<path d="M649,751.0 L671,751.0" class="plate"/>
+<path d="M649,759.0 L671,759.0" class="plate"/>
+<text x="676" y="753.0" class="lab" text-anchor="start">C4</text>
+<text x="676" y="767.0" class="val" text-anchor="start">1 µF ✓</text>
+<path d="M550,800 L570,800" class="g"/>
+<path d="M554,804 L566,804" class="g"/>
+<path d="M558,808 L562,808" class="g"/>
+<path d="M650,780 L670,780" class="g"/>
+<path d="M654,784 L666,784" class="g"/>
+<path d="M658,788 L662,788" class="g"/>
+<circle cx="560" cy="730" r="3" class="dot"/>
+<circle cx="660" cy="730" r="3" class="dot"/>
+<text x="750" y="626" class="lab" text-anchor="start">bottom copy (below mux 1)</text>
+<circle cx="770" cy="650" r="3" class="dot"/>
+<path d="M770,650 L770,672.0" class="w"/>
+<path d="M770,708.0 L770,730" class="w"/>
+<rect x="764" y="672.0" width="12" height="36" class="res empty"/>
+<text x="782" y="688.0" class="lab" text-anchor="start">R7</text>
+<text x="782" y="702.0" class="val" text-anchor="start">empty</text>
+<path d="M770,730 L770,747.0" class="w"/>
+<path d="M770,783.0 L770,800" class="w"/>
+<rect x="764" y="747.0" width="12" height="36" class="res empty hl"/>
+<text x="782" y="763.0" class="lab" text-anchor="start">R8</text>
+<text x="782" y="777.0" class="notehl" text-anchor="start">empty → fit 10 k</text>
+<path d="M870,730 L870,751.0" class="w"/>
+<path d="M870,759.0 L870,780" class="w"/>
+<path d="M859,751.0 L881,751.0" class="plate empty"/>
+<path d="M859,759.0 L881,759.0" class="plate empty"/>
+<text x="886" y="753.0" class="lab" text-anchor="start">C4</text>
+<text x="886" y="767.0" class="val" text-anchor="start">empty</text>
+<path d="M760,800 L780,800" class="g"/>
+<path d="M764,804 L776,804" class="g"/>
+<path d="M768,808 L772,808" class="g"/>
+<path d="M860,780 L880,780" class="g"/>
+<path d="M864,784 L876,784" class="g"/>
+<path d="M868,788 L872,788" class="g"/>
+<circle cx="770" cy="730" r="3" class="dot"/>
+<circle cx="870" cy="730" r="3" class="dot"/>
+<rect x="900" y="722" width="38" height="16" rx="3" class="fref"/>
+<text x="919" y="734" class="flagt" text-anchor="middle">REF</text>
+<text x="944" y="726" class="note" text-anchor="start">→ pin 5 of all</text>
+<text x="944" y="739" class="note" text-anchor="start">32 INA351s</text>
+<text x="615" y="724" class="net" text-anchor="middle">REF bus</text>
+<text x="560" y="822" class="note" text-anchor="start">Every “REF” flag on this page is</text>
+<text x="560" y="835" class="note" text-anchor="start">this one copper net. The two</text>
+<text x="560" y="848" class="note" text-anchor="start">copies are pads in parallel;</text>
+<text x="560" y="861" class="note" text-anchor="start">either one (or both, same values)</text>
+<text x="560" y="874" class="note" text-anchor="start">sets REF.</text>
+<text x="560" y="887" class="note" text-anchor="start"></text>
+<text x="800" y="822" class="notehl" text-anchor="start">as measured: REF = 3.28 V (R8 open,</text>
+<text x="800" y="835" class="notehl" text-anchor="start">R7 pulls it to 3V3). With a 10 k R8:</text>
+<text x="800" y="848" class="notehl" text-anchor="start">REF = 3.3 × 10/(46+10) ≈ 0.59 V</text>
 </svg></div></section>
 
   <section class="grid2">
@@ -394,8 +430,8 @@ svg.bits { width: 100%; min-width: 640px; max-width: 820px; height: auto; displa
     <div>
       <h2>Shared parts</h2>
       <ul>
-        <li><b>REF</b> (<code>AMP_REF_3V3</code>) is one net for all 32 INA351s, set by R7/R8 with C4. It sets where zero bridge signal sits on the output. The ADC measures OUT against GND (AINxN grounded), so REF drift shows on every channel at once. Target 0.58 V (47 k / 10 k); as built it is unreliable (one divider copy empty, the other modified).</li>
-        <li><b>Mux and ADC.</b> Two CD4097B (X and Y sections each) feed the four ADC inputs: mux #1 X → AIN2, Y → AIN3 (OUT1–16); mux #2 X → AIN0, Y → AIN1 (OUT17–32). One 3-bit select drives both muxes, so 8 selects × 4 ADC channels = 32 gauges per scan.</li>
+        <li><b>REF</b> (<code>AMP_REF_3V3</code>) is one net for all 32 INA351s, set by R7/R8 with C4. It sets where zero bridge signal sits on the output. The ADC measures OUT against GND (AINxN grounded), so REF drift shows on every channel at once. The layout has two copies of the divider (the schematic places the <code>Amplifier_Reference</code> sheet twice): pads at the top and bottom board edges, wired in parallel onto that one net, so either copy sets REF. As built (bench, 2026-10-21): bottom copy empty; top copy R7 ≈ 46 k (joint reflowed), R8 not conducting, C4 fitted, so REF sits at 3.28 V and every channel rails. Before the reflow R7 was intermittent too and REF floated on C4. Fix: a 10 k on the empty bottom R8 pads (or across the top R8) → REF ≈ 0.59 V.</li>
+        <li><b>Mux and ADC.</b> Two CD4097B (X and Y sections each) feed the four ADC inputs: mux #1 X → AIN2, Y → AIN3 (OUT1–16); mux #2 X → AIN0, Y → AIN1 (OUT17–32). Each mux has its own three select lines (P2), and the firmware sets both to the same select, so 8 selects × 4 ADC channels = 32 gauges per scan.</li>
         <li><b>ADC</b> ADS131M04: ±1.2 V full scale, gain 1, internal 1.2 V reference, OSR 128 at CLKIN 0.8 MHz (from ESP32 GPIO16) → 320 µs per conversion. Per select the firmware settles 250 µs, drops 3 conversions and keeps the 4th (sinc3 filter flushed), ≈1.6 ms per select, ≈76 scans/s.</li>
         <li><b>Power</b>: 5.5 V bench supply → J1 → MD1 buck → 3V3 for the bridges, amplifiers, muxes and ADC. The ESP32 is powered by USB and shares ground through a wire from MD1 pin 2.</li>
       </ul>
