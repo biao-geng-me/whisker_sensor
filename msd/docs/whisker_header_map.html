@@ -56,6 +56,24 @@ svg.board { width: 100%; min-width: 560px; height: auto; display: block; }
 .reflab { font: 600 1.35px var(--f-mono); fill: #ff9ad5; paint-order: stroke; stroke: var(--pcb); stroke-width: .45; }
 .refstat { font: 500 1.2px var(--f-mono); fill: #ffd0ea; paint-order: stroke; stroke: var(--pcb); stroke-width: .45; }
 .reftitle { font: 600 1.45px var(--f-mono); fill: #ff9ad5; paint-order: stroke; stroke: var(--pcb); stroke-width: .5; }
+.mxpad { fill: #b9c2bc; stroke: var(--pcb-edge); stroke-width: .08; } .mxout { fill: var(--gold); } .mxcom { fill: #7fd1ff; }
+.mxbad { fill: #ff4d4d; }
+.mxring { fill: none; stroke: #ff4d4d; stroke-width: .4; }
+.mxdot { fill: var(--silk); }
+.mxlab { font: 600 1.5px var(--f-mono); fill: var(--silk); paint-order: stroke; stroke: var(--pcb); stroke-width: .45; }
+.mxsub { font: 500 1.15px var(--f-mono); fill: var(--silk); opacity: .8; }
+.mxbadlab { font: 700 1.3px var(--f-mono); fill: #ff6b6b; paint-order: stroke; stroke: var(--pcb); stroke-width: .5; }
+.mxstack { display: grid; gap: 16px; }
+svg.mx { width: 100%; max-width: 650px; height: auto; display: block; }
+.mxbody { fill: var(--housing); }
+.mxnotch { fill: var(--panel); }
+.mxname { font: 600 15px var(--f-mono); fill: #dfe4e0; }
+.mxname2 { font: 500 13px var(--f-mono); fill: #aab3ad; }
+.mxpin { fill: #b9c2bc; stroke: var(--housing); } .mxpin.mxout { fill: var(--gold); } .mxpin.mxcom { fill: #7fd1ff; } .mxpin.mxsel { fill: var(--p2); } .mxpin.mxbad { fill: #ff4d4d; }
+.mxpn { font: 600 11px var(--f-mono); fill: #dfe4e0; }
+.mxfn { font: 500 11px var(--f-mono); fill: #aab3ad; }
+.mxwho { font: 500 12px var(--f-mono); fill: var(--fg); }
+.mxwhobad { fill: #e03131; font-weight: 700; }
 .mdvin { fill: #e04a3a; } .md3v3 { fill: #e9a23b; }
 .scale { stroke: var(--fg); stroke-width: .4; }
 svg.board .scale + .hsub { fill: var(--fg); stroke: none; font-size: 2px; }
@@ -356,6 +374,65 @@ tr.q td { color: var(--mut); font-style: italic; }
 <text x="60.80" y="6.10" text-anchor="middle" class="reflab">R8</text>
 <text x="58.90" y="8.10" text-anchor="middle" class="reftitle">REF divider</text>
 <text x="58.90" y="9.90" text-anchor="middle" class="refstat">fitted: 45k + 100k</text>
+<rect x="63.74" y="28.82" width="1.51" height="0.51" class="mxpad"><title>Mux 2 pin 13: INH · GND</title></rect>
+<rect x="54.63" y="28.82" width="1.51" height="0.51" class="mxpad"><title>Mux 2 pin 12: VSS · GND</title></rect>
+<rect x="63.74" y="14.85" width="1.51" height="0.51" class="mxpad"><title>Mux 2 pin 24: VDD · 3V3</title></rect>
+<rect x="54.63" y="14.85" width="1.51" height="0.51" class="mxpad mxcom"><title>Mux 2 pin 1: COM X · → ADC CH0 (AIN0)</title></rect>
+<rect x="63.74" y="23.74" width="1.51" height="0.51" class="mxpad mxcom"><title>Mux 2 pin 17: COM Y · → ADC CH1 (AIN1)</title></rect>
+<rect x="54.63" y="17.39" width="1.51" height="0.51" class="mxpad mxout"><title>Mux 2 pin 3: X6 · OUT27 · W14A</title></rect>
+<rect x="54.63" y="23.74" width="1.51" height="0.51" class="mxpad mxout"><title>Mux 2 pin 8: X1 · OUT30 · W15B</title></rect>
+<rect x="54.63" y="16.12" width="1.51" height="0.51" class="mxpad mxout"><title>Mux 2 pin 2: X7 · OUT25 · W13A</title></rect>
+<rect x="54.63" y="18.66" width="1.51" height="0.51" class="mxpad mxout"><title>Mux 2 pin 4: X5 · OUT29 · W15A</title></rect>
+<rect x="54.63" y="19.93" width="1.51" height="0.51" class="mxpad mxout"><title>Mux 2 pin 5: X4 · OUT31 · W16A</title></rect>
+<rect x="54.63" y="21.20" width="1.51" height="0.51" class="mxpad mxout"><title>Mux 2 pin 6: X3 · OUT26 · W13B</title></rect>
+<rect x="54.63" y="22.47" width="1.51" height="0.51" class="mxpad mxout"><title>Mux 2 pin 7: X2 · OUT28 · W14B</title></rect>
+<rect x="54.63" y="25.01" width="1.51" height="0.51" class="mxpad mxout"><title>Mux 2 pin 9: X0 · OUT32 · W16B</title></rect>
+<rect x="54.63" y="26.28" width="1.51" height="0.51" class="mxpad"><title>Mux 2 pin 10: A · ← GPIO32 (SELA_2)</title></rect>
+<rect x="54.63" y="27.55" width="1.51" height="0.51" class="mxpad"><title>Mux 2 pin 11: B · ← GPIO33 (SELB_2)</title></rect>
+<rect x="63.74" y="16.12" width="1.51" height="0.51" class="mxpad mxout"><title>Mux 2 pin 23: Y0 · OUT18 · W9B</title></rect>
+<rect x="63.74" y="17.39" width="1.51" height="0.51" class="mxpad mxout"><title>Mux 2 pin 22: Y1 · OUT20 · W10B</title></rect>
+<rect x="63.74" y="18.66" width="1.51" height="0.51" class="mxpad mxout"><title>Mux 2 pin 21: Y2 · OUT22 · W11B</title></rect>
+<rect x="63.74" y="19.93" width="1.51" height="0.51" class="mxpad mxout"><title>Mux 2 pin 20: Y3 · OUT24 · W12B</title></rect>
+<rect x="63.74" y="21.20" width="1.51" height="0.51" class="mxpad mxout"><title>Mux 2 pin 19: Y4 · OUT23 · W12A</title></rect>
+<rect x="63.74" y="22.47" width="1.51" height="0.51" class="mxpad mxout"><title>Mux 2 pin 18: Y5 · OUT21 · W11A</title></rect>
+<rect x="63.74" y="25.01" width="1.51" height="0.51" class="mxpad mxout"><title>Mux 2 pin 16: Y6 · OUT19 · W10A</title></rect>
+<rect x="63.74" y="26.28" width="1.51" height="0.51" class="mxpad mxout"><title>Mux 2 pin 15: Y7 · OUT17 · W9A</title></rect>
+<rect x="63.74" y="27.55" width="1.51" height="0.51" class="mxpad"><title>Mux 2 pin 14: C · ← GPIO14 (SELC_2)</title></rect>
+<text x="59.94" y="20.59" text-anchor="middle" class="mxlab">mux 2</text>
+<text x="59.94" y="22.39" text-anchor="middle" class="mxsub">OUT17–32</text>
+<circle cx="53.88" cy="15.10" r=".35" class="mxdot"><title>Mux 2 pin 1</title></circle>
+<rect x="54.63" y="30.57" width="1.51" height="0.51" class="mxpad mxcom"><title>Mux 1 pin 1: COM X · → ADC CH2 (AIN2)</title></rect>
+<rect x="63.75" y="44.54" width="1.51" height="0.51" class="mxpad"><title>Mux 1 pin 13: INH · GND</title></rect>
+<rect x="54.63" y="44.54" width="1.51" height="0.51" class="mxpad"><title>Mux 1 pin 12: VSS · GND</title></rect>
+<rect x="63.75" y="30.57" width="1.51" height="0.51" class="mxpad"><title>Mux 1 pin 24: VDD · 3V3</title></rect>
+<rect x="63.75" y="39.46" width="1.51" height="0.51" class="mxpad mxcom"><title>Mux 1 pin 17: COM Y · → ADC CH3 (AIN3)</title></rect>
+<rect x="54.63" y="31.84" width="1.51" height="0.51" class="mxpad mxout"><title>Mux 1 pin 2: X7 · OUT8 · W4B</title></rect>
+<rect x="54.63" y="33.11" width="1.51" height="0.51" class="mxpad mxbad"><title>Mux 1 pin 3: X6 · OUT6 · W3B</title></rect>
+<rect x="54.63" y="34.38" width="1.51" height="0.51" class="mxpad mxout"><title>Mux 1 pin 4: X5 · OUT4 · W2B</title></rect>
+<rect x="54.63" y="35.65" width="1.51" height="0.51" class="mxpad mxout"><title>Mux 1 pin 5: X4 · OUT2 · W1B</title></rect>
+<rect x="54.63" y="36.92" width="1.51" height="0.51" class="mxpad mxout"><title>Mux 1 pin 6: X3 · OUT1 · W1A</title></rect>
+<rect x="54.63" y="38.19" width="1.51" height="0.51" class="mxpad mxout"><title>Mux 1 pin 7: X2 · OUT3 · W2A</title></rect>
+<rect x="54.63" y="39.46" width="1.51" height="0.51" class="mxpad mxout"><title>Mux 1 pin 8: X1 · OUT7 · W4A</title></rect>
+<rect x="54.63" y="40.73" width="1.51" height="0.51" class="mxpad mxout"><title>Mux 1 pin 9: X0 · OUT5 · W3A</title></rect>
+<rect x="54.63" y="42.00" width="1.51" height="0.51" class="mxpad"><title>Mux 1 pin 10: A · ← GPIO25 (SELA_1)</title></rect>
+<rect x="54.63" y="43.27" width="1.51" height="0.51" class="mxpad"><title>Mux 1 pin 11: B · ← GPIO26 (SELB_1)</title></rect>
+<rect x="63.75" y="31.84" width="1.51" height="0.51" class="mxpad mxout"><title>Mux 1 pin 23: Y0 · OUT15 · W8A</title></rect>
+<rect x="63.75" y="33.11" width="1.51" height="0.51" class="mxpad mxout"><title>Mux 1 pin 22: Y1 · OUT13 · W7A</title></rect>
+<rect x="63.75" y="34.38" width="1.51" height="0.51" class="mxpad mxout"><title>Mux 1 pin 21: Y2 · OUT11 · W6A</title></rect>
+<rect x="63.75" y="35.65" width="1.51" height="0.51" class="mxpad mxout"><title>Mux 1 pin 20: Y3 · OUT9 · W5A</title></rect>
+<rect x="63.75" y="36.92" width="1.51" height="0.51" class="mxpad mxout"><title>Mux 1 pin 19: Y4 · OUT10 · W5B</title></rect>
+<rect x="63.75" y="38.19" width="1.51" height="0.51" class="mxpad mxout"><title>Mux 1 pin 18: Y5 · OUT12 · W6B</title></rect>
+<rect x="63.75" y="40.73" width="1.51" height="0.51" class="mxpad mxbad"><title>Mux 1 pin 16: Y6 · OUT16 · W8B</title></rect>
+<rect x="63.75" y="42.00" width="1.51" height="0.51" class="mxpad mxout"><title>Mux 1 pin 15: Y7 · OUT14 · W7B</title></rect>
+<rect x="63.75" y="43.27" width="1.51" height="0.51" class="mxpad"><title>Mux 1 pin 14: C · ← GPIO27 (SELC_1)</title></rect>
+<text x="59.94" y="36.31" text-anchor="middle" class="mxlab">mux 1</text>
+<text x="59.94" y="38.11" text-anchor="middle" class="mxsub">OUT1–16</text>
+<circle cx="53.88" cy="30.83" r=".35" class="mxdot"><title>Mux 1 pin 1</title></circle>
+<circle cx="55.38" cy="33.37" r="1.1" class="mxring"><title>Mux 1 pin 3 (X6, OUT6): W3_B reads −110 mV with no gauge (should rail at 1200)</title></circle>
+<text x="52.43" y="33.82" text-anchor="end" class="mxbadlab">W3B · X6 · pin 3</text>
+<circle cx="64.50" cy="40.99" r="1.1" class="mxring"><title>Mux 1 pin 16 (Y6, OUT16): W8_B reads ~1 mV with no gauge (should rail at 1200)</title></circle>
+<text x="62.75" y="41.44" text-anchor="end" class="mxbadlab">W8B · Y6</text>
+<text x="62.75" y="42.89" text-anchor="end" class="mxbadlab">pin 16</text>
 <circle cx="19.70" cy="28.90" r="1.35" class="gndrec"><title>MD1 pin 2 (middle lead of the 3.3 V buck module): GND, recommended ground point</title></circle>
 <circle cx="19.70" cy="26.36" r="0.6" class="mdvin"><title>MD1 pin 1: VIN (supply +)</title></circle>
 <circle cx="19.70" cy="31.44" r="0.6" class="md3v3"><title>MD1 pin 3: 3V3 out</title></circle>
@@ -370,6 +447,7 @@ tr.q td { color: var(--mut); font-style: italic; }
       <span><i class="sw" style="background:var(--p2)"></i>P2 mux selects (number below each pin = ESP32 GPIO)</span>
       <span><i class="sw" style="background:none;border:2px solid #e0b400"></i>GND ★ = MD1 pin 2, recommended ESP32 ground point</span>
       <span><i class="sw" style="background:#ff9ad5;border-radius:1px"></i>REF divider: R7 (3V3 → REF), R8 (REF → GND), C4 (1 µF); two copies, top and bottom edge</span>
+      <span><i class="sw" style="background:#b9c2bc;border-radius:1px"></i>CD4097B mux pads (gold = OUT input, blue = COM to ADC); <b style="color:#e03131">red ring</b> = suspect channel</span>
       <span><i class="sw" style="background:none;border:1px dashed var(--fg)"></i>J1 pin 4, the other through-hole GND</span>
       <span>Labels such as <b>1A</b> = whisker 1, gauge A (wavi_py W1_A)</span>
     </div>
@@ -785,6 +863,223 @@ tr.q td { color: var(--mut); font-style: italic; }
       <li><b>INA351 REF divider, two copies.</b> All 32 INA351 REF pins (pin 5) share one net, <code>AMP_REF_3V3</code>, set by R7 (3V3 → REF) and R8 (REF → GND) with C4 (1 µF) to GND. <code>MAIN.SchDoc</code> places the <code>Amplifier_Reference</code> sheet twice, so the layout has two identical copies (top and bottom edge, just right of the muxes) in parallel on that one net; one copy is enough. The schematic values (100 k / 100 k, REF ≈ 1.65 V) would rail every channel, since the ADC full scale is ±1.2 V with AINxN at GND. On this board (bench, 2026-10-21) only the top copy (above the upper mux, between J5 and J4) is fitted, with C4 and two resistors that measure about 45 k and 100 k in circuit; the 100 k one reads 45 k or 100 k depending on the probing, which points to an intermittent solder joint. The bottom copy is empty. REF has behaved as if near 0 V and as if floating, consistent with that divider not being reliably connected. Target: REF ≈ 0.58 V with R7 = 47 k, R8 = 10 k (any 0603 1 % parts), which puts a balanced 352 Ω gauge at mid-range.</li>
       <li><b>P1 net names are Raspberry Pi header numbers.</b> The layout calls the P1 nets PIN23 (SCLK), PIN21 (MISO), PIN19 (MOSI), PIN07 (GPCLK0 → CLKIN), PIN27 and PIN29: the 40-pin Pi header positions. The board was laid out to be driven by a Pi; the ESP32 wiring above replaces that.</li>
       <li><b>CLKIN and SCLK are the fast lines.</b> Keep the P1 wires short (under ~10 cm), use a multi-pin housing or solder, and add 33–100 Ω series resistors at the ESP32 end of SCLK, CLKIN, DIN and CS before raising the clocks.</li>
+    </ul>
+  </section>
+
+  <section>
+    <div>
+      <h2>Mux pinouts (CD4097B)</h2>
+      <p class="mut">Each CD4097B is a dual 8-to-1 switch: the select lines A/B/C (from P2) pick the same position on both halves at once, so X<i>k</i> connects to COM X and Y<i>k</i> to COM Y, and each COM goes to one ADC channel. Every OUT net is one INA351 output after its 1 k / 0.1 µF filter. Top view, pin 1 at the top left (the dot on the board view). Mux 1 is the lower chip (silkscreen “MUX2”). SOIC-24 at 1.27 mm pitch: the leads are easy to touch with a sharp meter probe.</p>
+    </div>
+    <div class="mxstack">
+      <div class="card"><h3>Mux 1 <small>lower chip · OUT1–16 · W1–W8</small></h3><div class="scroll"><svg class="mx" viewBox="0 0 710 352" role="img" aria-label="CD4097B mux 1 pinout, top view">
+<rect x="250" y="26" width="210" height="304" rx="4" class="mxbody"/>
+<path d="M343.0,26 a12,12 0 0 0 24,0" class="mxnotch"/>
+<text x="355.0" y="174.0" text-anchor="middle" class="mxname">CD4097B</text>
+<text x="355.0" y="192.0" text-anchor="middle" class="mxname2">mux 1</text>
+<rect x="236" y="41.0" width="14" height="10" class="mxpin mxcom"/>
+<text x="258" y="50.0" text-anchor="start" class="mxpn">1</text>
+<text x="278" y="50.0" text-anchor="start" class="mxfn">COM X</text>
+<text x="228" y="50.0" text-anchor="end" class="mxwho">→ ADC CH2 (AIN2)</text>
+<rect x="460" y="305.0" width="14" height="10" class="mxpin "/>
+<text x="452" y="314.0" text-anchor="end" class="mxpn">13</text>
+<text x="432" y="314.0" text-anchor="end" class="mxfn">INH</text>
+<text x="482" y="314.0" text-anchor="start" class="mxwho">GND</text>
+<rect x="236" y="305.0" width="14" height="10" class="mxpin "/>
+<text x="258" y="314.0" text-anchor="start" class="mxpn">12</text>
+<text x="278" y="314.0" text-anchor="start" class="mxfn">VSS</text>
+<text x="228" y="314.0" text-anchor="end" class="mxwho">GND</text>
+<rect x="460" y="41.0" width="14" height="10" class="mxpin "/>
+<text x="452" y="50.0" text-anchor="end" class="mxpn">24</text>
+<text x="432" y="50.0" text-anchor="end" class="mxfn">VDD</text>
+<text x="482" y="50.0" text-anchor="start" class="mxwho">3V3</text>
+<rect x="460" y="209.0" width="14" height="10" class="mxpin mxcom"/>
+<text x="452" y="218.0" text-anchor="end" class="mxpn">17</text>
+<text x="432" y="218.0" text-anchor="end" class="mxfn">COM Y</text>
+<text x="482" y="218.0" text-anchor="start" class="mxwho">→ ADC CH3 (AIN3)</text>
+<rect x="236" y="65.0" width="14" height="10" class="mxpin mxout"/>
+<text x="258" y="74.0" text-anchor="start" class="mxpn">2</text>
+<text x="278" y="74.0" text-anchor="start" class="mxfn">X7</text>
+<text x="228" y="74.0" text-anchor="end" class="mxwho">OUT8 · W4B</text>
+<rect x="236" y="89.0" width="14" height="10" class="mxpin mxbad"/>
+<text x="258" y="98.0" text-anchor="start" class="mxpn">3</text>
+<text x="278" y="98.0" text-anchor="start" class="mxfn">X6</text>
+<text x="228" y="98.0" text-anchor="end" class="mxwho mxwhobad">OUT6 · W3B ⚠ <title>W3_B reads −110 mV with no gauge (should rail at 1200)</title></text>
+<rect x="236" y="113.0" width="14" height="10" class="mxpin mxout"/>
+<text x="258" y="122.0" text-anchor="start" class="mxpn">4</text>
+<text x="278" y="122.0" text-anchor="start" class="mxfn">X5</text>
+<text x="228" y="122.0" text-anchor="end" class="mxwho">OUT4 · W2B</text>
+<rect x="236" y="137.0" width="14" height="10" class="mxpin mxout"/>
+<text x="258" y="146.0" text-anchor="start" class="mxpn">5</text>
+<text x="278" y="146.0" text-anchor="start" class="mxfn">X4</text>
+<text x="228" y="146.0" text-anchor="end" class="mxwho">OUT2 · W1B</text>
+<rect x="236" y="161.0" width="14" height="10" class="mxpin mxout"/>
+<text x="258" y="170.0" text-anchor="start" class="mxpn">6</text>
+<text x="278" y="170.0" text-anchor="start" class="mxfn">X3</text>
+<text x="228" y="170.0" text-anchor="end" class="mxwho">OUT1 · W1A</text>
+<rect x="236" y="185.0" width="14" height="10" class="mxpin mxout"/>
+<text x="258" y="194.0" text-anchor="start" class="mxpn">7</text>
+<text x="278" y="194.0" text-anchor="start" class="mxfn">X2</text>
+<text x="228" y="194.0" text-anchor="end" class="mxwho">OUT3 · W2A</text>
+<rect x="236" y="209.0" width="14" height="10" class="mxpin mxout"/>
+<text x="258" y="218.0" text-anchor="start" class="mxpn">8</text>
+<text x="278" y="218.0" text-anchor="start" class="mxfn">X1</text>
+<text x="228" y="218.0" text-anchor="end" class="mxwho">OUT7 · W4A</text>
+<rect x="236" y="233.0" width="14" height="10" class="mxpin mxout"/>
+<text x="258" y="242.0" text-anchor="start" class="mxpn">9</text>
+<text x="278" y="242.0" text-anchor="start" class="mxfn">X0</text>
+<text x="228" y="242.0" text-anchor="end" class="mxwho">OUT5 · W3A</text>
+<rect x="236" y="257.0" width="14" height="10" class="mxpin mxsel"/>
+<text x="258" y="266.0" text-anchor="start" class="mxpn">10</text>
+<text x="278" y="266.0" text-anchor="start" class="mxfn">A</text>
+<text x="228" y="266.0" text-anchor="end" class="mxwho">← GPIO25 (SELA_1)</text>
+<rect x="236" y="281.0" width="14" height="10" class="mxpin mxsel"/>
+<text x="258" y="290.0" text-anchor="start" class="mxpn">11</text>
+<text x="278" y="290.0" text-anchor="start" class="mxfn">B</text>
+<text x="228" y="290.0" text-anchor="end" class="mxwho">← GPIO26 (SELB_1)</text>
+<rect x="460" y="65.0" width="14" height="10" class="mxpin mxout"/>
+<text x="452" y="74.0" text-anchor="end" class="mxpn">23</text>
+<text x="432" y="74.0" text-anchor="end" class="mxfn">Y0</text>
+<text x="482" y="74.0" text-anchor="start" class="mxwho">OUT15 · W8A</text>
+<rect x="460" y="89.0" width="14" height="10" class="mxpin mxout"/>
+<text x="452" y="98.0" text-anchor="end" class="mxpn">22</text>
+<text x="432" y="98.0" text-anchor="end" class="mxfn">Y1</text>
+<text x="482" y="98.0" text-anchor="start" class="mxwho">OUT13 · W7A</text>
+<rect x="460" y="113.0" width="14" height="10" class="mxpin mxout"/>
+<text x="452" y="122.0" text-anchor="end" class="mxpn">21</text>
+<text x="432" y="122.0" text-anchor="end" class="mxfn">Y2</text>
+<text x="482" y="122.0" text-anchor="start" class="mxwho">OUT11 · W6A</text>
+<rect x="460" y="137.0" width="14" height="10" class="mxpin mxout"/>
+<text x="452" y="146.0" text-anchor="end" class="mxpn">20</text>
+<text x="432" y="146.0" text-anchor="end" class="mxfn">Y3</text>
+<text x="482" y="146.0" text-anchor="start" class="mxwho">OUT9 · W5A</text>
+<rect x="460" y="161.0" width="14" height="10" class="mxpin mxout"/>
+<text x="452" y="170.0" text-anchor="end" class="mxpn">19</text>
+<text x="432" y="170.0" text-anchor="end" class="mxfn">Y4</text>
+<text x="482" y="170.0" text-anchor="start" class="mxwho">OUT10 · W5B</text>
+<rect x="460" y="185.0" width="14" height="10" class="mxpin mxout"/>
+<text x="452" y="194.0" text-anchor="end" class="mxpn">18</text>
+<text x="432" y="194.0" text-anchor="end" class="mxfn">Y5</text>
+<text x="482" y="194.0" text-anchor="start" class="mxwho">OUT12 · W6B</text>
+<rect x="460" y="233.0" width="14" height="10" class="mxpin mxbad"/>
+<text x="452" y="242.0" text-anchor="end" class="mxpn">16</text>
+<text x="432" y="242.0" text-anchor="end" class="mxfn">Y6</text>
+<text x="482" y="242.0" text-anchor="start" class="mxwho mxwhobad">⚠ OUT16 · W8B <title>W8_B reads ~1 mV with no gauge (should rail at 1200)</title></text>
+<rect x="460" y="257.0" width="14" height="10" class="mxpin mxout"/>
+<text x="452" y="266.0" text-anchor="end" class="mxpn">15</text>
+<text x="432" y="266.0" text-anchor="end" class="mxfn">Y7</text>
+<text x="482" y="266.0" text-anchor="start" class="mxwho">OUT14 · W7B</text>
+<rect x="460" y="281.0" width="14" height="10" class="mxpin mxsel"/>
+<text x="452" y="290.0" text-anchor="end" class="mxpn">14</text>
+<text x="432" y="290.0" text-anchor="end" class="mxfn">C</text>
+<text x="482" y="290.0" text-anchor="start" class="mxwho">← GPIO27 (SELC_1)</text>
+</svg></div></div>
+      <div class="card"><h3>Mux 2 <small>upper chip · OUT17–32 · W9–W16</small></h3><div class="scroll"><svg class="mx" viewBox="0 0 710 352" role="img" aria-label="CD4097B mux 2 pinout, top view">
+<rect x="250" y="26" width="210" height="304" rx="4" class="mxbody"/>
+<path d="M343.0,26 a12,12 0 0 0 24,0" class="mxnotch"/>
+<text x="355.0" y="174.0" text-anchor="middle" class="mxname">CD4097B</text>
+<text x="355.0" y="192.0" text-anchor="middle" class="mxname2">mux 2</text>
+<rect x="460" y="305.0" width="14" height="10" class="mxpin "/>
+<text x="452" y="314.0" text-anchor="end" class="mxpn">13</text>
+<text x="432" y="314.0" text-anchor="end" class="mxfn">INH</text>
+<text x="482" y="314.0" text-anchor="start" class="mxwho">GND</text>
+<rect x="236" y="305.0" width="14" height="10" class="mxpin "/>
+<text x="258" y="314.0" text-anchor="start" class="mxpn">12</text>
+<text x="278" y="314.0" text-anchor="start" class="mxfn">VSS</text>
+<text x="228" y="314.0" text-anchor="end" class="mxwho">GND</text>
+<rect x="460" y="41.0" width="14" height="10" class="mxpin "/>
+<text x="452" y="50.0" text-anchor="end" class="mxpn">24</text>
+<text x="432" y="50.0" text-anchor="end" class="mxfn">VDD</text>
+<text x="482" y="50.0" text-anchor="start" class="mxwho">3V3</text>
+<rect x="236" y="41.0" width="14" height="10" class="mxpin mxcom"/>
+<text x="258" y="50.0" text-anchor="start" class="mxpn">1</text>
+<text x="278" y="50.0" text-anchor="start" class="mxfn">COM X</text>
+<text x="228" y="50.0" text-anchor="end" class="mxwho">→ ADC CH0 (AIN0)</text>
+<rect x="460" y="209.0" width="14" height="10" class="mxpin mxcom"/>
+<text x="452" y="218.0" text-anchor="end" class="mxpn">17</text>
+<text x="432" y="218.0" text-anchor="end" class="mxfn">COM Y</text>
+<text x="482" y="218.0" text-anchor="start" class="mxwho">→ ADC CH1 (AIN1)</text>
+<rect x="236" y="89.0" width="14" height="10" class="mxpin mxout"/>
+<text x="258" y="98.0" text-anchor="start" class="mxpn">3</text>
+<text x="278" y="98.0" text-anchor="start" class="mxfn">X6</text>
+<text x="228" y="98.0" text-anchor="end" class="mxwho">OUT27 · W14A</text>
+<rect x="236" y="209.0" width="14" height="10" class="mxpin mxout"/>
+<text x="258" y="218.0" text-anchor="start" class="mxpn">8</text>
+<text x="278" y="218.0" text-anchor="start" class="mxfn">X1</text>
+<text x="228" y="218.0" text-anchor="end" class="mxwho">OUT30 · W15B</text>
+<rect x="236" y="65.0" width="14" height="10" class="mxpin mxout"/>
+<text x="258" y="74.0" text-anchor="start" class="mxpn">2</text>
+<text x="278" y="74.0" text-anchor="start" class="mxfn">X7</text>
+<text x="228" y="74.0" text-anchor="end" class="mxwho">OUT25 · W13A</text>
+<rect x="236" y="113.0" width="14" height="10" class="mxpin mxout"/>
+<text x="258" y="122.0" text-anchor="start" class="mxpn">4</text>
+<text x="278" y="122.0" text-anchor="start" class="mxfn">X5</text>
+<text x="228" y="122.0" text-anchor="end" class="mxwho">OUT29 · W15A</text>
+<rect x="236" y="137.0" width="14" height="10" class="mxpin mxout"/>
+<text x="258" y="146.0" text-anchor="start" class="mxpn">5</text>
+<text x="278" y="146.0" text-anchor="start" class="mxfn">X4</text>
+<text x="228" y="146.0" text-anchor="end" class="mxwho">OUT31 · W16A</text>
+<rect x="236" y="161.0" width="14" height="10" class="mxpin mxout"/>
+<text x="258" y="170.0" text-anchor="start" class="mxpn">6</text>
+<text x="278" y="170.0" text-anchor="start" class="mxfn">X3</text>
+<text x="228" y="170.0" text-anchor="end" class="mxwho">OUT26 · W13B</text>
+<rect x="236" y="185.0" width="14" height="10" class="mxpin mxout"/>
+<text x="258" y="194.0" text-anchor="start" class="mxpn">7</text>
+<text x="278" y="194.0" text-anchor="start" class="mxfn">X2</text>
+<text x="228" y="194.0" text-anchor="end" class="mxwho">OUT28 · W14B</text>
+<rect x="236" y="233.0" width="14" height="10" class="mxpin mxout"/>
+<text x="258" y="242.0" text-anchor="start" class="mxpn">9</text>
+<text x="278" y="242.0" text-anchor="start" class="mxfn">X0</text>
+<text x="228" y="242.0" text-anchor="end" class="mxwho">OUT32 · W16B</text>
+<rect x="236" y="257.0" width="14" height="10" class="mxpin mxsel"/>
+<text x="258" y="266.0" text-anchor="start" class="mxpn">10</text>
+<text x="278" y="266.0" text-anchor="start" class="mxfn">A</text>
+<text x="228" y="266.0" text-anchor="end" class="mxwho">← GPIO32 (SELA_2)</text>
+<rect x="236" y="281.0" width="14" height="10" class="mxpin mxsel"/>
+<text x="258" y="290.0" text-anchor="start" class="mxpn">11</text>
+<text x="278" y="290.0" text-anchor="start" class="mxfn">B</text>
+<text x="228" y="290.0" text-anchor="end" class="mxwho">← GPIO33 (SELB_2)</text>
+<rect x="460" y="65.0" width="14" height="10" class="mxpin mxout"/>
+<text x="452" y="74.0" text-anchor="end" class="mxpn">23</text>
+<text x="432" y="74.0" text-anchor="end" class="mxfn">Y0</text>
+<text x="482" y="74.0" text-anchor="start" class="mxwho">OUT18 · W9B</text>
+<rect x="460" y="89.0" width="14" height="10" class="mxpin mxout"/>
+<text x="452" y="98.0" text-anchor="end" class="mxpn">22</text>
+<text x="432" y="98.0" text-anchor="end" class="mxfn">Y1</text>
+<text x="482" y="98.0" text-anchor="start" class="mxwho">OUT20 · W10B</text>
+<rect x="460" y="113.0" width="14" height="10" class="mxpin mxout"/>
+<text x="452" y="122.0" text-anchor="end" class="mxpn">21</text>
+<text x="432" y="122.0" text-anchor="end" class="mxfn">Y2</text>
+<text x="482" y="122.0" text-anchor="start" class="mxwho">OUT22 · W11B</text>
+<rect x="460" y="137.0" width="14" height="10" class="mxpin mxout"/>
+<text x="452" y="146.0" text-anchor="end" class="mxpn">20</text>
+<text x="432" y="146.0" text-anchor="end" class="mxfn">Y3</text>
+<text x="482" y="146.0" text-anchor="start" class="mxwho">OUT24 · W12B</text>
+<rect x="460" y="161.0" width="14" height="10" class="mxpin mxout"/>
+<text x="452" y="170.0" text-anchor="end" class="mxpn">19</text>
+<text x="432" y="170.0" text-anchor="end" class="mxfn">Y4</text>
+<text x="482" y="170.0" text-anchor="start" class="mxwho">OUT23 · W12A</text>
+<rect x="460" y="185.0" width="14" height="10" class="mxpin mxout"/>
+<text x="452" y="194.0" text-anchor="end" class="mxpn">18</text>
+<text x="432" y="194.0" text-anchor="end" class="mxfn">Y5</text>
+<text x="482" y="194.0" text-anchor="start" class="mxwho">OUT21 · W11A</text>
+<rect x="460" y="233.0" width="14" height="10" class="mxpin mxout"/>
+<text x="452" y="242.0" text-anchor="end" class="mxpn">16</text>
+<text x="432" y="242.0" text-anchor="end" class="mxfn">Y6</text>
+<text x="482" y="242.0" text-anchor="start" class="mxwho">OUT19 · W10A</text>
+<rect x="460" y="257.0" width="14" height="10" class="mxpin mxout"/>
+<text x="452" y="266.0" text-anchor="end" class="mxpn">15</text>
+<text x="432" y="266.0" text-anchor="end" class="mxfn">Y7</text>
+<text x="482" y="266.0" text-anchor="start" class="mxwho">OUT17 · W9A</text>
+<rect x="460" y="281.0" width="14" height="10" class="mxpin mxsel"/>
+<text x="452" y="290.0" text-anchor="end" class="mxpn">14</text>
+<text x="432" y="290.0" text-anchor="end" class="mxfn">C</text>
+<text x="482" y="290.0" text-anchor="start" class="mxwho">← GPIO14 (SELC_2)</text>
+</svg></div></div>
+    </div>
+    <ul class="notes">
+      <li><b>Suspect: mux 1 X6 (pin 3, OUT6 = W3_B) and Y6 (pin 16, OUT16 = W8_B).</b> With no gauge plugged in, an INA351 output sits near its 3.3 V rail and the channel should read “open” (≥1200 mV). These two read −110 mV and ~1 mV instead, which an INA output cannot produce, so the ADC sees an undriven input on select 6 of mux 1. W3_B also jumped while sensors were hot-swapped. Both are position 6 on the same chip, while select 6 works on the other half of the scan (if SELA/SELB/SELC were faulty, other channels would be wrong too), so the likely causes are the two mux pins (open solder joints on pins 3 and 16) or the OUT6/OUT16 nets upstream (INA351 or filter).</li>
+      <li><b>Check (powered, no gauge in W3 B or W8 B):</b> measure pin 3 and pin 16 of mux 1 to GND. About 3.2 V on the pin means the INA side is fine and the fault is the joint or the mux; then press the lead gently with the probe while streaming and watch whether the channel jumps to “open”. Near 0 V or floating on the pin means the fault is upstream on the OUT net.</li>
     </ul>
   </section>
 

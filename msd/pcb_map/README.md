@@ -1,6 +1,6 @@
 # Whisker PCB header map
 
-`make_map.py` builds a standalone HTML page that maps the MSD P25937 whisker PCB (rev 2): which header pins each strain gauge plugs into (J2–J5), the ESP32 control headers P1 (ADC SPI) and P2 (mux selects) with the ESP32 GPIO and DevKit V1 board pin for each, and how to route the ESP32 ground wire. The published copy is `/shared/rc/whiskers/MSD_P25937/whisker_header_map.html`, and a copy is kept at [`../docs/whisker_header_map.html`](../docs/whisker_header_map.html).
+`make_map.py` builds a standalone HTML page that maps the MSD P25937 whisker PCB (rev 2): which header pins each strain gauge plugs into (J2–J5), the ESP32 control headers P1 (ADC SPI) and P2 (mux selects) with the ESP32 GPIO and DevKit V1 board pin for each, the pinout of both CD4097B muxes (what each pin carries, with suspect channels marked), and how to route the ESP32 ground wire. The published copy is `/shared/rc/whiskers/MSD_P25937/whisker_header_map.html`, and a copy is kept at [`../docs/whisker_header_map.html`](../docs/whisker_header_map.html).
 
 ```bash
 pip install olefile
@@ -17,6 +17,6 @@ Inputs, all read directly (no unzipping):
 
 Files: `pcbdoc.py` is a minimal Altium PcbDoc reader (Components6, Nets6, Pads6, Board6 streams; binary pad layout as in KiCad's Altium importer). `gerber.py` is a minimal Gerber RS-274X reader (strokes, regions, flashes). `page.html` is the page template (styles and static text); `make_map.py` fills in the SVGs and tables.
 
-Hand-entered facts, not read from the files: the gauge pin pairing (from the schematic MAIN sheet, checked by asserts against the PCB nets), the firmware/wavi_py whisker naming (W(n)_A = OUT(2n−1)), the ADS131M04 pin functions, and the DevKit V1 30-pin header order (DOIT layout; check your board's labels). The whisker numbering was verified on the bench: J2 pins 1–4 show up as W1 in wavi_py.
+Hand-entered facts, not read from the files: the gauge pin pairing (from the schematic MAIN sheet, checked by asserts against the PCB nets), the firmware/wavi_py whisker naming (W(n)_A = OUT(2n−1)), the ADS131M04 and CD4097B pin functions (the mux pin → OUT assignment is checked by asserts against the firmware's `OUT_OF` table), the bench state (which REF divider copy is fitted, suspect mux channels), and the DevKit V1 30-pin header order (DOIT layout; check your board's labels). The whisker numbering was verified on the bench: J2 pins 1–4 show up as W1 in wavi_py.
 
 Things the map found that are easy to get wrong: the silkscreen "MUX1"/"MUX2" labels are the opposite of the net names (mux 1 = SEL*_1 = OUT1–16 is the lower chip, printed "MUX2"); P1 and P2 have no GND pin (the through-hole GND points are MD1 pin 2, the middle lead of the 3.3 V buck module, and J1 pin 4); the P1 net names (PIN23, PIN21, …) are Raspberry Pi header positions from the original design. The INA351 REF divider (R7 3V3→REF, R8 REF→GND, C4) exists twice, because MAIN.SchDoc places the Amplifier_Reference sheet twice; both copies sit on the one AMP_REF_3V3 net, at the top and bottom board edges, and the schematic values (100 k/100 k, 1.65 V) would rail every channel.

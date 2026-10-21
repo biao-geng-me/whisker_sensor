@@ -108,6 +108,50 @@ for cp in REFDIV:
 # Bench state of this board (hand-entered, 2026-10-21): what is fitted on each copy.
 REFDIV_STATUS = {"top": "fitted: 45k + 100k", "bottom": "not populated"}
 
+# --- CD4097B analog muxes (two U3 instances, SOIC-24) ----------------------------------------
+# Pin functions from the CD4097B datasheet; INH (13) is tied to GND on this board.
+MUX_FN = {1: "COM X", 2: "X7", 3: "X6", 4: "X5", 5: "X4", 6: "X3", 7: "X2", 8: "X1", 9: "X0",
+          10: "A", 11: "B", 12: "VSS", 13: "INH", 14: "C", 15: "Y7", 16: "Y6", 17: "COM Y",
+          18: "Y5", 19: "Y4", 20: "Y3", 21: "Y2", 22: "Y1", 23: "Y0", 24: "VDD"}
+COM_ADC = {"COM_X2": "CH0", "COM_Y2": "CH1", "COM_X1": "CH2", "COM_Y1": "CH3"}
+# Bench findings (hand-entered, 2026-10-20): channels that read as undriven (no rail when empty).
+MUX_SUSPECT = {(1, 3): "W3_B reads −110 mV with no gauge (should rail at 1200)",
+               (1, 16): "W8_B reads ~1 mV with no gauge (should rail at 1200)"}
+MUX = {}   # mux number -> {pin: dict(net, x, y, fn)}
+for i, c in enumerate(comps):
+    if c["SOURCEDESIGNATOR"] == "U3":
+        pp = {int(q["name"]): dict(net=nets[q["net"]], x=q["x"] * MM, y=q["y"] * MM, sx=q["sx"] * MM, sy=q["sy"] * MM)
+              for q in pads if q["comp"] == i}
+        m = int(pp[1]["net"][-1])
+        for n, q in pp.items():
+            q["fn"] = MUX_FN[n]
+        MUX[m] = pp
+assert sorted(MUX) == [1, 2]
+# cross-check against the firmware's (ADC channel, select) -> OUT table
+_ot = re.search(r"OUT_OF\[NUM_ADC_CH\]\[NUM_SEL\] = \{(.*?)\};", open(args.firmware).read(), re.S).group(1)
+_ot = [[int(v) for v in re.findall(r"\d+", row.split("*/")[1])] for row in re.findall(r"/\*.*?\}", _ot)]
+for m, pp in MUX.items():
+    for side in "XY":
+        com = pp[1 if side == "X" else 17]["net"]
+        assert com == f"COM_{side}{m}" and com in u4, com
+        ch = int(COM_ADC[com][2:])
+        for n, q in pp.items():
+            if re.fullmatch(f"{side}\\d", q["fn"]):
+                assert q["net"] == f"OUT{_ot[ch][int(q['fn'][1])]}", (m, n, q)
+    assert [pp[n]["net"] for n in (10, 11, 14)] == [f"SELA_{m}", f"SELB_{m}", f"SELC_{m}"]
+    assert pp[12]["net"] == pp[13]["net"] == "GND" and pp[24]["net"] == "3V3"
+
+def mux_who(q):
+    """Short description of what a mux pin connects to."""
+    n = q["net"]
+    if n.startswith("OUT"):
+        return f'{n} · {fw(int(n[3:])).replace("_", "")}'
+    if n.startswith("COM"):
+        return f'→ ADC {COM_ADC[n]} (AIN{COM_ADC[n][2]})'
+    if n.startswith("SEL"):
+        return f'← GPIO{FW_GPIO[n]} ({n})'
+    return n
+
 # gauge = (signal pin, 3V3 pin). Schematic MAIN sheet: CONN(4k+1)->pin 4k+3, CONN(4k+3)->pin 4k+2;
 # the odd CONN nets are 3V3 on the PCB, the even ones carry the signal.
 gauges = []
@@ -206,6 +250,27 @@ for cp in REFDIV:
     xm = (min(xs) + max(xs)) / 2
     o.append(f'<text x="{xm:.2f}" y="{fy(yc) + (5.6 if top else -6.1):.2f}" text-anchor="middle" class="reftitle">REF divider</text>')
     o.append(f'<text x="{xm:.2f}" y="{fy(yc) + (7.4 if top else -4.3):.2f}" text-anchor="middle" class="refstat">{REFDIV_STATUS["top" if top else "bottom"]}</text>')
+for m, pp in MUX.items():
+    for n, q in pp.items():
+        bad = (m, n) in MUX_SUSPECT
+        cls = "mxpad" + (" mxbad" if bad else " mxout" if q["net"].startswith("OUT") else " mxcom" if q["net"].startswith("COM") else "")
+        o.append(f'<rect x="{q["x"] - q["sx"] / 2:.2f}" y="{fy(q["y"]) - q["sy"] / 2:.2f}" width="{q["sx"]:.2f}" height="{q["sy"]:.2f}" class="{cls}">'
+                 f'<title>Mux {m} pin {n}: {q["fn"]} · {mux_who(q)}</title></rect>')
+    xs = [q["x"] for q in pp.values()]; ys = [q["y"] for q in pp.values()]
+    o.append(f'<text x="{(min(xs) + max(xs)) / 2:.2f}" y="{fy((min(ys) + max(ys)) / 2) - 1.5:.2f}" text-anchor="middle" class="mxlab">mux {m}</text>')
+    o.append(f'<text x="{(min(xs) + max(xs)) / 2:.2f}" y="{fy((min(ys) + max(ys)) / 2) + .3:.2f}" text-anchor="middle" class="mxsub">OUT{16 * m - 15}–{16 * m}</text>')
+    p1 = pp[1]
+    o.append(f'<circle cx="{p1["x"] - 1.5:.2f}" cy="{fy(p1["y"]):.2f}" r=".35" class="mxdot"><title>Mux {m} pin 1</title></circle>')
+for (m, n), why in MUX_SUSPECT.items():
+    q = MUX[m][n]; left = n <= 12
+    ex = q["x"] + (-q["sx"] / 2 if left else q["sx"] / 2)
+    o.append(f'<circle cx="{q["x"]:.2f}" cy="{fy(q["y"]):.2f}" r="1.1" class="mxring"><title>Mux {m} pin {n} ({q["fn"]}, {q["net"]}): {why}</title></circle>')
+    # left column: label outside; right column: label inside the chip body (J3/J4 crowd the outside)
+    tx = ex - 2.2 if left else ex - q["sx"] - 1.0
+    lab = f'{fw(int(q["net"][3:])).replace("_", "")} · {q["fn"]}' + (f' · pin {n}' if left else "")
+    o.append(f'<text x="{tx:.2f}" y="{fy(q["y"]) + .45:.2f}" text-anchor="end" class="mxbadlab">{lab}</text>')
+    if not left:
+        o.append(f'<text x="{tx:.2f}" y="{fy(q["y"]) + 1.9:.2f}" text-anchor="end" class="mxbadlab">pin {n}</text>')
 m2 = MD1[2]
 o.append(f'<circle cx="{m2["x"]:.2f}" cy="{fy(m2["y"]):.2f}" r="1.35" class="gndrec"><title>MD1 pin 2 (middle lead of the 3.3 V buck module): GND, recommended ground point</title></circle>')
 for k, cls in ((1, "mdvin"), (3, "md3v3")):
@@ -322,6 +387,33 @@ def devkit_svg():
     s.append('</svg>')
     return "\n".join(s)
 
+def mux_svg(m):
+    P = 24; rows = 12; bw = 210; ox, oy = 250, 34
+    Wd, Hd = ox * 2 + bw, oy + rows * P + 30
+    pp = MUX[m]
+    s = [f'<svg class="mx" viewBox="0 0 {Wd} {Hd}" role="img" aria-label="CD4097B mux {m} pinout, top view">']
+    s.append(f'<rect x="{ox}" y="{oy - 8}" width="{bw}" height="{rows * P + 16}" rx="4" class="mxbody"/>')
+    s.append(f'<path d="M{ox + bw / 2 - 12},{oy - 8} a12,12 0 0 0 24,0" class="mxnotch"/>')
+    s.append(f'<text x="{ox + bw / 2}" y="{oy + rows * P / 2 - 4}" text-anchor="middle" class="mxname">CD4097B</text>')
+    s.append(f'<text x="{ox + bw / 2}" y="{oy + rows * P / 2 + 14}" text-anchor="middle" class="mxname2">mux {m}</text>')
+    for n, q in pp.items():
+        left = n <= 12
+        row = n - 1 if left else 24 - n
+        y = oy + row * P + P / 2
+        x = ox if left else ox + bw
+        bad = (m, n) in MUX_SUSPECT
+        kind = "mxbad" if bad else "mxout" if q["net"].startswith("OUT") else "mxcom" if q["net"].startswith("COM") else "mxsel" if q["net"].startswith("SEL") else ""
+        s.append(f'<rect x="{x - 14 if left else x}" y="{y - 5}" width="14" height="10" class="mxpin {kind}"/>')
+        ix = x + (8 if left else -8)
+        s.append(f'<text x="{ix}" y="{y + 4}" text-anchor="{"start" if left else "end"}" class="mxpn">{n}</text>')
+        s.append(f'<text x="{ix + (20 if left else -20)}" y="{y + 4}" text-anchor="{"start" if left else "end"}" class="mxfn">{q["fn"]}</text>')
+        tx = x + (-22 if left else 22)
+        title = f' <title>{MUX_SUSPECT[(m, n)]}</title>' if bad else ""
+        s.append(f'<text x="{tx}" y="{y + 4}" text-anchor="{"end" if left else "start"}" class="mxwho{" mxwhobad" if bad else ""}">'
+                 f'{"⚠ " if bad and not left else ""}{html.escape(mux_who(q))}{" ⚠" if bad and left else ""}{title}</text>')
+    s.append('</svg>')
+    return "\n".join(s)
+
 CTL_ROLE = {"SCLK": "SPI clock", "DOUT": "SPI data out (MISO)", "DIN": "SPI data in (MOSI)",
             "CS": "SPI chip select", "DRDY": "data ready, falling edge = new conversion",
             "CLKIN": "ADC master clock (LEDC PWM, 0.8 MHz now)"}
@@ -339,7 +431,7 @@ page = (tpl.replace("{{BOARD}}", board_svg)
            .replace("{{J5}}", header_svg("J5")).replace("{{J4}}", header_svg("J4"))
            .replace("{{J2}}", header_svg("J2")).replace("{{J3}}", header_svg("J3"))
            .replace("{{ROWS}}", "\n".join(rows))
-           .replace("{{DEVKIT}}", devkit_svg()).replace("{{P1ROWS}}", ctl_rows("P1")).replace("{{P2ROWS}}", ctl_rows("P2")))
+           .replace("{{DEVKIT}}", devkit_svg()).replace("{{MUX1}}", mux_svg(1)).replace("{{MUX2}}", mux_svg(2)).replace("{{P1ROWS}}", ctl_rows("P1")).replace("{{P2ROWS}}", ctl_rows("P2")))
 page = ('<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n'
         '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
         + page.replace("<main>", "</head>\n<body>\n<main>", 1) + "\n</body>\n</html>\n")
