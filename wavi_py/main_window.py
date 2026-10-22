@@ -630,6 +630,9 @@ class MainWindow(QMainWindow):
         errs = (f"errs: gap {e.get('seq_gaps', 0)} link-crc {e.get('crc_fail', 0)} "
                 f"adc-crc {e.get('adc_crc', 0)} adc-stale {e.get('adc_stale', 0)} "
                 f"adc-recov {e.get('adc_recov', 0)} adc-reinit {e.get('adc_reinit', 0)}")
+        sels = e.get("cfg", {}).get("selects")
+        if sels and sels != "01234567":
+            errs += f" | selects {sels}"         # skipped ones show as open
         imu = (f"IMU {hz.get('RAW_IMU', 0):g} Hz | att {hz.get('ATTITUDE', 0):g} Hz | "
                if self._client.transport_kind == "server" else "")
         return (f"{self._client.endpoint_str} | whisker {self._fs:.2f} Hz | {imu}{pi_rec}"

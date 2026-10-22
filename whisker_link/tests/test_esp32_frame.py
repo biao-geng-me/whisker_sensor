@@ -65,9 +65,18 @@ def test_flags_roundtrip():
 
 
 def test_info_roundtrip():
-    info = ef.Info(ef.PROTO_VERSION, 32, 0x2240, 0xFF02, 800000, 3125, 921600, 128, 250, 3)
+    info = ef.Info(ef.PROTO_VERSION, 32, 0x2240, 0xFF02, 800000, 3125, 921600, 128, 250, 3,
+                   0b10111111)
     (ev,) = list(ef.Decoder().feed(ef.encode_info(info)))
     assert ev == info
+    cfg = ef.info_cfg(dict(ev.__dict__))
+    assert cfg["selects"] == "0123457" and cfg["osr"] == 128
+
+
+def test_info_v2_still_decodes():
+    info = ef.Info(2, 32, 0x2405, 0x0F02, 800000, 3125, 921600, 128, 250, 3)
+    (ev,) = list(ef.Decoder().feed(ef.encode_info(info)))
+    assert ev == info and ev.sel_mask is None and "selects" not in ef.info_cfg(dict(ev.__dict__))
 
 
 def test_info_v1_still_decodes():

@@ -51,6 +51,38 @@ python msd/esp32/burst_spectrum.py analyze bench_sel2.npz --out bench_sel2
 
 The report gives Welch amplitude spectra (peak mV at the ADC input, 1.4305e-4 mV/code) per channel and burst, the peaks, the peaks common to ≥3 channels, and where each peak would alias in the scan (`--scan-hz`, default 76.2). It also lists the true-frequency candidates up to `--f-max` that explain the peaks of every burst. Bursts that differ only in OSR can't resolve aliases, because the rates nest (3125 = 4 × 781.25) and any frequency that fits the fastest burst fits them all. That is why the default set mixes CLKINs: 0.8 MHz/OSR 128 (3125 SPS), 1 MHz/OSR 128 (3906.25 SPS) and 8 MHz/OSR 2048 (1953.125 SPS). Tests on synthetic dumps: `python -m pytest msd/esp32/test_burst_spectrum.py`.
 
+## Fast-scan prep: SPI sweep, fine settle diagnostic, active selects (2026-10-22)
+
+The planned fast scan (CLKIN 8 MHz, OSR 128/256, several conversions averaged per select, low-pass and decimation to ~80 Hz on the ESP32) needs three numbers first: how fast the SPI link runs cleanly, how long a select change really takes at that rate, and the select list. These commands measure them; the fast scan itself isn't built yet. `D` and `p` change CLKIN, SPI clock and OSR for the measurement and restore the normal config (0.8 MHz, OSR 128, 600 kHz) afterwards with the same init as boot. The host tool is [`adc_diag.py`](adc_diag.py) (numpy, scipy, pyserial; matplotlib only for the plot; all files UTF-8). Close wavi_py / daq_server first, since they hold the port. In the commands below, replace `COM5` with your port.
+
+**1. SPI speed sweep** (firmware `p[clkin] [osr] [secs] [spi_hz ...];`, default 8 MHz, OSR 256, 2 s per step, 0.6/1/2/3/4/5/6/8 MHz). Per SPI clock it does a full ADC init, then reads every conversion and reports frames vs expected, CRC errors, stale reads, overruns (more than one DRDY edge pending, so conversions were missed), edgeless claims (a DRDY pulse lost because a conversion finished during a read), whether the CLOCK register read back correctly, and the measured read time (CS low to high) and latency (DRDY edge to end of read). The latency must stay below the conversion period: 64 µs at OSR 256, 32 µs at OSR 128. An 18-byte frame is 144 SCLK, i.e. 18 µs at 8 MHz before any overhead.
+
+```powershell
+cd C:\path\to\whisker_sensor_repo\msd\esp32
+python adc_diag.py spi --port COM5
+python adc_diag.py spi --port COM5 --osr 128 --spi 4000000 5000000 6000000 8000000 10000000 13333333
+```
+
+It prints a table, the fastest clean SPI clock with every slower step clean too, and one step below it as the margin pick. It saves `spi_sweep_<time>.txt` / `.csv`. Above 8 MHz, the ADC allows up to 25 MHz (SBAS890D 6.6), so the jumper wiring is the limit. The firmware accepts up to 20 MHz, and the ESP32 rounds to 80 MHz / n (`spi_actual`).
+
+**2. Fine mux settle diagnostic** (firmware `D<from> <to> [clkin] [osr] [spi] [reps] [window_us] [dither] [dwell_us];`, defaults 8 MHz, OSR 256, SPI 4 MHz, 64 reps, 2000 µs, dither 4, 3000 µs). Per rep: dwell on `<from>` reading every conversion, wait a fraction (rep mod dither)/dither of a conversion period, so that over the reps the switch lands at different phases, then switch to `<to>` and read every conversion for the window. It dumps every conversion (`rep t_us flags c0 c1 c2 c3`, `t_us` = DRDY edge minus the switch) with a CRC. The expected limit is charge sharing, not the mux: the COM node (~30 pF) dumps the previous channel's voltage into the new channel's 1 k / 0.1 µF filter, a kick of ~3e-4 × the voltage difference that decays with τ ≈ 100 µs. So switch from a select whose channels are railed (nothing plugged in) to one with gauges. With the planned 12 whiskers, select 6 carries only uninstalled slots (OUT27/19/6/16 = W14_A, W10_A, W3_B, W8_B), and select 3 only installed ones (OUT26/24/1/9 = W13_B, W12_B, W1_A, W5_A).
+
+```powershell
+python adc_diag.py settle --port COM5 --from 6 --to 3 --spi <best safe SPI from step 1> --out settle_6to3
+python adc_diag.py settle --port COM5 --from 6 --to 3 --osr 128 --spi <best safe SPI> --out settle_6to3_osr128
+python adc_diag.py analyze settle_6to3.npz          # offline, e.g. on the cluster
+```
+
+The analysis compares each channel with the ideal response, i.e. what an instantaneous analog step gives through the sinc3 filter of the same OSR and CLKIN (computed). It fits the DRDY/ISR latency on the channel with the biggest step. It then fits the leftover analog tail as a sinc3-filtered A·exp(−t/τ) and reports A, τ, A/(pre − final), A·τ, and the time after the switch when the tail drops below 0.01 mV, both from the fit and from the data. It writes `<out>.txt` (raw), `.npz`, `.html` and, with matplotlib, `.png`. Reps that report CRC, stale, overrun or edgeless are dropped from the fit, and their count is listed.
+
+**3. Active selects** (firmware `S<digits>;`, `S;` = all 8). The normal scan then visits only those selects, so with `S0123457;` a scan takes 7/8 of the time. Outputs of a skipped select hold +full scale, so they are railed in the SCAN railmask and show as "open" in wavi_py and old decoders. INFO (`PROTO_VERSION` 3) carries `sel_mask`, and the status record shows `esp32.cfg.selects`, e.g. `"0123457"`. wavi_py adds `| selects 0123457` to its status line. The mask is kept in RAM only, so the ESP32 is back at all 8 after a reboot.
+
+```powershell
+python adc_diag.py selects --port COM5 0123457      # 'all' to undo
+```
+
+On the ROV, `rpi/daq_server.py --selects 0123457` sends `S0123457;` before every `B`, so the list survives ESP32 reboots. In a serial monitor, type `S0123457;` directly. In a PowerShell one-liner that writes to the port, quote the string, because `;` separates PowerShell statements.
+
 ## Mux settling and fresh conversions (bench, 2026-10-20)
 
 Before commit 3c7e881, `waitDRDY()` tested the DRDY level, so a scan could return a conversion that had already been read (or the older slot of the ADC's 2-deep FIFO). That stale-sample bug, not the hardware, caused the spikes and the "~2 ms/select analog settling floor (~52 Hz for 32 ch)" in the MSD handoff (`/shared/rc/whiskers/MSD_P25937/PROJECT_HANDOFF.md` §3.3). The firmware now counts DRDY falling edges in an ISR and checks STATUS DRDY[3:0] = 1111 on every frame; a read that fails is dropped and counted (SCAN flag bit2 `FLAG_STALE`, `adc-stale` in the status line). The handoff's "SCLK must stay below CLKIN" rule is not in the datasheet either.
