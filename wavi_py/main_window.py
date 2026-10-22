@@ -52,7 +52,9 @@ from wavi_py.config import (
 )
 from wavi_py.daq.outliers import fill_outliers_linear
 from wavi_py.io.dat_writer import DatWriter, build_datalog_filename
+from wavi_py.transports.sim_transport import SimSignals
 from wavi_py.views import FftView, ImuView, LineView, SpectrogramView, SpectrumView
+from wavi_py.views.sim_panel import SimPanel
 from whisker_link.channels import SAT_CODE
 from whisker_link.esp32_frame import MV_PER_CODE
 
@@ -122,6 +124,9 @@ class MainWindow(QMainWindow):
 
         # client (None until Connect pressed)
         self._client: Optional[WaviClient] = None
+        # the Sim transport's signals: kept across connects, edited in the signal panel
+        self._sim = SimSignals()
+        self._sim_panel = SimPanel(self._sim)
 
         # build UI before constructing views (views are created lazily — only on first toggle)
         self._build_ui()
@@ -208,7 +213,7 @@ class MainWindow(QMainWindow):
         h = QHBoxLayout(box)
 
         self._transport_combo = QComboBox()
-        self._transport_combo.addItems(["Server", "ESP32", "TCP", "Serial"])
+        self._transport_combo.addItems(["Server", "ESP32", "Sim", "TCP", "Serial"])
         names = [self._transport_combo.itemText(i).lower()
                  for i in range(self._transport_combo.count())]
         if self._initial_transport.lower() in names:
@@ -228,6 +233,12 @@ class MainWindow(QMainWindow):
         self._connect_btn = QPushButton("Connect")
         self._connect_btn.clicked.connect(self._on_connect_clicked)
 
+        self._sim_btn = QPushButton("Signals")
+        self._sim_btn.setCheckable(True)
+        self._sim_btn.setToolTip("Sim transport: the simulated signals (gauges, taps, faults)")
+        self._sim_btn.toggled.connect(lambda on: self._toggle_window(self._sim_panel, on))
+        self._sim_panel.closed.connect(lambda: self._sim_btn.setChecked(False))
+
         h.addWidget(QLabel("Transport:"))
         h.addWidget(self._transport_combo)
         h.addWidget(QLabel("Host:"))
@@ -237,6 +248,7 @@ class MainWindow(QMainWindow):
         h.addWidget(QLabel("Serial:"))
         h.addWidget(self._serial_port_edit, stretch=1)
         h.addWidget(self._connect_btn)
+        h.addWidget(self._sim_btn)
 
         self._on_transport_changed(self._transport_combo.currentText())
         return box
@@ -337,10 +349,13 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_transport_changed(self, kind: str) -> None:
-        is_tcp = kind.upper() in ("TCP", "SERVER")
-        self._host_edit.setEnabled(is_tcp)
-        self._port_spin.setEnabled(is_tcp)
-        self._serial_port_edit.setEnabled(not is_tcp)
+        kind = kind.upper()
+        self._host_edit.setEnabled(kind in ("TCP", "SERVER"))
+        self._port_spin.setEnabled(kind in ("TCP", "SERVER"))
+        self._serial_port_edit.setEnabled(kind in ("SERIAL", "ESP32"))
+        self._sim_btn.setEnabled(kind == "SIM")
+        if kind != "SIM":
+            self._sim_btn.setChecked(False)
 
     def _on_connect_clicked(self) -> None:
         if self._client is not None and self._client.is_running:
@@ -360,6 +375,7 @@ class MainWindow(QMainWindow):
                 fs=self._fs,
                 ns_read=self._ns_read,
                 t_buffer_s=self._t_buffer_s,
+                sim=self._sim,
             )
             client.start()
         except Exception as exc:  # noqa: BLE001
@@ -733,6 +749,6 @@ class MainWindow(QMainWindow):
             self._disconnect()
         finally:
             for v in (self._line_view, self._spectrum_view, self._fft_view, self._spec_view,
-                      self._imu_view):
+                      self._imu_view, self._sim_panel):
                 v.close()
         super().closeEvent(event)

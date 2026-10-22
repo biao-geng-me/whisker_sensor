@@ -36,6 +36,14 @@ python -m wavi_py --transport esp32 --serial-port COM5
 
 wavi_py decodes the ESP32's binary frames itself (921600 baud, sends `B` to start streaming), so everything behaves as with `--transport server` except that there is no IMU and **Rec** writes only the local `.dat` + `.jsonl`. The status line shows the scan rate and the same error counters. Opening the port does not reset the ESP32.
 
+Without any hardware, against a simulated 16-whisker array (any OS; no server, no serial port):
+
+```bash
+python -m wavi_py --transport sim
+```
+
+or pick **Sim** in the transport list. It sends the same event stream as the ESP32, so the plots, V0 / Re-zero, the measured rate, the status line and **Rec** (`.dat` + `.jsonl`) all work as with the real array; there is no IMU. **Signals** (next to Connect) opens a panel that changes the signals live, also before connecting: per gauge live or open (railed) and a sine (amplitude, frequency); scan rate (40 to 1000 Hz; the GUI adopts a new rate in one step unless recording), noise and drift for all gauges; presets (demo, all live at 1 to 16 Hz by whisker, all live at 2 Hz, all open); taps, a decaying ring on one whisker (by hand or every few seconds; "any" picks a whisker with a live gauge); and faults (ADC recovered / CRC retry / stale / re-init, a sequence gap, a link CRC error, a 3 s dropout) that show up in the status line's counters. Switching a gauge from open to live mid-stream puts a step in its trace until **Re-zero**, as plugging in a real gauge would. Scripts can use it too: `WaviClient(transport="sim", nsensor=16)` and edit `client.sim` (a `SimSignals`: `preset()`, `set_channel()`, `tap()`, `fault()`, `rate_hz`, `noise_mv`, `drift_mv_s`).
+
 Against an Arduino plugged directly into the PC:
 
 ```bash
@@ -100,8 +108,13 @@ wavi_py/
     tcp_transport.py   socket-based, TCP_NODELAY, mirrors connection_manager.py
     serial_transport.py
                        pyserial-based, reuses hx711_array/arduino_reader.py defaults
+    esp32_transport.py ESP32 binary frames -> the server's event stream
+    sim_transport.py   simulated array (SimSignals) -> the same event stream
   views/
-    line_view.py       multi-channel offset plot
+    whisker_plots.py   shared base of the Line / Spectrum windows (layouts, keys)
+    line_view.py       per-whisker time series
+    spectrum_view.py   per-whisker live amplitude spectrum
+    sim_panel.py       signal panel for the sim transport
     fft_view.py        FFT heatmap + per-channel bar
     spectrogram_view.py
                        frequency-stacked-by-channel ImageItem

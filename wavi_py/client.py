@@ -47,6 +47,7 @@ from wavi_py.daq.server_reader import IMU_CHANNELS, ServerReader
 from wavi_py.transports.base import Transport
 from wavi_py.transports.esp32_transport import Esp32SerialTransport
 from wavi_py.transports.serial_transport import SerialTransport
+from wavi_py.transports.sim_transport import SimSignals, SimTransport
 from wavi_py.transports.tcp_transport import TcpTransport
 from whisker_link.channels import NUM_WHISKER
 
@@ -72,12 +73,13 @@ class WaviClient:
         fs: float = DEFAULT_FS_HZ,
         ns_read: int = DEFAULT_NS_READ,
         t_buffer_s: float = DEFAULT_T_BUFFER_S,
+        sim: Optional[SimSignals] = None,
     ):
         transport = transport.lower()
-        if transport not in ("tcp", "serial", "server", "esp32"):
-            raise ValueError(
-                f"transport must be 'tcp', 'serial', 'server' or 'esp32', got {transport!r}")
-        if transport in ("server", "esp32") and int(nsensor) != NUM_WHISKER:
+        if transport not in ("tcp", "serial", "server", "esp32", "sim"):
+            raise ValueError("transport must be 'tcp', 'serial', 'server', 'esp32' or 'sim', "
+                             f"got {transport!r}")
+        if transport in ("server", "esp32", "sim") and int(nsensor) != NUM_WHISKER:
             raise ValueError(f"{transport} transport is the {NUM_WHISKER}-whisker array: "
                              f"nsensor must be {NUM_WHISKER}, got {nsensor}")
         if transport in ("serial", "esp32") and not serial_port:
@@ -89,6 +91,8 @@ class WaviClient:
         self._tcp_port = int(port)
         self._serial_port = serial_port
         self._baudrate = int(baudrate)
+        # sim: what the simulated array sends; editable while streaming
+        self.sim = sim if sim is not None else (SimSignals() if transport == "sim" else None)
 
         # acquisition params
         self.nsensor = int(nsensor)
@@ -230,8 +234,8 @@ class WaviClient:
 
     @property
     def is_event_stream(self) -> bool:
-        """The source sends daq_server's JSON events (server, or the ESP32 decoded locally)."""
-        return self._transport_kind in ("server", "esp32")
+        """The source sends daq_server's JSON events (server, the ESP32 decoded locally, sim)."""
+        return self._transport_kind in ("server", "esp32", "sim")
 
     @property
     def endpoint_str(self) -> str:
@@ -239,6 +243,8 @@ class WaviClient:
             return f"{self._transport_kind}://{self._tcp_host}:{self._tcp_port}"
         if self._transport_kind == "esp32":
             return f"esp32://{self._serial_port}"
+        if self._transport_kind == "sim":
+            return "sim://"
         return f"serial://{self._serial_port}@{self._baudrate}"
 
     # ----- internals
@@ -249,6 +255,9 @@ class WaviClient:
                                 read_timeout_s=SERVER_READ_TIMEOUT_S)
         if self._transport_kind == "tcp":
             return TcpTransport(self._tcp_host, self._tcp_port)
+        if self._transport_kind == "sim":
+            assert self.sim is not None
+            return SimTransport(self.sim)
         assert self._serial_port is not None
         if self._transport_kind == "esp32":
             return Esp32SerialTransport(self._serial_port)
