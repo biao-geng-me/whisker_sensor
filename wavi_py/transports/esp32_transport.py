@@ -53,7 +53,8 @@ class Esp32SerialTransport(Transport):
         self._last_status = time.monotonic()
         self._scans_since_status = 0
         self._n = {"scans": 0, "seq_gaps": 0, "adc_recov": 0, "adc_crc": 0, "adc_stale": 0,
-                   "adc_reinit": 0}
+                   "adc_reinit": 0, "adc_sync": 0, "adc_empty": 0}
+        self._health: dict | None = None        # latest HEALTH frame (locked scan modes)
         self._emit(self._hello())
         self._kick()
 
@@ -147,13 +148,21 @@ class Esp32SerialTransport(Transport):
                 self._n["adc_stale"] += 1
             if ev.flags & ef.FLAG_REINIT:
                 self._n["adc_reinit"] += 1
+            if ev.flags & ef.FLAG_SYNC:
+                self._n["adc_sync"] += 1
+            if ev.flags & ef.FLAG_EMPTY:
+                self._n["adc_empty"] += 1
             self._emit({"k": "wsk", "t": now, "seq": ev.seq, "tus": self._unwrap(ev.t_us),
                         "dur": ev.dur_us, "rail": ev.railmask, "flg": ev.flags, "raw": ev.raw})
         elif isinstance(ev, ef.Text):
             self._emit({"k": "txt", "t": now, "src": "esp32", "msg": ev.text})
         elif isinstance(ev, ef.Info):
             self._info = dict(ev.__dict__)
+            if self._info.get("mode") not in (1, 2):
+                self._health = None
             self._emit({"k": "info", "t": now, **self._info})
+        elif isinstance(ev, ef.Health):
+            self._health = ev.summary()
 
     def _status(self, now: float) -> dict:
         dt = now - self._last_status
@@ -165,7 +174,8 @@ class Esp32SerialTransport(Transport):
                 "esp32": {**self._n, "crc_fail": self._decoder.n_crc_fail,
                           "skipped": self._decoder.n_skipped,
                           "streaming": now - self._last_scan < 1.0,
-                          **({"cfg": ef.info_cfg(self._info)} if self._info else {})}}
+                          **({"cfg": ef.info_cfg(self._info)} if self._info else {}),
+                          **({"health": self._health} if self._health else {})}}
 
     def _command(self, cmd: dict) -> None:
         name = cmd.get("cmd")

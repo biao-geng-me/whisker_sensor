@@ -16,6 +16,21 @@ CHANNEL_NAMES = [f"W{w}_{g}" for w in range(1, NUM_WHISKER + 1) for g in "AB"]
 SAT_CODE = 8_380_000
 
 
+# (ADC channel, mux select) -> OUT number (1..32), mirror of OUT_OF in
+# whisker_daq.ino. OUT o is channel index o - 1.
+OUT_OF = (
+    (32, 30, 28, 26, 31, 29, 27, 25),
+    (18, 20, 22, 24, 23, 21, 19, 17),
+    (5, 7, 3, 1, 2, 4, 6, 8),
+    (15, 13, 11, 9, 10, 12, 16, 14),
+)
+
+
+def channels_of_selects(sel_mask: int) -> list[int]:
+    """0-based channel indices scanned with this mux select mask (INFO sel_mask)."""
+    return sorted(OUT_OF[a][s] - 1 for s in range(8) if sel_mask >> s & 1 for a in range(4))
+
+
 def railed_channels(railmask: int) -> list[int]:
     """0-based channel indices whose railmask bit is set."""
     return [i for i in range(NCH) if railmask >> i & 1]

@@ -171,3 +171,30 @@ def test_commands_over_pty(tmp_path, capsys):
     assert (tmp_path / "st.npz").exists() and (tmp_path / "st.html").exists()
     out = capsys.readouterr().out
     assert "one step of margin: 4 MHz" in out and "selects: 0123457" in out
+
+
+def test_mode_command():
+    assert ad.mode_command("wide", None, None, None) == "M2 200;"
+    assert ad.mode_command("quiet", 250, 512, None) == "M1 250 512;"
+    assert ad.mode_command("1", 200, 0, 9000000) == "M1 200 0 9000000;"
+    assert ad.mode_command("legacy", 300, 512, None) == "M0;"
+
+
+def test_stream_against_fake(tmp_path, capsys):
+    """stream: mode + selects + B against rpi/sim/fake_esp32.py on a pty."""
+    pytest.importorskip("serial")
+    import subprocess
+    root = Path(__file__).resolve().parents[2]
+    p = subprocess.Popen([sys.executable, "-u", str(root / "rpi" / "sim" / "fake_esp32.py")],
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        port = p.stdout.readline().decode().strip()
+        assert ad.main(["stream", "--port", port, "--mode", "wide", "--selects", "0123457",
+                        "--secs", "2.5", "--out", str(tmp_path / "s.bin")]) == 0
+    finally:
+        p.kill()
+        p.wait()
+    out = capsys.readouterr().out
+    assert '"mode_name": "wide"' in out and "HEALTH busy" in out
+    assert "{4000:" in out and "seq gaps 0" in out
+    assert (tmp_path / "s.bin").stat().st_size > 10000

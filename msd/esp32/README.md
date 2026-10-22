@@ -85,6 +85,76 @@ python adc_diag.py selects --port COM5 0123457      # 'all' to undo
 
 On the ROV, `rpi/daq_server.py --selects 0123457` sends `S0123457;` before every `B`, so the list survives ESP32 reboots. In a serial monitor, type `S0123457;` directly. In a PowerShell one-liner that writes to the port, quote the string, because `;` separates PowerShell statements.
 
+## Locked scan modes: quiet 62.5 Hz, wide 250 Hz (2026-10-22)
+
+Most of the remaining noise is a comb at exact multiples of 62.5 Hz (16 ms, ESP32/USB activity), plus a small 845 Hz line. CLKIN comes from the ESP32 crystal, so a scan that is exactly N conversions of the free-running ADC, with N × T a multiple of 16 ms, folds the whole comb onto 0 Hz, a constant offset per channel. The simulation (`/scratch/bigeme/whisker_dev/sim/sim.py`) gives ~0.012 mV for the quiet mode against ~0.055 mV now. The legacy ~76 Hz scan (`M0`) stays the boot default until both modes are verified on the bench.
+
+| mode | command | CLKIN | OSR (T) | SPI | N per scan | scan | conversions averaged per select (7 selects) |
+|---|---|---|---|---|---|---|---|
+| legacy | `M0;` | 0.8 MHz | 128 (320 µs) | 600 kHz | – | ~13 ms, ~76 Hz | 1 |
+| quiet | `M1;` | 8 MHz | 256 (64 µs) | 8 MHz | 250 | 16 ms, 62.5 Hz | 29–30 (drop 6) |
+| quiet, OSR 512 | `M1 200 512;` | 8 MHz | 512 (128 µs) | 8 MHz | 125 | 16 ms, 62.5 Hz | 13–14 (drop 4) |
+| wide | `M2;` | 8 MHz | 128 (32 µs) | 12 MHz (11.43 actual) | 125 | 4 ms, 250 Hz | 8–9 (drop 9) |
+
+How it works:
+- **Slots.** Each scan is N conversions split over the active selects: slots get floor or ceil of N/nsel, and the total is exactly N. Scan k starts on conversion k·N.
+- **Mux switching.** The mux switches right after the DRDY that ends the previous slot, by direct GPIO register writes. `digitalWrite` × 6 took ~10 µs.
+- **Averaging.** A slot's reading is the plain mean of the conversions whose sinc3 window (3 T) starts at least `settle_us` (default 200 µs, plus 10 µs allowed for the switch latency) after the switch. The same positions are dropped in every slot of every scan.
+- **Crosstalk.** With the measured tail (τ 70–90 µs, ~0.0136 × the step at the switch), crosstalk comes out at ~2e-5 (quiet) to ~1e-4 (wide) of the step.
+
+Every conversion is still read. Its index on the grid comes from the DRDY edge time (ISR `micros()`, same crystal), so a lost DRDY pulse or a late read can't shift the scan.
+
+The output is the usual 32-channel SCAN frame with the averaged codes:
+- `t_us` is the grid time of the switch to slot 0, so scans are exactly 16000 or 4000 µs apart.
+- `seq` counts grid scans, so a skipped scan shows as a seq gap.
+- Skipped selects read railed, as before.
+
+INFO (`PROTO_VERSION` 4) carries the mode, CLKIN, OSR, SPI, N, settle, discard count, selects and conversions averaged per select. `daq_server.py` and the wavi_py esp32 transport put these in the status record as `esp32.cfg`, e.g. `mode_name`, `scan_hz` and `avg_per_sel`.
+
+Health:
+- **Missed conversions.** If conversions are missed (a late read, an interrupt hog), the affected slot is not used and the scan gets SCAN flag bit4 `SYNC`. A slot left without usable conversions keeps its previous value and sets bit5 `EMPTY`. After a pause longer than one scan (text mode, a command), the reader drops the FIFO and restarts at the next scan boundary of the same grid.
+- **ADC faults.** An ADC reset (STATUS RESET) or a 50 ms DRDY timeout re-initialises the locked mode.
+- **HEALTH frame.** In the locked modes the firmware sends a HEALTH frame (type 4) every ~1 s with:
+  - busy % (CPU time in the reader and sender, without the ISR)
+  - DRDY-edge-to-end-of-read latency, average and max
+  - SPI read time, average and max
+  - TX write max
+  - conversions, overruns, missed conversions, edgeless reads (DRDY pulse blocked by a read), CRC errors, stale reads, late switches, TX drops, empty slots, resyncs, re-inits and recoveries
+- **Where it shows.** The status record carries it as `esp32.health`. The daq_server log and the wavi_py status line show busy %, max latency and overruns.
+
+CPU: it's single-core. The reader (`lkStep`) keeps its state in `g_lk`, and frames leave through a TX queue that is written in small chunks only when the next DRDY is ≥ 6 µs away and doesn't end a slot. Moving the reader to its own pinned FreeRTOS task later is then a matter of putting the queue between two tasks. It hasn't been done, because single-core hasn't been shown to fall short yet.
+
+What to watch on the bench:
+- **Latency in wide mode.** `lat max` must stay below the 32 µs conversion period. An 18-byte read at 11.4 MHz is ~13 µs of clocking plus the driver and ISR overhead.
+- **Errors.** `overrun`, `missed`, `late_sw` and `empty` should stay at 0. A few `edgeless` per second mean reads are finishing just as the next conversion lands. That's harmless, but it means the read path is close to the limit.
+- **CPU and TX.** `busy` is the CPU share. `tx_drop` > 0 means frames didn't get idle time to leave.
+- **Flags and gaps.** SCAN flags `sync` and seq gaps in the `stream` summary.
+
+```powershell
+cd C:\Users\Biao\Projects\whisker_sensor\msd\esp32
+# wide: set selects + mode, stream 20 s, print HEALTH each second and a summary
+python adc_diag.py stream --port COM4 --selects 0123457 --mode wide --secs 20 --out wide.bin
+# quiet, and the OSR 512 variant
+python adc_diag.py stream --port COM4 --mode quiet --secs 20 --out quiet.bin
+python adc_diag.py stream --port COM4 --mode quiet --osr 512 --secs 20
+# leave a mode set, then look at it in wavi_py (the ESP32 keeps it until a reboot)
+python adc_diag.py mode --port COM4 wide
+cd ..\..
+python -m wavi_py --transport esp32 --serial-port COM4
+# back to the legacy scan
+python msd\esp32\adc_diag.py mode --port COM4 legacy
+```
+
+On the ROV, `rpi/daq_server.py --selects 0123457 --mode wide` (or `--mode quiet`, `--mode quiet,200,512`) sends `S…;M…;B` on every stream start. In a serial monitor, type `M2;` etc. directly.
+
+Host simulation: [`host_sim/`](host_sim/) compiles the real sketch (arduino-cli `--preprocess` output) against a mock Arduino layer and a model of the ADS131M04. The model covers the conversion grid, the 2-deep FIFO, DRDY edges and blocked pulses, the mux tail, and SPI frames with CRC. `python -m pytest msd/esp32/host_sim` (needs arduino-cli and a g++, e.g. `CXX=~/app/miniconda/envs/mpi/bin/g++` on the cluster) checks:
+- both modes: exact scan spacing, averages and no flags
+- a 300 µs stall: one SYNC-flagged scan, grid kept
+- an ADC reset
+- switching back to legacy
+
+The CPU costs in the model are guesses, so the busy % and latency it reports are only indicative. The bench HEALTH numbers are the real ones.
+
 ## Mux settling and fresh conversions (bench, 2026-10-20)
 
 Before commit 3c7e881, `waitDRDY()` tested the DRDY level, so a scan could return a conversion that had already been read (or the older slot of the ADC's 2-deep FIFO). That stale-sample bug, not the hardware, caused the spikes and the "~2 ms/select analog settling floor (~52 Hz for 32 ch)" in the MSD handoff (`/shared/rc/whiskers/MSD_P25937/PROJECT_HANDOFF.md` §3.3). The firmware now counts DRDY falling edges in an ISR and checks STATUS DRDY[3:0] = 1111 on every frame; a read that fails is dropped and counted (SCAN flag bit2 `FLAG_STALE`, `adc-stale` in the status line). The handoff's "SCLK must stay below CLKIN" rule is not in the datasheet either.

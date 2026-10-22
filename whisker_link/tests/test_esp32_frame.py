@@ -99,3 +99,19 @@ def test_envelope_fit_recovers_offset_and_drift():
     a, b = envelope_fit(src, rx)
     assert abs((b - true_b) * 1e6) < 1.0                 # < 1 ppm
     assert abs(a - true_a) < 0.5e-3                      # < 0.5 ms
+
+
+def test_info_v4_and_health_roundtrip():
+    info = ef.Info(ef.PROTO_VERSION, 32, 0x2405, 0x0F02, 8_000_000, 31250, 921600, 128, 200, 9,
+                   0b10111111, 2, 11_428_571, 125, (9, 9, 9, 9, 9, 9, 0, 8))
+    (ev,) = list(ef.Decoder().feed(ef.encode_info(info)))
+    assert ev == info
+    cfg = ef.info_cfg(dict(ev.__dict__))
+    assert cfg["mode_name"] == "wide" and cfg["scan_hz"] == 250.0 and cfg["avg_per_sel"][7] == 8
+    h = ef.Health(1, 2, 371, 34, 180, 160, 16, 3, 31250, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1000)
+    (hv,) = list(ef.Decoder().feed(ef.encode_health(h)))
+    assert hv == h and hv.summary()["busy_pct"] == 37.1 and hv.summary()["lat_avg_us"] == 18.0
+    # a v3 decoder would see an unknown frame type and skip it; v3 INFO still decodes
+    v3 = ef.Info(3, 32, 0x2405, 0x0F02, 800000, 3125, 921600, 128, 250, 3, 0xFF)
+    (ev3,) = list(ef.Decoder().feed(ef.encode_info(v3)))
+    assert ev3.mode is None and "mode" not in ef.info_cfg(dict(ev3.__dict__))

@@ -271,10 +271,12 @@ class Esp32Source:
     """Reads binary frames from the ESP32; reopens the port if it goes away."""
 
     def __init__(self, port: str, baud: int, hub: Hub, rates: RateCounter,
-                 selects: Optional[str] = None):
+                 selects: Optional[str] = None, mode: Optional[str] = None):
         self.port, self.baud = port, baud
-        # what "start streaming" sends; with --selects the select list goes first
-        self.kick = (f"S{selects};".encode() if selects else b"") + b"B"
+        # what "start streaming" sends: the select list and the scan mode first
+        # (the ESP32 forgets both on reboot)
+        self.kick = ((f"S{selects};".encode() if selects else b"")
+                     + (f"M{mode};".encode() if mode else b"") + b"B")
         self.hub, self.rates = hub, rates
         self.decoder = ef.Decoder()
         self._unwrap = ef.TimeUnwrapper()
@@ -289,6 +291,9 @@ class Esp32Source:
         self.n_adc_crc = 0            # scans with FLAG_CRC_RETRY (SPI read re-read)
         self.n_adc_stale = 0          # scans with FLAG_STALE (read had no new conversion)
         self.n_adc_reinit = 0         # scans with FLAG_REINIT (ADC had reset, re-initialised)
+        self.n_adc_sync = 0           # scans with FLAG_SYNC (locked scan lost/regained the grid)
+        self.n_adc_empty = 0          # scans with FLAG_EMPTY (a slot had no usable conversion)
+        self.health: Optional[dict] = None    # latest HEALTH frame (locked scan modes)
         self.info: Optional[dict] = None
         self._thread = threading.Thread(target=self._run, name="esp32", daemon=True)
 
@@ -381,6 +386,10 @@ class Esp32Source:
                 self.n_adc_stale += 1
             if ev.flags & ef.FLAG_REINIT:
                 self.n_adc_reinit += 1
+            if ev.flags & ef.FLAG_SYNC:
+                self.n_adc_sync += 1
+            if ev.flags & ef.FLAG_EMPTY:
+                self.n_adc_empty += 1
             self.n_scans += 1
             self.rates.tick("wsk")
             self.hub.publish({"k": "wsk", "t": now, "seq": ev.seq, "tus": self._unwrap(ev.t_us),
@@ -390,8 +399,12 @@ class Esp32Source:
             self.hub.publish({"k": "txt", "t": now, "src": "esp32", "msg": ev.text})
         elif isinstance(ev, ef.Info):
             self.info = dict(ev.__dict__)
+            if self.info.get("mode") != 1 and self.info.get("mode") != 2:
+                self.health = None                 # legacy scan: no HEALTH frames
             self.hub.extra_hello["esp32"] = self.info
             self.hub.publish({"k": "info", "t": now, **self.info})
+        elif isinstance(ev, ef.Health):
+            self.health = {"t": now, **ev.summary()}
 
 
 class MavSource:
@@ -489,7 +502,8 @@ class Server:
         self.args = args
         self.hub = Hub(args.rec_dir)
         self.rates = RateCounter()
-        self.esp32 = (Esp32Source(args.serial, args.baud, self.hub, self.rates, args.selects)
+        self.esp32 = (Esp32Source(args.serial, args.baud, self.hub, self.rates, args.selects,
+                                  args.mode)
                       if args.serial.lower() != "none" else None)
         self.mav = (MavSource(args.mavlink, self.hub, self.rates, args.mav_rates,
                               args.sysid, args.compid)
@@ -548,9 +562,14 @@ class Server:
                            "adc_recov": self.esp32.n_adc_recov, "adc_crc": self.esp32.n_adc_crc,
                            "adc_stale": self.esp32.n_adc_stale,
                            "adc_reinit": self.esp32.n_adc_reinit,
+                           "adc_sync": self.esp32.n_adc_sync, "adc_empty": self.esp32.n_adc_empty,
                            "streaming": time.monotonic() - self.esp32.last_scan_mono < 1.0}
             if self.esp32.info:
                 st["esp32"]["cfg"] = ef.info_cfg(self.esp32.info)
+            if self.esp32.health:
+                h = dict(self.esp32.health)
+                h["age_s"] = round(time.monotonic() - h.pop("t"), 1)
+                st["esp32"]["health"] = h
         if self.mav:
             st["mav"] = {"msgs": self.mav.n_msgs, "target": self.mav.target}
         return st
@@ -568,13 +587,17 @@ class Server:
                 hz = st["hz"]
                 imu = ", ".join(f"{k} {hz[k]:g}" for k in self.args.mav_rates if k in hz)
                 e = st.get("esp32", {})
+                h = e.get("health")
                 log.info("whisker %s Hz | %s | clients %d | rec %s | errs: gap %d link-crc %d "
-                         "adc-crc %d adc-stale %d adc-recov %d adc-reinit %d",
+                         "adc-crc %d adc-stale %d adc-recov %d adc-reinit %d adc-sync %d%s",
                          hz.get("wsk", 0), imu or "no MAVLink", st["clients"],
                          os.path.basename(st["rec"]["path"]) if st["rec"]["on"] else "off",
                          e.get("seq_gaps", 0), e.get("crc_fail", 0),
                          e.get("adc_crc", 0), e.get("adc_stale", 0), e.get("adc_recov", 0),
-                         e.get("adc_reinit", 0))
+                         e.get("adc_reinit", 0), e.get("adc_sync", 0),
+                         f" | {e.get('cfg', {}).get('mode_name', '?')}: busy {h['busy_pct']}%"
+                         f" lat max {h['lat_max_us']} us, overrun {h['overrun']}"
+                         f" missed {h['missed']}" if h else "")
 
     # ----- lifecycle
 
@@ -622,6 +645,27 @@ def _parse_bind(s: str) -> tuple[str, int]:
     return host, int(port)
 
 
+_MODES = {"legacy": 0, "quiet": 1, "wide": 2}
+
+
+def _parse_mode(s: str) -> str:
+    """``wide`` / ``2`` / ``quiet,250,512`` -> the M command's arguments, e.g. ``1 250 512``.
+
+    Fields after the mode: settle_us, osr, spi_hz (see whisker_daq.ino, 'M').
+    """
+    parts = [p.strip() for p in s.replace(":", ",").split(",") if p.strip()]
+    if not parts:
+        raise argparse.ArgumentTypeError("mode: legacy|quiet|wide or 0|1|2")
+    m = _MODES.get(parts[0].lower(), parts[0])
+    try:
+        nums = [int(m)] + [int(p) for p in parts[1:4]]
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"mode: bad value {s!r}") from None
+    if nums[0] not in (0, 1, 2):
+        raise argparse.ArgumentTypeError("mode: legacy|quiet|wide or 0|1|2")
+    return " ".join(str(n) for n in nums)
+
+
 def _parse_selects(s: str) -> str:
     """``0123457`` -> the same digits, sorted and checked (mux selects 0-7)."""
     digits = sorted(set(s.replace(",", "")))
@@ -643,6 +687,10 @@ def main(argv: Optional[list[str]] = None) -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--serial", default="/dev/ttyUSB0", help="ESP32 port, or 'none'")
     ap.add_argument("--baud", type=int, default=DEFAULT_SERIAL_BAUD)
+    ap.add_argument("--mode", type=_parse_mode, default=None,
+                    help="ESP32 scan mode, sent as M...; before every B: legacy (~76 Hz), quiet"
+                         " (62.5 Hz) or wide (250 Hz), optionally ,settle_us,osr,spi_hz"
+                         " (e.g. quiet,200,512); default: leave as is")
     ap.add_argument("--selects", type=_parse_selects, default=None,
                     help="mux selects the ESP32 scans, e.g. 0123457 (sent as S<digits>; before"
                          " every B, since the ESP32 forgets it on reboot); default: leave as is")
