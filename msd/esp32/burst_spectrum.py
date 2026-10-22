@@ -355,7 +355,7 @@ def report(bursts: list[Burst], out: Path, scan_hz: float, nperseg: int | None,
     text += "\n" + _resolve_text(specs, cands)
     print(text)
     png = _plot(specs, bursts, out.with_suffix(".png"))
-    out.with_suffix(".html").write_text(_html(specs, bursts, scan_hz, png, cands))
+    out.with_suffix(".html").write_text(_html(specs, bursts, scan_hz, png, cands), encoding="utf-8")
     print(f"wrote {out.with_suffix('.html')}" + (f" and {out.with_suffix('.png')}" if png else
           " (no plot: matplotlib not installed; peak tables only)"))
     return specs
