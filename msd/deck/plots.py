@@ -162,3 +162,25 @@ ax.set_ylabel("mean, mV (no gauge)"); ax.set_ylim(-200, 1300); ax.legend(frameon
 ax.set_title("mux 1 position 6: empty slots read ≈ 0, not 1200")
 fig.tight_layout(); fig.savefig("fig_mux6.png"); plt.close(fig)
 print("ok")
+
+# 9. burst spectra (3125 SPS) ----------------------------------------------------------------------
+import sys
+sys.path.insert(0, "/home/bigeme/.herdr/worktrees/whisker_sensor_repo/chat/msd/esp32")
+import burst_spectrum as bs
+from pathlib import Path
+fig, ax = plt.subplots(1, 2, figsize=(11, 4.0), sharey=True)
+for a, (fn, title, labs) in zip(ax, (("res_352_369", "test resistors, plugged in directly", ("330 + 22 Ω (0.03 V off balance)", "369 Ω (0.40 V off balance)")),
+                                     ("w6a_sel2", "whisker gauges, no inline resistors", ("W2_A gauge (other cable)", "W6_A gauge (direct)")))):
+    b = bs.load(Path(D + fn + ".npz"))[0]
+    fs = b.meta["clkin_hz"] / 2 / b.meta["osr"]
+    for c, col, lab in ((2, C3, labs[0]), (3, C1 if fn == "w6a_sel2" else C2, labs[1])):
+        x = b.codes[:, c] * bs.MV_PER_CODE
+        f, p = welch(x - x.mean(), fs=fs, nperseg=2048, scaling="spectrum")
+        a.semilogy(f, np.sqrt(2 * p), color=col, lw=0.8, label=lab)
+    a.set_xlim(0, fs / 2); a.set_ylim(1e-4, 0.5); a.set_xlabel("frequency (Hz)"); a.set_title(title)
+    a.legend(frameon=False, fontsize=9, loc="lower left")
+    for ft, t in ((125, "125"), (500, "500"), (845, "845"), (1000, "1000")):
+        a.annotate(t, (ft, 0.18), ha="center", fontsize=8, color=GREY)
+ax[0].set_ylabel("amplitude, mV (3125 SPS burst)")
+fig.tight_layout(); fig.savefig("fig_burstspec.png"); plt.close(fig)
+print("ok2")

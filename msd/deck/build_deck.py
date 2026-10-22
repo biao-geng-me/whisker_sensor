@@ -200,6 +200,13 @@ bullets(s, ["A 0.5 % drift of the source (845 → 849 Hz) moves the folded tone 
             "Smaller lines on every channel (~0.02–0.05 mV): 125 Hz and harmonics, 437.5, 500, 1000 Hz."],
         0.6, 5.3, 12.1, 1.5, size=14)
 
+# 12b burst spectra ----------------------------------------------------------------------------------
+s = slide("Burst spectra: 845 Hz only where the bridge is off balance")
+pic(s, "fig_burstspec.png", 0.6, 1.3, 12.1, 4.4)
+bullets(s, ["Left: two test resistors recorded at the same instants. The 845 Hz line is 13× larger on the channel 13× further from balance.",
+            "Right: two whisker gauges near balance. What is left is a set of small lines (125 Hz and harmonics, 437.5, 500, 1000 Hz) on a floor of ~0.9 µV/√Hz."],
+        0.6, 5.8, 12.1, 1.2, size=14)
+
 # 13 cable --------------------------------------------------------------------------------------------------------
 s = slide("The 845 Hz follows the cable with the inline resistors")
 pic(s, "fig_cable.png", 0.6, 1.3, 12.1, 4.0)
