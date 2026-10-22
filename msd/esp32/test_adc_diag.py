@@ -16,12 +16,13 @@ import adc_diag as ad  # noqa: E402
 
 # per ADC channel: (pre mV, final mV); CH2 has no step
 LEVELS = [(1199.0, 26.0), (300.0, -50.0), (5.0, 5.0), (-800.0, 400.0)]
-KICK, TAU, DELAY = 3e-4, 100.0, 3.0
+DELAY, TAU_A, SLOW, TAU2 = 15.0, 8.0, -4e-3, 80.0     # slow tail A2 = SLOW x step
 
 
 def fake_settle(osr=256, clkin=8_000_000, reps=64, dither=4, window=2000, noise=0.03,
                 seed=0, bad_rows=(10, 500)) -> bytes:
-    """'D' output with a charge-sharing tail of KICK x (pre - final), tau TAU."""
+    """'D' output: fast first-order step (TAU_A) + slow tail SLOW x step (TAU2),
+    after DELAY, through the sinc3; DRDY timestamps with ~1 us jitter."""
     rng = np.random.default_rng(seed)
     period = 2e6 * osr / clkin
     filt = ad.Sinc3(osr, clkin)
@@ -32,10 +33,12 @@ def fake_settle(osr=256, clkin=8_000_000, reps=64, dither=4, window=2000, noise=
         te = np.round(-phi + k * period)
         te = te[te <= window + period]
         te = te[: np.searchsorted(te, window, side="right") + 1]
+        tj = te + rng.normal(0, 1.0, len(te))                 # true conversion ends
         vals = []
         for pre, fin in LEVELS:
-            v = (pre + (fin - pre) * filt.step(te - DELAY)
-                 + KICK * (pre - fin) * filt.exp_tail(te - DELAY, TAU)
+            st = fin - pre
+            v = (pre + st * (filt.step(tj - DELAY) - filt.exp_tail(tj - DELAY, TAU_A))
+                 + SLOW * st * filt.exp_tail(tj - DELAY, TAU2)
                  + noise * rng.standard_normal(len(te)))
             vals.append(np.round(v / ad.MV_PER_CODE).astype(np.int64))
         for i, t in enumerate(te):
@@ -45,7 +48,7 @@ def fake_settle(osr=256, clkin=8_000_000, reps=64, dither=4, window=2000, noise=
         rows[i][2] = ad.BF_CRC
         rows[i][3:] = [999999, -999999, 999999, -999999]
     body = b"".join((" ".join(map(str, x)) + "\n").encode() for x in rows)
-    head = (f"#SETTLE v1 from=6 to=2 out_from=27,19,6,16 out_to=28,22,3,11 clkin_hz={clkin}"
+    head = (f"#SETTLE v1 from=6 to=2 jitter_us=1000 out_from=27,19,6,16 out_to=28,22,3,11 clkin_hz={clkin}"
             f" osr={osr} fdata_sps={clkin / 2 / osr:.3f} period_us={period:.3f} spi_hz=4000000"
             f" spi_actual=4000000 reps={reps} window_us={window} dither={dither} dwell_us=3000"
             f" mux_us=2 clock_rb=0x0F06 mv_per_code={ad.MV_PER_CODE:.12g}\n").encode()
@@ -83,6 +86,13 @@ def test_sinc3_step():
     assert f.step(np.array([-1.0, 0.0]))[0] == 0 and f.step(np.array([200.0]))[0] == 1
     assert f.step(np.array([96.0]))[0] == pytest.approx(0.5, abs=0.01)   # symmetric
     assert f.exp_tail(np.array([5000.0]), 100.0)[0] == pytest.approx(0, abs=1e-12)
+    # the recursive exp_tail equals the direct sum over filter taps
+    for osr, tau in ((128, 0.3), (256, 10.0), (256, 100.0), (16384, 500.0)):
+        g = ad.Sinc3(osr, 8e6)
+        tt = np.linspace(-20, 1.5 * g.length_us, 701)
+        u = tt[:, None] - g.lag[None, :]
+        brute = np.where(u > 0, np.exp(-np.clip(u, 0, None) / tau), 0.0) @ g.h
+        assert np.allclose(g.exp_tail(tt, tau), brute, rtol=1e-9, atol=1e-12)
 
 
 def test_settle_fit_recovers_tail(tmp_path):
@@ -91,21 +101,30 @@ def test_settle_fit_recovers_tail(tmp_path):
     assert any("2 of" in n for n in notes)                     # CRC rows dropped
     for f, (pre, fin) in zip(fits, LEVELS):
         assert f.pre == pytest.approx(pre, abs=0.02) and f.final == pytest.approx(fin, abs=0.02)
-        assert f.delay_us == pytest.approx(DELAY, abs=1.5)
-        want = KICK * (pre - fin)
-        if abs(want) > 0.05:
-            assert f.significant
-            assert f.amp_mv == pytest.approx(want, rel=0.15)
-            assert f.tau_us == pytest.approx(TAU, rel=0.2)
-            assert 300 < f.t_settle_us < 1100
-        else:
-            assert not f.significant and f.t_settle_us < 250
+        if fin == pre:
+            assert not f.fitted and not f.windows
+            continue
+        st = fin - pre
+        assert f.fitted
+        assert f.tau2_us == pytest.approx(TAU2, rel=0.25)
+        assert f.a2_mv / st == pytest.approx(SLOW, rel=0.3)
+        assert f.delay_us + f.tau_a_us == pytest.approx(DELAY + TAU_A, abs=8)   # effective delay
+        # slow tail below 1e-4 of the step: DELAY + TAU2 ln(|SLOW| / 1e-4) = 310 us
+        assert f.t_slow_us[1e-4] == pytest.approx(DELAY + TAU2 * np.log(4e-3 / 1e-4), abs=50)
+        assert f.t_slow_us[3e-4] < f.t_slow_us[1e-4]
+        w = {lo: (mean, sem, slow) for lo, hi, mean, sem, n, slow in f.windows}
+        assert set(w) == {lo for lo, _ in ad.WINDOWS_US}
+        for lo in (250, 350, 500, 1000, 1400):                 # residual matches the slow fit
+            mean, sem, slow = w[lo]
+            assert abs(mean - slow) < 4 * sem + 0.01
+    text = ad.settle_text(s, fits, notes)
+    assert "no step to fit" in text and "1e-04 x step" in text and "1400-2000" in text
     ad.save_settle_npz(tmp_path / "s.npz", s)
     s2 = ad.load_settle(tmp_path / "s.npz")
     assert s2.meta == s.meta and np.array_equal(s2.codes, s.codes)
     ad.settle_report(s2, tmp_path / "rep")
     html = (tmp_path / "rep.html").read_text(encoding="utf-8")
-    assert "Mux settle" in html and "tau_us" in html
+    assert "Mux settle" in html and "tau2_us" in html
 
 
 def test_spi_summary():
@@ -146,7 +165,7 @@ def test_commands_over_pty(tmp_path, capsys):
                     "--reps", "16", "--out", str(tmp_path / "st")]) == 0
     assert ad.main(["selects", "--port", port, "7012345"]) == 0
     assert got[0] == "p8000000 256 1 600000 1000000 2000000 3000000 4000000 5000000 6000000 8000000"
-    assert got[1] == "D6 2 8000000 256 4000000 16 2000 4 3000"
+    assert got[1] == "D6 2 8000000 256 4000000 16 2000 4 3000 1000"
     assert got[2] == "S0123457"
     assert (tmp_path / "sp.csv").read_text(encoding="utf-8").startswith("spi_hz,")
     assert (tmp_path / "st.npz").exists() and (tmp_path / "st.html").exists()
