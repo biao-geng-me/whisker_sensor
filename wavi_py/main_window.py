@@ -633,6 +633,13 @@ class MainWindow(QMainWindow):
         sels = e.get("cfg", {}).get("selects")
         if sels and sels != "01234567":
             errs += f" | selects {sels}"         # skipped ones show as open
+        mode = e.get("cfg", {}).get("mode_name")
+        if mode and mode != "legacy":
+            h = e.get("health")
+            errs += f" | {mode}" + (f": busy {h['busy_pct']}% lat {h['lat_max_us']} us"
+                                    f" ovr {h['overrun']}" if h else "")
+            if e.get("adc_sync"):
+                errs += f" sync {e['adc_sync']}"
         imu = (f"IMU {hz.get('RAW_IMU', 0):g} Hz | att {hz.get('ATTITUDE', 0):g} Hz | "
                if self._client.transport_kind == "server" else "")
         return (f"{self._client.endpoint_str} | whisker {self._fs:.2f} Hz | {imu}{pi_rec}"

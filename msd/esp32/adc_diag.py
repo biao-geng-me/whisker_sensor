@@ -13,6 +13,12 @@ Subcommands (the ESP32 on a serial port, e.g. COM5 or /dev/ttyUSB0):
 ``analyze``  Analyze a saved settle capture (.txt or .npz), e.g. on the cluster.
 ``selects``  Set the scanned mux selects (firmware ``S``), e.g. ``0123457`` or
              ``all``. The ESP32 forgets it on reboot.
+``mode``     Set the scan mode (firmware ``M``): legacy (~76 Hz, boot default),
+             quiet (62.5 Hz locked) or wide (250 Hz locked), with optional
+             --settle-us / --osr / --spi. The ESP32 forgets it on reboot.
+``stream``   Optionally set selects and mode, stream for N s and print each
+             1 s HEALTH record (busy %, DRDY-to-read latency, overruns, ...) and a
+             summary of the scans (rate, t_us spacing, seq gaps, flags).
 
 Settle analysis, per ADC channel with a step: ``pre`` = mean of the conversions
 that ended before the switch, ``final`` = mean over the end of the window. The
@@ -660,6 +666,119 @@ def cmd_selects(a) -> int:
     return 0
 
 
+# ------------------------------------------------------------- scan modes
+
+MODES = {"legacy": 0, "quiet": 1, "wide": 2, "0": 0, "1": 1, "2": 2}
+
+
+def mode_command(mode: str, settle: int | None, osr: int | None, spi: int | None) -> str:
+    m = MODES[mode.lower()]
+    if m == 0:
+        return "M0;"
+    args = [str(m), str(settle if settle is not None else 200), str(osr or 0), str(spi or 0)]
+    while args[-1] == "0":               # 0 = the mode's default
+        args.pop()
+    return "M" + " ".join(args) + ";"
+
+
+def _send_and_echo(port: str, cmd: str, keys: tuple[bytes, ...], secs: float = 2.0) -> bytes:
+    ser = open_port(port)
+    try:
+        ser.reset_input_buffer()
+        ser.write(cmd.encode())
+        raw, t0 = b"", time.monotonic()
+        while time.monotonic() - t0 < secs:
+            raw += ser.read(ser.in_waiting or 1)
+    finally:
+        ser.close()
+    for ln in raw.replace(b"\r", b"").split(b"\n"):
+        if any(k in ln for k in keys):
+            print(ln[max(0, min(ln.find(k) for k in keys if k in ln)):].decode(errors="replace"))
+    return raw
+
+
+def cmd_mode(a) -> int:
+    if a.mode.lower() not in MODES:
+        print("mode: legacy|quiet|wide (or 0|1|2)", file=sys.stderr)
+        return 2
+    cmd = mode_command(a.mode, a.settle_us, a.osr, a.spi)
+    raw = _send_and_echo(a.port, cmd, (b"mode ", b"M: "))
+    if b"mode " not in raw and b"M: " not in raw:
+        print(f"no confirmation from the ESP32 (sent {cmd}); in binary mode the reply is a framed"
+              " TEXT record: use 'stream' to see it", file=sys.stderr)
+        return 1
+    print("note: the ESP32 forgets this on reboot (daq_server.py --mode re-sends it)")
+    return 0
+
+
+def cmd_stream(a) -> int:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from whisker_link import esp32_frame as ef
+
+    cmd = ""
+    if a.selects:
+        cmd += "S" + ("" if a.selects.lower() == "all" else a.selects) + ";"
+    if a.mode:
+        if a.mode.lower() not in MODES:
+            print("mode: legacy|quiet|wide (or 0|1|2)", file=sys.stderr)
+            return 2
+        cmd += mode_command(a.mode, a.settle_us, a.osr, a.spi)
+    cmd += "B"
+    ser = open_port(a.port)
+    dec, raw = ef.Decoder(), bytearray()
+    scans, infos, health = [], [], []
+    try:
+        ser.reset_input_buffer()
+        ser.write(cmd.encode())
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < a.secs:
+            data = ser.read(ser.in_waiting or 1)
+            raw += data
+            for ev in dec.feed(data):
+                if isinstance(ev, ef.Scan):
+                    scans.append(ev)
+                elif isinstance(ev, ef.Info):
+                    infos.append(ev)
+                    print("INFO", json.dumps(ef.info_cfg(dict(ev.__dict__))))
+                elif isinstance(ev, ef.Health):
+                    health.append(ev)
+                    h = ev.summary()
+                    print(f"HEALTH busy {h['busy_pct']:5.1f}%  lat avg {h['lat_avg_us']:5.1f} max"
+                          f" {h['lat_max_us']:3d} us  read avg {h['read_avg_us']:5.1f} max"
+                          f" {h['read_max_us']:3d} us  tx max {h['tx_max_us']:3d} us | conv"
+                          f" {h['conversions']} overrun {h['overrun']} missed {h['missed']}"
+                          f" edgeless {h['edgeless']} crc {h['crc']} stale {h['stale']}"
+                          f" late_sw {h['late_switch']} tx_drop {h['tx_drop']} empty"
+                          f" {h['empty_slots']} resync {h['resync']} reinit {h['reinit']}"
+                          f" recov {h['recov']}", flush=True)
+                elif isinstance(ev, ef.Text):
+                    print("TEXT", ev.text)
+        wall = time.monotonic() - t0
+        ser.write(b"g")                      # leave binary mode
+    finally:
+        ser.close()
+    if a.out:
+        a.out.write_bytes(bytes(raw))
+        print(f"saved the raw stream to {a.out}")
+    if not scans:
+        print("no scans received")
+        return 1
+    import collections
+    dts = collections.Counter(b.t_us - c.t_us for c, b in zip(scans, scans[1:]))
+    gaps = sum(1 for c, b in zip(scans, scans[1:]) if b.seq != c.seq + 1)
+    flags = collections.Counter()
+    for sc in scans:
+        for bit, name in ((ef.FLAG_RECOVERED, "recovered"), (ef.FLAG_CRC_RETRY, "crc"),
+                          (ef.FLAG_STALE, "stale"), (ef.FLAG_REINIT, "reinit"),
+                          (ef.FLAG_SYNC, "sync"), (ef.FLAG_EMPTY, "empty")):
+            if sc.flags & bit:
+                flags[name] += 1
+    print(f"{len(scans)} scans in {wall:.1f} s ({len(scans) / wall:.1f}/s on the wire); t_us"
+          f" spacing (us: count) {dict(dts.most_common(5))}; seq gaps {gaps};"
+          f" flagged scans {dict(flags) or 0}; link CRC failures {dec.n_crc_fail}")
+    return 0
+
+
 # ------------------------------------------------------------------------ CLI
 
 def main(argv=None) -> int:
@@ -707,6 +826,24 @@ def main(argv=None) -> int:
     p.add_argument("--port", required=True)
     p.add_argument("selects", help="digits 0-7, e.g. 0123457, or 'all'")
     p.set_defaults(func=cmd_selects)
+
+    mo = argparse.ArgumentParser(add_help=False)
+    mo.add_argument("--settle-us", type=int, help="locked modes: settle after a switch (default 200)")
+    mo.add_argument("--osr", type=int, help="locked modes: OSR (quiet 256 or 512, wide 128)")
+    mo.add_argument("--spi", type=int, help="locked modes: SPI clock, Hz (quiet 8 MHz, wide 12 MHz)")
+
+    p = sub.add_parser("mode", parents=[mo], help="set the scan mode")
+    p.add_argument("--port", required=True)
+    p.add_argument("mode", help="legacy | quiet | wide (or 0 | 1 | 2)")
+    p.set_defaults(func=cmd_mode)
+
+    p = sub.add_parser("stream", parents=[mo], help="stream and print HEALTH + scan stats")
+    p.add_argument("--port", required=True)
+    p.add_argument("--mode", help="set this mode first: legacy | quiet | wide")
+    p.add_argument("--selects", help="set these selects first, e.g. 0123457 or all")
+    p.add_argument("--secs", type=float, default=10.0)
+    p.add_argument("--out", type=Path, help="save the raw byte stream here")
+    p.set_defaults(func=cmd_stream)
 
     a = ap.parse_args(argv)
     return a.func(a)

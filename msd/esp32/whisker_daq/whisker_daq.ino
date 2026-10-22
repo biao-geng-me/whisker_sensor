@@ -66,7 +66,15 @@
  *            Host: msd/esp32/adc_diag.py spi. See spi_sweep.
  *    S<digits>;  scan only these mux selects, e.g. S0123457; ("S;" = all 8,
  *            also the boot default). Skipped outputs read as railed/open.
- *  r, D and p restore the normal config (0.8 MHz, OSR 128, SPI_HZ) after.
+ *    M<0|1|2> [settle_us] [osr] [spi_hz];   SCAN MODE (boot default M0)
+ *            M0 legacy ~76 Hz scan (below). M1 quiet: locked scan, CLKIN
+ *            8 MHz, OSR 256, SPI 8 MHz, 250 conversions = 16 ms, 62.5 Hz.
+ *            M2 wide: OSR 128, SPI 12 MHz, 125 conversions = 4 ms, 250 Hz.
+ *            settle default 200 us; "M1 200 512;" = quiet at OSR 512
+ *            (125 conversions, fewer reads). Locked modes send a HEALTH frame
+ *            each ~1 s. See the "Locked scan" section. Forgotten on reboot.
+ *  r, D and p restore the normal config (0.8 MHz, OSR 128, SPI_HZ) after,
+ *  and put a locked mode back if one was on.
  *  Any text-mode command leaves binary mode. Serial Monitor: set the line
  *  ending to "No line ending" and the baud to SERIAL_BAUD.
  *
@@ -81,15 +89,20 @@
  *    four ADC channels of one select are simultaneous; successive selects are
  *    ~1.6 ms apart, so gauges within one scan are NOT sampled at the same
  *    instant (see OUT_OF for the order). t_us in the frame is the sweep start.
+ *    That is the legacy scan (M0). The locked scans (M1/M2) time everything
+ *    from the ADC conversion grid instead: see "Locked scan".
  * ============================================================================
  */
 
 #include <SPI.h>
 #include <esp_heap_caps.h>
+#include <esp_random.h>
+#include "soc/gpio_reg.h"
+#include "soc/soc.h"
 
 // ── Serial ───────────────────────────────────────────────────────────────────
 #define SERIAL_BAUD   921600UL    // CP2102 handles this; 115200 caps at ~50 scans/s
-#define SERIAL_TXBUF  2048
+#define SERIAL_TXBUF  4096      // 250 scans/s x 118 B = 30 kB/s in wide mode
 
 // ── Pins ─────────────────────────────────────────────────────────────────────
 #define PIN_SCLK   18
@@ -195,12 +208,18 @@ static const uint8_t CONN_TO_JPIN[17] =
 #define FT_SCAN       0x01
 #define FT_TEXT       0x02
 #define FT_INFO       0x03
-#define PROTO_VERSION 3      // 2: INFO + osr, settle_us, discard_samples; 3: + sel_mask
+#define FT_HEALTH     0x04   // 1 Hz reader health in the locked scan modes
+#define PROTO_VERSION 4      // 2: INFO + osr, settle_us, discard_samples; 3: + sel_mask;
+                             // 4: + mode, spi_hz, n_conv, avg per select; HEALTH frame
 #define FLAG_RECOVERED 0x01   // an ADC halt was recovered during this sweep
 #define FLAG_CRC_RETRY 0x02   // an ADC SPI read failed CRC and was re-read
 #define FLAG_STALE     0x04   // a read carried no new conversion and was dropped
 #define FLAG_REINIT    0x08   // the ADC had reset (STATUS RESET); re-initialised,
                               // sweep restarted
+#define FLAG_SYNC      0x10   // locked scan: conversions missed / mux switched late /
+                              // resynced to the conversion grid in this scan
+#define FLAG_EMPTY     0x20   // locked scan: a slot had no usable conversion (its
+                              // outputs repeat the previous value)
 
 // ── State ────────────────────────────────────────────────────────────────────
 SPIClass vspi(VSPI);
@@ -248,6 +267,36 @@ struct FastCfg {
     uint32_t timeoutMs;           // waitDRDY timeout: 2 periods + slack
 };
 
+// ── Locked scan state (modes M1 quiet / M2 wide; see the "Locked scan" section)
+#define LK_MAX_N  1000
+struct LockHealth {                 // one ~1 s window, sent as a HEALTH frame
+    uint32_t t0Us, conv, overrun, missed, edgeless, crc, stale, lateSw;
+    uint32_t txDrop, empty, resync, reinit, recov, latN, readN;
+    uint64_t busyUs, latSum, readSum;
+    uint16_t latMax, readMax, txMax;
+};
+struct LockState {
+    uint8_t  mode;                  // 0 = legacy 76 Hz scan, 1 quiet, 2 wide
+    uint16_t osr, N, settleUs, T;   // T = conversion period, us
+    uint32_t spi, scanUs, spiActual;
+    uint8_t  nslot, discard;
+    uint8_t  slotSel[NUM_SEL], avgPerSel[NUM_SEL];
+    uint16_t slotStart[NUM_SEL], slotLen[NUM_SEL];
+    uint8_t  posSlot[LK_MAX_N];
+    bool     haveRef, waitBoundary, streaming, scanDone, pendingSend;
+    uint32_t tRef;                  // DRDY time of conversion pos 0 of the current scan
+    int32_t  lastK;                 // pos of the last conversion read (-1: none yet)
+    uint8_t  curSel;
+    uint32_t tSw, lastEdgeT, lastActT;
+    int64_t  acc[NUM_SEL][NUM_ADC_CH];
+    uint16_t cnt[NUM_SEL];
+    bool     taint[NUM_SEL];
+    uint8_t  scanFlags;             // flags of the scan being taken
+    uint8_t  outFlags;              // flags of the last finished scan (send_scan)
+    LockHealth h;
+};
+static LockState g_lk = {};
+
 // One conversion as read by readConv: DRDY edge time, codes, BF_* flags.
 struct Conv {
     uint32_t t;
@@ -265,7 +314,8 @@ static volatile uint32_t g_drdyEdgeT = 0;   // micros() of the latest edge
 static uint32_t g_drdyTaken  = 0;           // edges already claimed by a read
 static bool     g_respPending = false;      // next frame's word 0 is a command
                                             // response, not STATUS
-static void IRAM_ATTR drdyISR() { g_drdyEdges = g_drdyEdges + 1; g_drdyEdgeT = micros(); }
+// Time first, then the count: a reader that sees the new count also sees its time.
+static void IRAM_ATTR drdyISR() { g_drdyEdgeT = micros(); g_drdyEdges = g_drdyEdges + 1; }
 
 // Graph geometry.
 #define BAR_H        6
@@ -294,14 +344,63 @@ static uint16_t crc16_ccitt_update(uint16_t crc, const uint8_t *d, int n) {
     return crc;
 }
 
+// Table-driven CRC-16-CCITT for the frames (same result as above, ~8x faster).
+static uint16_t g_crcTab[256];
+static void crcTabInit() {
+    for (int i = 0; i < 256; i++) {
+        uint16_t c = (uint16_t)(i << 8);
+        for (int k = 0; k < 8; k++) c = (c & 0x8000) ? (uint16_t)((c << 1) ^ 0x1021) : (uint16_t)(c << 1);
+        g_crcTab[i] = c;
+    }
+}
+static inline uint16_t crc16_fast(uint16_t crc, const uint8_t *d, int n) {
+    while (n--) crc = (uint16_t)(crc << 8) ^ g_crcTab[((crc >> 8) ^ *d++) & 0xFF];
+    return crc;
+}
+
+// TX queue for the locked scan: whole frames go in, the reader writes them to
+// Serial in small chunks only where a chunk can't delay the next ADC read.
+// Everything framed goes through it while g_lk.streaming, so frames never
+// interleave. A frame that doesn't fit is dropped whole (counted).
+#define TXQ_SIZE  4096
+static uint8_t  g_txq[TXQ_SIZE];
+static uint32_t g_txqHead = 0, g_txqTail = 0;          // free-running byte counters
+static inline uint32_t txqUsed() { return g_txqHead - g_txqTail; }
+static bool txqPush(const uint8_t *d, uint32_t n) {
+    if (TXQ_SIZE - txqUsed() < n) return false;
+    for (uint32_t i = 0; i < n; i++) g_txq[(g_txqHead + i) % TXQ_SIZE] = d[i];
+    g_txqHead += n;
+    return true;
+}
+// Writes up to maxBytes of queued data (one contiguous piece); returns bytes written.
+static uint32_t txqWrite(uint32_t maxBytes) {
+    uint32_t used = txqUsed();
+    if (!used) return 0;
+    uint32_t off = g_txqTail % TXQ_SIZE;
+    uint32_t n = min(min(used, maxBytes), (uint32_t)(TXQ_SIZE - off));
+    int room = Serial.availableForWrite();
+    if (room <= 0) return 0;
+    if ((uint32_t)room < n) n = room;
+    n = Serial.write(g_txq + off, n);
+    g_txqTail += n;
+    return n;
+}
+static void txqFlushBlocking() {
+    while (txqUsed()) { if (!txqWrite(256)) delay(1); }
+}
+
 static void send_frame(uint8_t type, const uint8_t *payload, uint8_t len) {
-    uint8_t hdr[4] = {FRAME_SYNC0, FRAME_SYNC1, type, len};
-    uint16_t crc = crc16_ccitt_update(0xFFFF, hdr + 2, 2);
-    crc = crc16_ccitt_update(crc, payload, len);
-    uint8_t tail[2] = {(uint8_t)(crc & 0xFF), (uint8_t)(crc >> 8)};
-    Serial.write(hdr, 4);
-    Serial.write(payload, len);
-    Serial.write(tail, 2);
+    uint8_t f[4 + 255 + 2];
+    f[0] = FRAME_SYNC0; f[1] = FRAME_SYNC1; f[2] = type; f[3] = len;
+    memcpy(f + 4, payload, len);
+    uint16_t crc = crc16_fast(0xFFFF, f + 2, 2 + len);
+    f[4 + len] = (uint8_t)(crc & 0xFF);
+    f[5 + len] = (uint8_t)(crc >> 8);
+    if (g_lk.streaming) {
+        if (!txqPush(f, 6 + len)) g_lk.h.txDrop++;
+    } else {
+        Serial.write(f, 6 + len);
+    }
 }
 
 // printf-style log that stays readable in text modes and stays framed in
@@ -327,19 +426,27 @@ static inline void put_u32(uint8_t *p, uint32_t v) {
     p[0] = v; p[1] = v >> 8; p[2] = v >> 16; p[3] = v >> 24;
 }
 
+// INFO describes the scan in effect: the legacy one (mode 0) or a locked mode.
 static void send_info() {
-    uint8_t p[24];
+    bool lk = g_lk.mode != 0;
+    uint8_t p[39];
     p[0] = PROTO_VERSION;
     p[1] = NUM_OUT;
     put_u16(p + 2, g_id);
     put_u16(p + 4, g_clockRb);
-    put_u32(p + 6, CLKIN_HZ);
-    put_u32(p + 10, FDATA_SPS);
+    put_u32(p + 6, g_clkinNow);
+    put_u32(p + 10, lk ? g_clkinNow / 2 / g_lk.osr : FDATA_SPS);
     put_u32(p + 14, SERIAL_BAUD);
-    put_u16(p + 18, OSR_NORMAL);
-    put_u16(p + 20, SETTLE_US);
-    p[22] = DISCARD_SAMPLES;
+    put_u16(p + 18, lk ? g_lk.osr : OSR_NORMAL);
+    put_u16(p + 20, lk ? g_lk.settleUs : SETTLE_US);
+    p[22] = lk ? g_lk.discard : DISCARD_SAMPLES;
     p[23] = g_selMask;
+    // version 4
+    p[24] = g_lk.mode;
+    put_u32(p + 25, lk ? g_lk.spiActual : SPI_HZ);
+    put_u16(p + 29, lk ? g_lk.N : 0);
+    for (int s = 0; s < NUM_SEL; s++)        // conversions averaged per select
+        p[31 + s] = ((g_selMask >> s) & 1) ? (lk ? g_lk.avgPerSel[s] : 1) : 0;
     send_frame(FT_INFO, p, sizeof(p));
 }
 
@@ -355,7 +462,8 @@ static void send_scan() {
     put_u16(p + 8, g_scanDur > 0xFFFF ? 0xFFFF : (uint16_t)g_scanDur);
     put_u32(p + 10, rail);
     p[14] = (g_scanRecovered ? FLAG_RECOVERED : 0) | (g_scanCrcRetry ? FLAG_CRC_RETRY : 0) |
-            (g_scanStale ? FLAG_STALE : 0) | (g_scanReinit ? FLAG_REINIT : 0);
+            (g_scanStale ? FLAG_STALE : 0) | (g_scanReinit ? FLAG_REINIT : 0) |
+            (g_lk.mode ? g_lk.outFlags : 0);
     p[15] = NUM_OUT;
     for (int o = 1; o <= NUM_OUT; o++) {
         uint32_t c = (uint32_t)outRaw[o] & 0xFFFFFF;
@@ -702,7 +810,9 @@ static int sweep() {
     return 1;
 }
 
+static bool lkScanOnce();
 static bool scan_all() {
+    if (g_lk.mode) return lkScanOnce();
     g_scanRecovered = false;
     g_scanCrcRetry  = false;
     g_scanStale     = false;
@@ -1542,6 +1652,12 @@ static void setSelMask(uint8_t m) {
     for (uint8_t sel = 0; sel < NUM_SEL; sel++) if ((m >> sel) & 1) list[n++] = '0' + sel;
     list[n] = '\0';
     logf("selects: %s (%d of %d; skipped outputs read as railed/open)\n", list, n, NUM_SEL);
+    if (g_lk.mode) {                          // new slot table, same grid
+        LockState saved = g_lk;
+        const char *err = lkConfigure(g_lk.mode, g_lk.settleUs, g_lk.osr, g_lk.spi);
+        if (err) { g_lk = saved; logf("selects: %s; locked mode unchanged\n", err); }
+        lkRearm(false);
+    }
     if (g_mode == 'B') send_info();
 }
 
@@ -1560,9 +1676,508 @@ static void selects_cmd() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+//  Locked scan ('M1' quiet 62.5 Hz, 'M2' wide 250 Hz; 'M0' = legacy scan)
+// ─────────────────────────────────────────────────────────────────────────────
+// Most of the remaining noise is a comb at exact multiples of 62.5 Hz (16 ms,
+// ESP32/USB activity). CLKIN (8 MHz from LEDC) and micros() come from the same
+// crystal, so a scan that is exactly N conversions of the free-running ADC,
+// with N x T a multiple of 16 ms, folds the whole comb onto 0 Hz (a constant
+// offset per channel).
+//   quiet  OSR 256 (T 64 us), SPI 8 MHz,  N 250 -> 16 ms, 62.5 Hz
+//   wide   OSR 128 (T 32 us), SPI 12 MHz, N 125 ->  4 ms, 250 Hz
+//   (quiet with OSR 512: T 128 us, N 125, fewer frames to read)
+// The N conversions are split over the active selects (slots get floor/ceil of
+// N / nsel). The mux switches right after the DRDY that ends the previous slot;
+// scan k starts on conversion k x N. Per slot, the reading is the plain mean
+// of the conversions whose sinc3 window (3 periods) starts >= settle_us after
+// the switch, i.e. the first DISCARD = ceil(3 + (settle + LK_LAT_ALLOW_US)/T) - 1
+// conversions of every slot are dropped (fixed per slot, so every scan uses the
+// same conversion positions). The mux settle tail (tau 70-90 us, ~0.0136 x the
+// step at the switch) is then ~2e-5 (quiet) to ~1e-4 (wide) of the step.
+//
+// Every conversion is read; the conversion index comes from the DRDY edge
+// time (ISR) on the grid tRef + k x T, so a lost DRDY pulse or a late read
+// can't shift the grid. A missed conversion, a late/missed mux switch or a
+// resync taints the slot (no data from it) and sets FLAG_SYNC; a slot left
+// with no usable conversion keeps its previous value and sets FLAG_EMPTY.
+// Frames go through the TX queue and are written in chunks only when the next
+// DRDY is at least LK_TX_GUARD_US away, and never just before a slot end.
+// A HEALTH frame (FT_HEALTH) each ~1 s reports the reader: busy fraction,
+// DRDY-to-read-end latency, SPI read time, overruns, missed, edgeless, CRC,
+// stale, late switches, TX drops, empty slots, resyncs.
+// The reader is lkStep() (one conversion) and keeps all its state in g_lk, so
+// it can later move to its own pinned FreeRTOS task with the TX queue as the
+// hand-over to a sender task.
+#define LK_CLKIN           8000000UL
+#define LK_LAT_ALLOW_US    10      // switch latency allowed for in the discard count
+#define LK_SETTLE_DEFAULT  200
+#define LK_TX_GUARD_US     6       // idle work only if the next DRDY is this far off (a
+                                   // slightly late read is harmless except at a slot end,
+                                   // which idle work never precedes)
+#define LK_TIMEOUT_MS      50      // no conversion for this long: re-init the ADC
+static const uint16_t LK_OSR [3] = {0, 256, 128};
+static const uint32_t LK_SPI [3] = {0, 8000000, 12000000};
+static const uint32_t LK_SCAN[3] = {0, 16000, 4000};
+static const char    *LK_NAME[3] = {"legacy", "quiet", "wide"};
+
+static_assert(PIN_SELA_2 >= 32 && PIN_SELB_2 >= 32 && PIN_SELA_1 < 32 && PIN_SELB_1 < 32 &&
+              PIN_SELC_1 < 32 && PIN_SELC_2 < 32 && PIN_CS < 32 && PIN_DRDY < 32,
+              "muxFast / csFast assume these GPIO banks");
+
+// Direct GPIO register access: digitalWrite x 6 took ~10 us per mux switch.
+static uint32_t g_muxSet0[NUM_SEL], g_muxClr0[NUM_SEL], g_muxSet1[NUM_SEL], g_muxClr1[NUM_SEL];
+static void muxFastInit() {
+    const uint32_t all0 = (1UL << PIN_SELA_1) | (1UL << PIN_SELB_1) | (1UL << PIN_SELC_1) |
+                          (1UL << PIN_SELC_2);
+    const uint32_t all1 = (1UL << (PIN_SELA_2 - 32)) | (1UL << (PIN_SELB_2 - 32));
+    for (uint8_t sel = 0; sel < NUM_SEL; sel++) {
+        uint32_t s0 = ((sel & 1) ? 1UL << PIN_SELA_1 : 0) | ((sel & 2) ? 1UL << PIN_SELB_1 : 0) |
+                      ((sel & 4) ? (1UL << PIN_SELC_1) | (1UL << PIN_SELC_2) : 0);
+        uint32_t s1 = ((sel & 1) ? 1UL << (PIN_SELA_2 - 32) : 0) |
+                      ((sel & 2) ? 1UL << (PIN_SELB_2 - 32) : 0);
+        g_muxSet0[sel] = s0; g_muxClr0[sel] = all0 & ~s0;
+        g_muxSet1[sel] = s1; g_muxClr1[sel] = all1 & ~s1;
+    }
+}
+static inline void muxFast(uint8_t sel) {
+    REG_WRITE(GPIO_OUT_W1TS_REG, g_muxSet0[sel]);
+    REG_WRITE(GPIO_OUT_W1TC_REG, g_muxClr0[sel]);
+    REG_WRITE(GPIO_OUT1_W1TS_REG, g_muxSet1[sel]);
+    REG_WRITE(GPIO_OUT1_W1TC_REG, g_muxClr1[sel]);
+}
+static inline bool drdyLowFast() { return !((REG_READ(GPIO_IN_REG) >> PIN_DRDY) & 1); }
+
+// One 18-byte frame: CS by register, the SPI driver's no-lock transfer (the
+// transaction is held all the time), table CRC. Same result as ads_read_all.
+static uint32_t adsReadFast(long ch[4], bool *crcOk) {
+    static const uint32_t zeros[5] = {0, 0, 0, 0, 0};
+    uint32_t w[5];                                   // word-aligned for the driver
+    REG_WRITE(GPIO_OUT_W1TC_REG, 1UL << PIN_CS);
+    spiTransferBytesNL(vspi.bus(), zeros, (uint8_t *)w, 18);
+    REG_WRITE(GPIO_OUT_W1TS_REG, 1UL << PIN_CS);
+    const uint8_t *buf = (const uint8_t *)w;
+    for (int i = 0; i < 4; i++) {
+        uint32_t raw = ((uint32_t)buf[3 + 3*i] << 16) | ((uint32_t)buf[4 + 3*i] << 8) |
+                        (uint32_t)buf[5 + 3*i];
+        if (raw & 0x800000UL) raw |= 0xFF000000UL;
+        ch[i] = (long)(int32_t)raw;
+    }
+    *crcOk = crc16_fast(0xFFFF, buf, 15) == (((uint16_t)buf[15] << 8) | buf[16]);
+    return (((uint32_t)buf[0] << 16) | ((uint32_t)buf[1] << 8) | buf[2]) & 0xFFFFFF;
+}
+
+// Slot table for mode/settle/OSR/SPI and the current selects. nullptr = OK.
+static const char *lkConfigure(uint8_t mode, long settle, long osr, long spi) {
+    if (mode < 1 || mode > 2) return "mode must be 1 (quiet) or 2 (wide)";
+    if (osrCode(osr) < 0) return "osr must be a power of 2, 128..16384";
+    if (spi < 100000 || spi > SPI_MAX_HZ) return "spi out of 0.1-20 MHz";
+    if (settle < 0 || settle > 5000) return "settle out of 0-5000 us";
+    if ((2ULL * osr * 1000000ULL) % LK_CLKIN) return "conversion period not a whole us";
+    uint32_t T = (uint32_t)(2ULL * osr * 1000000ULL / LK_CLKIN);
+    if (LK_SCAN[mode] % T) return "scan period not a whole number of conversions at this OSR";
+    uint32_t N = LK_SCAN[mode] / T;
+    if (N > LK_MAX_N) return "too many conversions per scan";
+    uint8_t sels[NUM_SEL], nsel = 0;
+    for (uint8_t s = 0; s < NUM_SEL; s++) if ((g_selMask >> s) & 1) sels[nsel++] = s;
+    if (!nsel) return "no select active";
+    uint32_t m0 = (uint32_t)ceil(3.0 + (double)(settle + LK_LAT_ALLOW_US) / T);
+    uint8_t discard = (uint8_t)(m0 - 1);
+    uint32_t minLen = N / nsel;
+    if (minLen <= discard) return "settle too long: a slot would have no usable conversion";
+    g_lk.mode = mode; g_lk.osr = osr; g_lk.spi = spi; g_lk.settleUs = settle;
+    g_lk.T = T; g_lk.N = N; g_lk.scanUs = LK_SCAN[mode];
+    g_lk.nslot = nsel; g_lk.discard = discard;
+    memset(g_lk.avgPerSel, 0, sizeof(g_lk.avgPerSel));
+    uint16_t start = 0;
+    for (uint8_t i = 0; i < nsel; i++) {
+        uint16_t len = N / nsel + (i < N % nsel ? 1 : 0);
+        g_lk.slotSel[i] = sels[i]; g_lk.slotStart[i] = start; g_lk.slotLen[i] = len;
+        g_lk.avgPerSel[sels[i]] = len - discard;
+        for (uint16_t p = start; p < start + len; p++) g_lk.posSlot[p] = i;
+        start += len;
+    }
+    return nullptr;
+}
+
+static void lkClearScan() {
+    memset(g_lk.acc, 0, sizeof(g_lk.acc));
+    memset(g_lk.cnt, 0, sizeof(g_lk.cnt));
+    memset(g_lk.taint, 0, sizeof(g_lk.taint));
+}
+
+static void lkHealthReset() {
+    memset(&g_lk.h, 0, sizeof(g_lk.h));
+    g_lk.h.t0Us = micros();
+}
+
+// Restart the reader: wait for the next scan boundary on the conversion grid
+// (newGrid: take a new grid from the next DRDY, e.g. after an ADC re-init).
+static void lkRearm(bool newGrid) {
+    if (newGrid) g_lk.haveRef = false;
+    g_lk.waitBoundary = true;
+    g_lk.lastK = -1;
+    g_lk.curSel = 0xFF;
+    g_lk.pendingSend = false;
+    lkClearScan();
+    drdyResync();
+    g_lk.lastActT = g_lk.lastEdgeT = micros();
+}
+
+// CLKIN 8 MHz, OSR and SPI of the configured mode, full ADC init, rearm.
+static bool lkStart() {
+    FastCfg cfg;
+    bool ok = fastCfgApply(LK_CLKIN, g_lk.osr, g_lk.spi, &cfg);
+    g_lk.spiActual = cfg.spiActual;
+    lkRearm(true);
+    return ok;
+}
+
+static void lkStop() {
+    g_lk.mode = 0;
+    g_lk.streaming = false;
+    restoreNormalCfg();
+}
+
+static void lkSendHealth() {
+    LockHealth &h = g_lk.h;
+    uint32_t win = micros() - h.t0Us;
+    if (!win) win = 1;
+    uint8_t p[42];
+    p[0] = 1;
+    p[1] = g_lk.mode;
+    put_u16(p + 2,  (uint16_t)min<uint64_t>(1000, h.busyUs * 1000 / win));
+    put_u16(p + 4,  h.latMax);
+    put_u16(p + 6,  (uint16_t)min<uint64_t>(65535, h.latN ? h.latSum * 10 / h.latN : 0));
+    put_u16(p + 8,  (uint16_t)min<uint64_t>(65535, h.readN ? h.readSum * 10 / h.readN : 0));
+    put_u16(p + 10, h.readMax);
+    put_u16(p + 12, h.txMax);
+    put_u32(p + 14, h.conv);
+    const uint32_t v[12] = {h.overrun, h.missed, h.edgeless, h.crc, h.stale, h.lateSw,
+                            h.txDrop, h.empty, h.resync, h.reinit, h.recov, win / 1000};
+    for (int i = 0; i < 12; i++) put_u16(p + 18 + 2 * i, (uint16_t)min<uint32_t>(65535, v[i]));
+    send_frame(FT_HEALTH, p, sizeof(p));
+}
+
+// The scan that just ended (its last conversion was read): averages -> outRaw,
+// queue the frame (sent from idle time), next scan.
+static void lkCloseScan(uint32_t tEnd) {
+    for (uint8_t i = 0; i < g_lk.nslot; i++) {
+        uint8_t sel = g_lk.slotSel[i];
+        if (!g_lk.cnt[i]) { g_lk.scanFlags |= FLAG_EMPTY; g_lk.h.empty++; continue; }
+        for (uint8_t a = 0; a < NUM_ADC_CH; a++) {
+            uint8_t o = OUT_OF[a][sel];
+            int64_t sum = g_lk.acc[i][a];
+            int64_t n = g_lk.cnt[i];
+            outRaw[o] = (long)(sum >= 0 ? (sum + n / 2) / n : -((-sum + n / 2) / n));
+            outV[o] = (outRaw[o] / ADC_FS) * VREF;
+        }
+    }
+    // t_us = grid time of the DRDY that ended the previous scan (where the mux
+    // switched to slot 0), so successive scans are exactly N x T apart
+    g_scanT0  = g_lk.tRef - g_lk.T;
+    g_scanDur = (uint32_t)g_lk.N * g_lk.T;
+    (void)tEnd;
+    g_scanRecovered = g_scanCrcRetry = g_scanStale = g_scanReinit = false;
+    g_lk.outFlags = g_lk.scanFlags;
+    g_lk.scanFlags = 0;
+    g_scans++;
+    g_lk.scanDone = true;
+    if (g_lk.streaming) {
+        if (g_lk.pendingSend) g_lk.h.txDrop++;      // the previous one never got idle time
+        g_lk.pendingSend = true;
+    }
+    lkClearScan();
+    g_lk.tRef += (uint32_t)g_lk.N * g_lk.T;
+    g_lk.lastK = -1;
+    if (micros() - g_lk.h.t0Us >= 1000000UL) {
+        if (g_lk.streaming) lkSendHealth();
+        lkHealthReset();
+    }
+}
+
+static inline int32_t lkIndex(uint32_t t) {
+    int32_t d = (int32_t)(t - g_lk.tRef), T = g_lk.T;
+    return d >= 0 ? (d + T / 2) / T : -((-d + T / 2) / T);
+}
+
+// Reads one conversion if one is waiting. 0 = none waiting, 1 = handled.
+static int lkStep() {
+    uint32_t e, t;
+    bool edge;
+    if ((int32_t)(g_drdyEdges - g_drdyTaken) > 0) {
+        do { e = g_drdyEdges; t = g_drdyEdgeT; } while (e != g_drdyEdges);
+        edge = true;
+    } else if (drdyLowFast()) {
+        // DRDY low with no edge: give a just-fired ISR ~3 us to count it,
+        // else it is a conversion whose pulse was blocked by the previous read
+        // (SBAS890D 8.5.1.5) or the FIFO's second slot after an overrun.
+        uint32_t w0 = micros();
+        while (micros() - w0 < 3) {}
+        if ((int32_t)(g_drdyEdges - g_drdyTaken) > 0) return lkStep();
+        e = g_drdyTaken; t = g_lk.lastEdgeT + g_lk.T;
+        edge = false;
+    } else {
+        return 0;
+    }
+    uint32_t tIn = micros();
+    LockHealth &h = g_lk.h;
+    int32_t pend = (int32_t)(e - g_drdyTaken);
+    g_drdyTaken = e;
+    long ch[4];
+    bool ok;
+
+    if (!g_lk.haveRef) {                     // new grid: this conversion = pos N-1
+        if (!edge) { adsReadFast(ch, &ok); g_respPending = false; return 1; }
+        g_lk.tRef = t + g_lk.T;
+        g_lk.haveRef = true;
+        g_lk.lastK = -2;                     // this one is k = -1
+    }
+    int32_t k = edge ? lkIndex(t) : g_lk.lastK + 1;
+    if (!g_lk.waitBoundary && k >= (int32_t)g_lk.N) {
+        // the scan end was missed: close what we have, flagged
+        g_lk.scanFlags |= FLAG_SYNC;
+        lkCloseScan(t);
+        k -= g_lk.N;
+    }
+    if (k >= (int32_t)g_lk.N) {              // whole scans skipped (pause, resume)
+        int32_t q = k / g_lk.N;
+        g_lk.tRef += (uint32_t)q * g_lk.N * g_lk.T;
+        k -= q * g_lk.N;
+        g_lk.lastK -= q * g_lk.N;
+        g_scans += q;                        // seq counts grid scans: the host sees the gap
+        if (!g_lk.waitBoundary) { g_lk.scanFlags |= FLAG_SYNC; h.missed += q * g_lk.N; }
+    }
+    if (edge && k <= g_lk.lastK) { k = g_lk.lastK + 1; h.resync++; }   // timestamp glitch
+    // (while waiting for a boundary nothing is collected, so gaps don't count)
+    bool sync = !g_lk.waitBoundary && (pend > 1 || k > g_lk.lastK + 1);
+    if (sync) {
+        h.overrun++;
+        if (k > g_lk.lastK + 1) h.missed += k - g_lk.lastK - 1;
+    }
+    if (!edge) h.edgeless++;
+
+    // Mux: switch right after the DRDY that ends a slot (before the read).
+    uint8_t s = 0;
+    bool boundary;
+    if (g_lk.waitBoundary) {
+        boundary = (k == (int32_t)g_lk.N - 1) || k == -1;
+    } else {
+        s = g_lk.posSlot[k];
+        if (sync) g_lk.taint[s] = true;
+        if (g_lk.curSel != g_lk.slotSel[s]) {          // missed a switch
+            muxFast(g_lk.slotSel[s]);
+            g_lk.curSel = g_lk.slotSel[s];
+            g_lk.taint[s] = true;
+            g_lk.scanFlags |= FLAG_SYNC;
+        }
+        if (sync) g_lk.scanFlags |= FLAG_SYNC;
+        boundary = k == g_lk.slotStart[s] + g_lk.slotLen[s] - 1;
+    }
+    if (boundary) {
+        uint8_t ns = g_lk.waitBoundary ? 0 : (s + 1 < g_lk.nslot ? s + 1 : 0);
+        muxFast(g_lk.slotSel[ns]);
+        g_lk.curSel = g_lk.slotSel[ns];
+        g_lk.tSw = micros();
+        if (edge && g_lk.tSw - t > LK_LAT_ALLOW_US) {
+            h.lateSw++;
+            if (!g_lk.waitBoundary) g_lk.scanFlags |= FLAG_SYNC;
+        }
+    }
+
+    uint32_t r0 = micros();
+    uint32_t st = adsReadFast(ch, &ok);
+    uint32_t r1 = micros();
+    h.conv++;
+    uint16_t rd = (uint16_t)min<uint32_t>(r1 - r0, 65535);
+    h.readSum += rd; h.readN++;
+    if (rd > h.readMax) h.readMax = rd;
+    if (edge) {
+        uint16_t lat = (uint16_t)min<uint32_t>(r1 - t, 65535);
+        h.latSum += lat; h.latN++;
+        if (lat > h.latMax) h.latMax = lat;
+    }
+    if (sync) {                              // drain the FIFO's older entry
+        long junk[4]; bool jok;
+        for (int i = 0; i < 2 && drdyLowFast() && (int32_t)(g_drdyEdges - g_drdyTaken) <= 0; i++)
+            adsReadFast(junk, &jok);
+    }
+    g_lk.lastActT = r1;
+    g_lk.lastEdgeT = t;
+
+    bool use = true;
+    if (g_respPending) { g_respPending = false; use = false; }      // LOCK reply frame
+    else if (!ok) { h.crc++; g_crcFails++; g_lk.scanFlags |= FLAG_CRC_RETRY; use = false; }
+    else if ((st >> 8) & STATUS_RESET) {
+        // the ADC reset behind our back: same re-init as boot, new grid
+        h.reinit++; g_adcReinits++;
+        g_lk.scanFlags |= FLAG_REINIT;
+        logf("[adc reset #%lu] in %s mode: re-initialising\n", (unsigned long)g_adcReinits,
+             LK_NAME[g_lk.mode]);
+        lkStart();
+        h.busyUs += micros() - tIn;
+        return 1;
+    } else if (((st >> 8) & STATUS_DRDY_ALL) != STATUS_DRDY_ALL) {
+        h.stale++; g_staleReads++; g_lk.scanFlags |= FLAG_STALE; use = false;
+    }
+
+    if (g_lk.waitBoundary) {
+        if (boundary) {                      // the next conversion starts scan pos 0
+            g_lk.waitBoundary = false;
+            if (k == (int32_t)g_lk.N - 1) {  // the partial scan before it is skipped
+                g_lk.tRef += (uint32_t)g_lk.N * g_lk.T;
+                g_scans++;
+            }
+            g_lk.lastK = -1;
+            lkClearScan();
+        } else {
+            g_lk.lastK = k;
+        }
+    } else {
+        if (use && !g_lk.taint[s] && k - g_lk.slotStart[s] >= g_lk.discard) {
+            for (uint8_t a = 0; a < NUM_ADC_CH; a++) g_lk.acc[s][a] += ch[a];
+            g_lk.cnt[s]++;
+        }
+        g_lk.lastK = k;
+        if (k == (int32_t)g_lk.N - 1) lkCloseScan(r1);
+    }
+    h.busyUs += micros() - tIn;
+    return 1;
+}
+
+// After a pause (text mode, a command): drop what the FIFO holds and wait for
+// the next scan boundary on the same grid (unless the pause was absurdly long).
+static void lkResume() {
+    long junk[4]; bool ok;
+    for (int i = 0; i < 3 && drdyLowFast(); i++) adsReadFast(junk, &ok);
+    if (g_lk.haveRef && (uint32_t)(micros() - g_lk.tRef) > 1000000000UL) g_lk.haveRef = false;
+    lkRearm(false);
+    g_lk.h.resync++;
+}
+
+static void lkRecover() {
+    g_lk.h.recov++;
+    g_halts++;
+    g_lk.scanFlags |= FLAG_RECOVERED;
+    logf("[halt] no conversion for %d ms in %s mode: CLKIN restart + re-init\n", LK_TIMEOUT_MS,
+         LK_NAME[g_lk.mode]);
+    spiFlush();
+    setClkin(LK_CLKIN);
+    lkStart();
+}
+
+// Run the reader for about budgetUs (it returns right after a conversion, so
+// the caller's own work can't make the next read late). Idle time between
+// conversions goes to the deferred frame and the TX chunks.
+static void lkService(uint32_t budgetUs) {
+    uint32_t t0 = micros();
+    // A gap shorter than a scan (a busy loop(), an interrupt hog) is a sync loss
+    // inside the scan: lkStep sees the jump, taints the slot and flags the
+    // scan. Longer (text modes, commands): drop the FIFO, wait for a boundary.
+    if (t0 - g_lk.lastActT > g_lk.scanUs) lkResume();
+    for (;;) {
+        if (lkStep()) {
+            if (micros() - t0 >= budgetUs) return;
+            continue;
+        }
+        uint32_t now = micros();
+        if (now - g_lk.lastActT > LK_TIMEOUT_MS * 1000UL) {
+            lkRecover();
+            if (micros() - t0 >= budgetUs) return;
+            continue;
+        }
+        // idle: only if the next DRDY is far enough off and doesn't end a slot
+        if (!g_lk.streaming || g_lk.waitBoundary) continue;
+        int32_t next = g_lk.lastK + 1;
+        if (next < (int32_t)g_lk.N) {
+            uint8_t s = g_lk.posSlot[next];
+            if (next == g_lk.slotStart[s] + g_lk.slotLen[s] - 1) continue;
+        }
+        if ((int32_t)(g_lk.lastEdgeT + g_lk.T - now) < LK_TX_GUARD_US) continue;
+        uint32_t w0 = micros();
+        if (g_lk.pendingSend) {
+            g_lk.pendingSend = false;
+            send_scan();                     // packs into the TX queue
+        } else if (txqUsed()) {
+            uint32_t n = txqWrite(g_lk.T >= 64 ? 48 : 16);
+            uint32_t dt = micros() - w0;
+            if (n && dt > g_lk.h.txMax) g_lk.h.txMax = (uint16_t)min<uint32_t>(dt, 65535);
+        } else {
+            continue;
+        }
+        g_lk.h.busyUs += micros() - w0;
+    }
+}
+
+// One scan for the text modes (blocking; the reader resyncs after their pauses).
+static bool lkScanOnce() {
+    g_lk.scanDone = false;
+    uint32_t t0 = millis();
+    while (!g_lk.scanDone) {
+        lkService(2000);
+        if (millis() - t0 > 1000) return false;
+    }
+    return true;
+}
+
+static void lkPrintMode() {
+    if (!g_lk.mode) {
+        logf("mode 0 (legacy): CLKIN %lu Hz, OSR %d, SPI %lu Hz, settle %d us + %d discards,"
+             " selects mask 0x%02X\n", (unsigned long)CLKIN_HZ, OSR_NORMAL, (unsigned long)SPI_HZ,
+             SETTLE_US, DISCARD_SAMPLES, g_selMask);
+        return;
+    }
+    char avg[3 * NUM_SEL + 1];
+    int n = 0;
+    for (uint8_t i = 0; i < g_lk.nslot; i++)
+        n += snprintf(avg + n, sizeof(avg) - n, "%s%u", i ? "," : "", g_lk.slotLen[i] - g_lk.discard);
+    logf("mode %u (%s): CLKIN %lu Hz, OSR %u (T %u us), SPI %lu Hz (%lu), N %u = %lu us"
+         " (%.2f scans/s), %u selects, settle %u us -> drop %u, average %s per slot\n",
+         g_lk.mode, LK_NAME[g_lk.mode], (unsigned long)g_clkinNow, g_lk.osr, g_lk.T,
+         (unsigned long)g_lk.spi, (unsigned long)g_lk.spiActual, g_lk.N, (unsigned long)g_lk.scanUs,
+         1e6 / g_lk.scanUs, g_lk.nslot, g_lk.settleUs, g_lk.discard, avg);
+}
+
+// M<mode> [settle_us] [osr] [spi_hz];   M0 legacy, M1 quiet, M2 wide.
+static void mode_cmd() {
+    char buf[64];
+    readCmdLine(buf, sizeof(buf));
+    long v[4] = {-1, LK_SETTLE_DEFAULT, 0, 0};
+    int n = parseLongs(buf, v, 4);
+    if (n < 1 || v[0] < 0 || v[0] > 2) {
+        logf("M: usage M<0|1|2> [settle_us] [osr] [spi_hz];  0 legacy, 1 quiet, 2 wide\n");
+        return;
+    }
+    if (v[0] == 0) {
+        if (g_lk.mode) lkStop();
+        lkPrintMode();
+        if (g_mode == 'B') send_info();
+        return;
+    }
+    uint8_t keep = g_lk.mode;
+    LockState saved = g_lk;
+    const char *err = lkConfigure((uint8_t)v[0], v[1], v[2] ? v[2] : LK_OSR[v[0]],
+                                  v[3] ? v[3] : LK_SPI[v[0]]);
+    if (err) {
+        g_lk = saved;
+        logf("M: %s\n", err);
+        return;
+    }
+    if (!lkStart()) {
+        logf("M: CLOCK config not accepted (readback 0x%04X); back to %s\n", g_clockRb,
+             LK_NAME[keep]);
+        if (keep) { g_lk = saved; lkStart(); } else lkStop();
+        return;
+    }
+    lkHealthReset();
+    lkPrintMode();
+    if (g_mode == 'B') send_info();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 //  Setup
 // ─────────────────────────────────────────────────────────────────────────────
 void setup() {
+    crcTabInit();
     Serial.setTxBufferSize(SERIAL_TXBUF);     // must precede begin()
     Serial.begin(SERIAL_BAUD);
     delay(500);
@@ -1585,6 +2200,7 @@ void setup() {
         const uint8_t p[] = { PIN_SELA_1, PIN_SELB_1, PIN_SELC_1,
                               PIN_SELA_2, PIN_SELB_2, PIN_SELC_2 };
         for (uint8_t i = 0; i < 6; i++) { pinMode(p[i], OUTPUT); digitalWrite(p[i], LOW); }
+        muxFastInit();
     }
 
     pinMode(PIN_CS, OUTPUT);  cs_high();
@@ -1639,6 +2255,8 @@ void setup() {
     Serial.println("          D<from> <to> [clkin] [osr] [spi] [reps] [win] [dither] [dwell] [jitter];=fine settle");
     Serial.println("          p[clkin] [osr] [secs] [spi ...];=SPI speed sweep");
     Serial.println("          S<digits>;=scan only these selects (S; = all 8)");
+    Serial.println("          M<0|1|2> [settle_us] [osr] [spi];=scan mode: 0 legacy 76 Hz,"
+                   " 1 quiet 62.5 Hz, 2 wide 250 Hz");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1652,6 +2270,10 @@ static void enter_text_mode(char m, const char *banner) {
 void loop() {
     while (Serial.available()) {
         char k = Serial.read();
+        if (g_lk.streaming) {             // finish the queued frames before anything else
+            txqFlushBlocking();
+            g_lk.streaming = false;
+        }
         switch (k) {
             case 'B': g_mode = 'B'; send_info(); break;
             case 'b': logf("Re-capturing baseline...\n"); captureBaseline(16); break;
@@ -1669,16 +2291,27 @@ void loop() {
                       logf("scale +/-%.2f mV (manual)\n", g_scale); break;
             case '0': g_autoScale = true; logf("scale: auto\n"); break;
             case 'd': if (g_mode == 'B') g_mode = 'g'; settle_diag_cmd(); break;
-            case 'r': if (g_mode == 'B') g_mode = 'g'; burst_cmd(); break;
-            case 'D': if (g_mode == 'B') g_mode = 'g'; settle_fine_cmd(); break;
-            case 'p': if (g_mode == 'B') g_mode = 'g'; spi_sweep_cmd(); break;
+            // r / D / p change the ADC config and restore the legacy one; a locked
+            // mode is put back afterwards
+            case 'r': if (g_mode == 'B') g_mode = 'g'; burst_cmd();
+                      if (g_lk.mode) lkStart(); break;
+            case 'D': if (g_mode == 'B') g_mode = 'g'; settle_fine_cmd();
+                      if (g_lk.mode) lkStart(); break;
+            case 'p': if (g_mode == 'B') g_mode = 'g'; spi_sweep_cmd();
+                      if (g_lk.mode) lkStart(); break;
             case 'S': selects_cmd(); break;
+            case 'M': mode_cmd(); break;
             default: break;    // ignore CR/LF and anything unknown
         }
     }
 
+    bool streaming = g_mode == 'B' && g_lk.mode;
+    if (streaming && !g_lk.streaming) lkHealthReset();   // HEALTH windows cover streaming only
+    g_lk.streaming = streaming;
     switch (g_mode) {
-        case 'B': if (scan_all()) send_scan(); break;      // no delay: stream fast
+        case 'B': if (g_lk.mode) lkService(20000);           // locked: sends from idle time
+                  else if (scan_all()) send_scan();          // no delay: stream fast
+                  break;
         case 'c': calibrate_step(); delay(60); break;
         case 'n': captureBaseline(48); noise_report(); delay(1000); break;
         case 's': if (scan_all()) print_scan();    delay(400); break;

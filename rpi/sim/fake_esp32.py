@@ -4,6 +4,11 @@ Creates a pty, prints its path, and behaves like the firmware: boot banner
 in text, then binary SCAN frames at ~80 Hz once it receives ``B``. Any of the
 text-mode command letters stops the binary stream again.
 
+Scan modes like the firmware: ``M0;`` legacy (--rate, default 80 Hz), ``M1;``
+quiet (62.5 Hz) and ``M2;`` wide (250 Hz), with INFO version 4 and 1 Hz HEALTH
+frames in M1/M2; ``S<digits>;`` limits the mux selects (skipped outputs read
+railed). In M1/M2, t_us advances by exactly 16000 / 4000 us per scan.
+
 Signal: the "live" gauges carry ``amp * sin(2*pi*f*t)`` on a shared wall clock
 (``time.time()``) plus noise, so ``fake_autopilot.py`` can put the same motion
 on the IMU and the pipeline's time alignment can be checked end to end.
@@ -26,9 +31,27 @@ import tty
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from whisker_link import esp32_frame as ef  # noqa: E402
-from whisker_link.channels import CHANNEL_NAMES  # noqa: E402
+from whisker_link.channels import CHANNEL_NAMES, channels_of_selects  # noqa: E402
 
 RAIL = (1 << 23) - 1
+# mode -> (osr, spi_hz, n_conv, scan period us)
+MODES = {1: (256, 8_000_000, 250, 16_000), 2: (128, 11_428_571, 125, 4_000)}
+
+
+def info_for(mode: int, sel_mask: int) -> ef.Info:
+    if mode in MODES:
+        osr, spi, n, _ = MODES[mode]
+        nsel = bin(sel_mask).count("1")
+        discard = 6 if mode == 1 else 9
+        sels = [s for s in range(8) if sel_mask >> s & 1]
+        avg = [0] * 8
+        for i, s in enumerate(sels):
+            avg[s] = n // nsel + (1 if i < n % nsel else 0) - discard
+        return ef.Info(ef.PROTO_VERSION, 32, 0x2405, 0x0F02 if mode == 2 else 0x0F06, 8_000_000,
+                       8_000_000 // 2 // osr, 921600, osr, 200, discard, sel_mask,
+                       mode, spi, n, tuple(avg))
+    return ef.Info(ef.PROTO_VERSION, 32, 0x2405, 0xFF02, 800_000, 3125, 921600, 128, 250, 3,
+                   sel_mask, 0, 600_000, 0, tuple(1 if sel_mask >> s & 1 else 0 for s in range(8)))
 
 
 def main() -> None:
@@ -75,19 +98,59 @@ def main() -> None:
         b"Baseline captured from 16 scans.\r\n")
     binary = False
     seq = 0
+    mode, sel_mask = 0, 0xFF
     period = 1.0 / args.rate
     next_t = time.monotonic()
+    grid_us = None                       # locked modes: t_us on an exact grid
+    last_health = time.monotonic()
+    n_health = 0
     offsets = [random.randint(-200_000, 200_000) for _ in range(len(CHANNEL_NAMES))]
+    pending = ""                         # an M / S command waiting for its ';'
+
+    def say(msg: str) -> None:
+        out(ef.encode_text(msg) if binary else (msg + "\r\n").encode())
+
+    def run_arg_cmd(c: str) -> None:
+        nonlocal mode, sel_mask, period, grid_us, n_health
+        if c[0] == "S":
+            digits = {int(ch) for ch in c[1:] if ch in "01234567"}
+            sel_mask = sum(1 << d for d in digits) or 0xFF
+            say(f"selects: {''.join(str(d) for d in range(8) if sel_mask >> d & 1)}")
+        else:
+            try:
+                m = int(c[1:].split()[0])
+            except (ValueError, IndexError):
+                say("M: usage M<0|1|2> [settle_us] [osr] [spi_hz];")
+                return
+            if m not in (0, 1, 2):
+                say("M: usage M<0|1|2> [settle_us] [osr] [spi_hz];")
+                return
+            mode = m
+            period = MODES[m][3] / 1e6 if m in MODES else 1.0 / args.rate
+            grid_us = None
+            n_health = 0
+            say(f"mode {m} (simulated)")
+        if binary:
+            out(ef.encode_info(info_for(mode, sel_mask)))
+
     while True:
         try:
             cmds = os.read(master, 256)
         except (BlockingIOError, OSError):
             cmds = b""
         for k in cmds.decode("latin-1"):
-            if k == "B":
+            if pending:
+                if k in ";\n":
+                    run_arg_cmd(pending)
+                    pending = ""
+                elif k != "\r":
+                    pending += k
+                continue
+            if k in "MS":
+                pending = k
+            elif k == "B":
                 binary = True
-                out(ef.encode_info(ef.Info(ef.PROTO_VERSION, 32, 0x2240, 0xFF02,
-                                           800_000, 3125, 921600, 128, 250, 3, 0xFF)))
+                out(ef.encode_info(info_for(mode, sel_mask)))
             elif k == "b":
                 out(ef.encode_text("Re-capturing baseline...") if binary
                     else b"Re-capturing baseline...\r\n")
@@ -99,20 +162,34 @@ def main() -> None:
             time.sleep(min(next_t - now, 0.005))
             continue
         next_t += period
+        if next_t < now - 0.5:           # fell far behind (suspended): don't burst
+            next_t = now + period
         if not binary:
             continue
-        t_us = micros()
+        if mode in MODES:
+            grid_us = micros() if grid_us is None else grid_us + MODES[mode][3]
+            t_us, dur = grid_us & 0xFFFFFFFF, MODES[mode][3]
+        else:
+            t_us, dur = micros(), 12_300
         phase = math.sin(2 * math.pi * args.freq * time.time())
+        scanned = set(channels_of_selects(sel_mask))
         raw, rail = [], 0
         for i in range(len(CHANNEL_NAMES)):
-            if i in live:
+            if i in live and i in scanned:
                 mv = args.amp_mv * phase * (1 + 0.3 * (i % 3)) + random.gauss(0, args.noise_mv)
                 raw.append(offsets[i] + int(mv / ef.MV_PER_CODE))
             else:
                 raw.append(RAIL)
                 rail |= 1 << i
-        out(ef.encode_scan(seq, t_us, 12_300, rail, 0, raw))
+        out(ef.encode_scan(seq, t_us, dur, rail, 0, raw))
         seq += 1
+        if mode in MODES and now - last_health >= 1.0:
+            last_health = now
+            osr, _, n, scan_us = MODES[mode]
+            conv = int(1e6 / scan_us * n)
+            out(ef.encode_health(ef.Health(1, mode, 380 if mode == 2 else 250, 30, 180, 160, 17,
+                                           4, conv, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1000)))
+            n_health += 1
 
 
 if __name__ == "__main__":
