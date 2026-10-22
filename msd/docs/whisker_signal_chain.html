@@ -451,6 +451,27 @@ tr.mark td { background: color-mix(in srgb, var(--ref) 16%, transparent); font-w
   </section>
 
   <section class="card adc">
+    <h2>Noise: where the 6–7 Hz tone came from (bench, 2026-10-21/22)</h2>
+    <p>A ~0.2–0.3 mV tone at a wandering 6–7 Hz showed on the channels with a whisker or test resistor. Raw burst captures (one mux select held, every conversion kept, 3125 / 3906 / 1953 SPS from three CLKINs) put its true frequency at <b>845 Hz</b>: the only frequency consistent with all three rates. 845 Hz lies just above 11 × 76.2 Hz, so the 76 Hz scan folds it to ~6.8 Hz, and a 0.5 % drift at the source moves the folded tone by several Hz.</p>
+    <div class="scroll"><table class="sumt">
+      <thead><tr><th>burst, select 2</th><th>CH2 (W2_A slot)</th><th>845 Hz</th><th>CH3 (W6_A slot)</th><th>845 Hz</th></tr></thead>
+      <tbody>
+        <tr><td>1</td><td>W2 sensor, plugged in directly</td><td>0.03 mV</td><td>W6 sensor on braided cable with inline 22 Ω</td><td><b>0.31 mV</b></td></tr>
+        <tr><td>2 (cable swapped)</td><td>W2 on that cable</td><td><b>0.31 mV</b></td><td>W6 plugged in directly</td><td>0.03 mV</td></tr>
+        <tr><td>3</td><td>W2 on another cable, no resistors</td><td>0.025 mV</td><td>W6 plugged in directly</td><td>0.03 mV</td></tr>
+        <tr><td>4</td><td>330 + 22 Ω, DC − REF = 30 mV</td><td>0.020 mV</td><td>369 Ω, DC − REF = 400 mV</td><td>0.252 mV</td></tr>
+      </tbody>
+    </table></div>
+    <ul>
+      <li><b>Mechanism.</b> The 845 Hz is ripple on the board 3V3 (~2.1 mV). Both bridge arms (gauge/R3 and R1/R2) are fed from 3V3, so ripple cancels in a balanced bridge and passes in proportion to the imbalance: tone ≈ (OUT − REF) × ripple / 3.3 V, i.e. 0.63–0.66 mV per volt of offset (burst 4, both points on one line through REF). The inline 22 Ω resistors unbalanced their bridges by ~0.4 V; that is why the tone followed the cable. Hands on the cable changed nothing (conducted, not picked up).</li>
+      <li><b>Consequence.</b> Keep gauges near balance at rest (drop the inline 22 Ω where the gauge alone sits near 352 Ω): a balanced channel carries ~0.02 mV of it. Under bending the ripple scales with the signal (~0.07 % of the swing), which is harmless.</li>
+      <li><b>Left over</b> (equal on all channels, ~0.02–0.05 mV): lines at 125 Hz and harmonics, 437.5, 500 and 1000 Hz, likely ESP32 activity on the ground. The 845 Hz source on 3V3 (MD1 or a load on the rail) is not identified; it needs a scope.</li>
+      <li><b>Wiring</b> matters as much: one ground wire, twisted with CLKIN, is the only configuration with CRC 0 (see the header map). CRC retries jitter the select timing and scramble the phase of folded tones between channels.</li>
+    </ul>
+    <p class="src">Captures with <code>msd/esp32/burst_spectrum.py capture --track 845</code> (firmware <code>r</code> command).</p>
+  </section>
+
+  <section class="card adc">
     <h2>How the ADC turns P − N into a signed number</h2>
     <p>The ADS131M04 is a delta-sigma converter. It never takes an absolute value and flips the sign: it continuously balances the input difference against ±1.2 V, and the sign falls out of that balance.</p>
     <div class="scroll"><svg class="dsm" viewBox="0 0 760 230" role="img" aria-label="Delta-sigma modulator loop: the input difference minus the ±1.2 V feedback is integrated, a comparator makes one bit per clock, the bit selects the feedback, and a sinc3 filter averages the bits into a 24-bit result">
