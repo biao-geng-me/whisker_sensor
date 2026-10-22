@@ -8,20 +8,28 @@ Two layouts:
 - Grid: one tile per sensor (4x4 for 16 whiskers), X linked, Y auto-ranged
   per tile.
 
-Double-clicking a tile (grid) or near a whisker's trace (stacked) shows that
-whisker alone; double-click again, Esc or "All whiskers" goes back.
+The grid is the default. Double-clicking a tile (grid) or near a whisker's
+trace (stacked) shows that whisker alone; double-click again, Esc or "All
+whiskers" goes back.
 
-Toolbar: box zoom, reset view, probe. Zooming or panning stops the plot from
-following the newest data until Reset view. Pause and Re-zero mirror the
+Time (X) is shared by all plots (grid tiles are X-linked). Y is per tile,
+unless Link Y gives all tiles one Y range. While live, X shows the newest
+``span`` seconds (default: the whole buffer). Zooming time keeps it live (the
+right edge stays at "now"); panning or mouse zoom / pan leaves live. Live (L)
+returns to live keeping the zoom (time span, Y ranges, gain); Resume does the
+same. Reset view (R) also restores the full span, auto Y and gain 1.
+
+Toolbar: grid, link Y, box zoom, reset view, live, probe. Pause and Re-zero mirror the
 control panel's Pause and Reset: the view only emits ``pauseToggled`` /
 ``resetRequested``, and the control panel pushes its state back with
 ``set_paused`` / ``set_stream_controls_enabled``.
 
-Keys (window-wide): Space pause/resume (resuming also resets the view),
-Z zoom box on/off, + / = / - zoom in / out (x1.25 about the view centre),
-arrow keys pan (in the grid, Up/Down pan the tile last under the cursor,
-which gets an orange frame), R reset view, 0 re-zero, Esc back to all
-whiskers.
+Keys (window-wide; see ``_KEYS_HELP``): = / - zoom time, + / _ zoom Y of the
+framed tile (the one last under the mouse; all tiles if none), . / , zoom Y of
+all tiles; in the stacked layout the Y keys change the trace gain instead.
+Arrows pan (Up/Down: the framed tile). The punctuation keys are matched by the
+character typed (an application event filter), not as QAction shortcuts: Qt
+can see Shift+= as both "+" and "Shift++" and then fire neither.
 
 The status bar's right side shows the stream status line pushed by the
 control panel (``set_stream_status``); its left side keeps transient messages
@@ -48,9 +56,10 @@ import math
 import time
 
 import numpy as np
-from PyQt6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QEvent, QPointF, QRectF, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction, QFont, QFontMetricsF, QKeySequence, QPainter, QPixmapCache
-from PyQt6.QtWidgets import QGraphicsRectItem, QLabel, QStackedWidget, QToolBar
+from PyQt6.QtWidgets import (QApplication, QGraphicsRectItem, QLabel, QMessageBox,
+                             QStackedWidget, QToolBar, QWidget)
 
 import pyqtgraph as pg
 
@@ -71,6 +80,24 @@ _ZOOM_STEP = 1.25               # +/- keys
 _PAN_STEP = 0.1                 # arrow keys: fraction of the visible span
 _FRAME_S = 1 / 30               # redraw at most ~30 times a second
 _FOCUS_PEN = pg.mkPen((255, 150, 0), width=2)
+_MIN_SPAN_S = 0.05
+_NOT_LIVE = "Not live: L goes live at this zoom, R resets the view"
+_KEYS_HELP = """\
+<table cellspacing=4>
+<tr><td><b>Space</b></td><td>pause / resume (resume goes live at the current zoom)</td></tr>
+<tr><td><b>L</b></td><td>live: follow the newest data, keep the zoom (also resumes)</td></tr>
+<tr><td><b>R</b></td><td>reset view: whole buffer, auto Y, gain 1, live</td></tr>
+<tr><td><b>= &nbsp;-</b></td><td>zoom time in / out (all plots; stays live). Keypad + - too</td></tr>
+<tr><td><b>+ &nbsp;_</b></td><td>zoom Y in / out: framed tile (stacked: trace gain)</td></tr>
+<tr><td><b>. &nbsp;,</b></td><td>zoom Y in / out: all tiles (stacked: trace gain)</td></tr>
+<tr><td><b>arrows</b></td><td>pan; Left / Right all plots (leaves live), Up / Down the framed tile</td></tr>
+<tr><td><b>Y</b></td><td>link Y: all grid tiles share one Y range</td></tr>
+<tr><td><b>Z</b></td><td>zoom box mode (drag a rectangle) / pan mode</td></tr>
+<tr><td><b>0</b></td><td>re-zero (re-capture V0)</td></tr>
+<tr><td><b>Esc</b></td><td>back to all whiskers</td></tr>
+</table>
+The framed tile is the one last under the mouse. Mouse: wheel zooms time and that
+tile's Y, drag pans, double-click shows one whisker / goes back."""
 _PIXMAP_CACHE_KB = 128 * 1024
 
 
@@ -161,7 +188,10 @@ class LineView(ViewWindow):
 
         self._nsensor = int(nsensor)
         self._nch = int(nch)
-        self._follow = True                       # keep X pinned to the newest data
+        self._follow = True                       # live: keep X pinned to the newest data
+        self._span: float | None = None            # live time span; None = the whole buffer
+        self._gain = 1.0                           # stacked layout: trace height
+        self._link_auto = True                     # Link Y: auto-range the shared Y
         self._x_range: tuple[float, float] | None = None
         self._single: int | None = None            # the maximized sensor, if any
         self._t = np.empty(0)                      # last data shown (copied), for the probe
@@ -264,7 +294,7 @@ class LineView(ViewWindow):
         self.statusBar().addPermanentWidget(self._stream_status)
         self.statusBar().messageChanged.connect(self._fit_stream_status)
         self.set_value_format("", None)
-        self._reset_view()
+        self._act_grid.setChecked(True)            # grid by default (this also resets the view)
 
     # ------------------------------------------------------------------
     # toolbar
@@ -285,22 +315,23 @@ class LineView(ViewWindow):
         self._act_zoom.toggled.connect(self._on_zoom_toggled)
 
         act_reset = QAction("Reset view", self)
-        act_reset.setToolTip("Full range, and follow the newest data again [R]. "
-                             "Arrow keys pan; in the grid, Up/Down pan the framed tile.")
+        act_reset.setToolTip("Whole buffer, auto Y, gain 1, and live again [R]")
         act_reset.setShortcut(QKeySequence("R"))
         act_reset.triggered.connect(self._reset_view)
 
-        # "=" too, so zoom-in needs no Shift; the keypad keys carry KeypadModifier
-        act_zoom_in = QAction("+", self)
-        act_zoom_in.setToolTip("Zoom in x1.25 about the view centre [+ or =]")
-        act_zoom_in.setShortcuts([QKeySequence("+"), QKeySequence("="),
-                                  QKeySequence(Qt.KeyboardModifier.KeypadModifier | Qt.Key.Key_Plus)])
-        act_zoom_in.triggered.connect(lambda: self._zoom_by(1 / _ZOOM_STEP))
-        act_zoom_out = QAction("\u2212", self)
-        act_zoom_out.setToolTip("Zoom out x1.25 about the view centre [-]")
-        act_zoom_out.setShortcuts([QKeySequence("-"),
-                                   QKeySequence(Qt.KeyboardModifier.KeypadModifier | Qt.Key.Key_Minus)])
-        act_zoom_out.triggered.connect(lambda: self._zoom_by(_ZOOM_STEP))
+        act_live = QAction("Live", self)
+        act_live.setToolTip("Follow the newest data at the current zoom; also resumes [L]")
+        act_live.setShortcut(QKeySequence("L"))
+        act_live.triggered.connect(self._on_live)
+
+        self._act_link_y = QAction("Link Y", self, checkable=True)
+        self._act_link_y.setToolTip("Grid: all tiles share one Y range [Y]")
+        self._act_link_y.setShortcut(QKeySequence("Y"))
+        self._act_link_y.toggled.connect(self._on_link_y)
+
+        act_keys = QAction("Keys", self)
+        act_keys.setToolTip("Keyboard and mouse shortcuts")
+        act_keys.triggered.connect(self._show_keys)
 
         self._act_probe = QAction("Probe", self, checkable=True)
         self._act_probe.setToolTip("Show channel values under the cursor")
@@ -323,12 +354,14 @@ class LineView(ViewWindow):
         self._act_rezero.setShortcut(QKeySequence("0"))
         self._act_rezero.triggered.connect(self.resetRequested)
 
-        for a in (self._act_grid, self._act_zoom, act_zoom_in, act_zoom_out, act_reset,
+        for a in (self._act_grid, self._act_link_y, self._act_zoom, act_reset, act_live,
                   self._act_probe, self._act_all):
             tb.addAction(a)
         tb.addSeparator()
         tb.addAction(self._act_pause)
         tb.addAction(self._act_rezero)
+        tb.addSeparator()
+        tb.addAction(act_keys)
         # Shortcuts are window-wide (QAction's default WindowShortcut context), so they
         # work whichever plot has focus. A shortcut beats a focused button's own Space
         # handling; the toolbar buttons also take no focus, so Space never clicks one.
@@ -357,14 +390,14 @@ class LineView(ViewWindow):
 
     def set_paused(self, on: bool) -> None:
         """Show the pause state without emitting ``pauseToggled``. Resuming also
-        resets the view (full range, follow the newest data)."""
+        goes live at the current zoom."""
         self._act_pause.blockSignals(True)
         self._act_pause.setChecked(on)
         self._act_pause.blockSignals(False)
         self._act_pause.setText("Resume" if on else "Pause")
-        if self._paused and not on:
-            self._reset_view()
-        self._paused = on
+        was_paused, self._paused = self._paused, on
+        if was_paused and not on:
+            self._go_live()
 
     def set_stream_status(self, text: str) -> None:
         """The control panel's stream status line, shown on the right of the status bar."""
@@ -454,34 +487,117 @@ class LineView(ViewWindow):
         else:
             self._current_x_plot().setXRange(*x, padding=0)
 
-    def _zoom_by(self, f: float) -> None:
-        """Scale the shown plots' X and Y ranges by ``f`` about their view centre."""
-        page = self._pages.currentIndex()
-        if page == _GRID:
-            self._tiles[0].getViewBox().scaleBy(x=f)      # the other tiles are X-linked
-            for p in self._tiles:
-                p.getViewBox().scaleBy(y=f)
+    # ------------------------------------------------------------------
+    # keyboard zoom / pan / live
+    # ------------------------------------------------------------------
+
+    def eventFilter(self, obj, ev) -> bool:  # noqa: N802 — Qt naming
+        """Zoom keys by the character typed, anywhere in this window."""
+        if ev.type() != QEvent.Type.KeyPress or not isinstance(obj, QWidget) or obj.window() is not self:
+            return False
+        text = ev.text()
+        mods = ev.modifiers() & ~(Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.KeypadModifier)
+        if mods or not text:
+            return False
+        if ev.modifiers() & Qt.KeyboardModifier.KeypadModifier:
+            action = {"+": lambda: self._zoom_x(1 / _ZOOM_STEP), "-": lambda: self._zoom_x(_ZOOM_STEP)}.get(text)
         else:
-            self._current_x_plot().getViewBox().scaleBy(x=f, y=f)
-        self._on_manual_range()
+            action = {
+                "=": lambda: self._zoom_x(1 / _ZOOM_STEP), "-": lambda: self._zoom_x(_ZOOM_STEP),
+                "+": lambda: self._zoom_y(1 / _ZOOM_STEP, False), "_": lambda: self._zoom_y(_ZOOM_STEP, False),
+                ".": lambda: self._zoom_y(1 / _ZOOM_STEP, True), ",": lambda: self._zoom_y(_ZOOM_STEP, True),
+            }.get(text)
+        if action is None:
+            return False
+        action()
+        return True
+
+    def _full_span(self) -> float | None:
+        return None if self._x_range is None else self._x_range[1] - self._x_range[0]
+
+    def _zoom_x(self, f: float) -> None:
+        """Time zoom, all plots. Live: the right edge stays at the newest sample."""
+        full = self._full_span()
+        if self._follow and full:
+            span = (self._span or full) * f
+            self._span = None if span >= full else max(span, _MIN_SPAN_S)
+            self._render()
+        else:
+            self._current_x_plot().getViewBox().scaleBy(x=f)
+            self._on_manual_range()
+
+    def _y_targets(self, all_tiles: bool) -> list[pg.PlotItem]:
+        """Grid plots a Y key acts on: the framed tile, or all (one if Y is linked)."""
+        if self._act_link_y.isChecked():
+            self._link_auto = False
+            return [self._tiles[0]]
+        if all_tiles or self._focus_tile is None:
+            return self._tiles
+        return [self._tiles[self._focus_tile]]
+
+    def _zoom_y(self, f: float, all_tiles: bool) -> None:
+        """Y zoom about the view centre; in the stacked layout, the trace gain."""
+        page = self._pages.currentIndex()
+        if page == _STACKED:
+            self._gain /= f
+            self._stacked.setLabel("left", "Whisker" if abs(self._gain - 1) < 1e-9
+                                   else f"Whisker (gain x{self._gain:.3g})")
+            self._render()
+            return
+        plots = self._y_targets(all_tiles) if page == _GRID else [self._single_plot.getPlotItem()]
+        for p in plots:
+            p.getViewBox().scaleBy(y=f)
 
     def _pan(self, dx: float, dy: float) -> None:
-        """Shift the view by ``dx`` / ``dy`` visible spans. In the grid, X moves all
-        tiles (linked) and Y the focused tile (all tiles if none has been hovered)."""
+        """Shift the view by ``dx`` / ``dy`` visible spans. X moves all plots and
+        leaves live; Y moves the framed tile (all if none) and keeps live."""
         def shift(p: pg.PlotItem, x: bool, y: bool) -> None:
             vb = p.getViewBox()
             (x0, x1), (y0, y1) = vb.viewRange()
             vb.translateBy(x=dx * (x1 - x0) if x else None, y=dy * (y1 - y0) if y else None)
-        if self._pages.currentIndex() == _GRID:
-            if dx:
-                shift(self._tiles[0], True, False)
-            if dy:
-                tiles = self._tiles if self._focus_tile is None else [self._tiles[self._focus_tile]]
-                for p in tiles:
-                    shift(p, False, True)
+        page = self._pages.currentIndex()
+        if dx:
+            shift(self._current_x_plot(), True, False)
+        if dy:
+            plots = self._y_targets(False) if page == _GRID else [self._current_x_plot()]
+            for p in plots:
+                shift(p, False, True)
+        if dx:
+            self._on_manual_range()
+
+    def _on_live(self) -> None:
+        if self._paused:
+            self._act_pause.setChecked(False)     # -> control panel -> set_paused -> _go_live
         else:
-            shift(self._current_x_plot(), bool(dx), bool(dy))
-        self._on_manual_range()
+            self._go_live()
+
+    def _go_live(self) -> None:
+        """Follow the newest data again, keeping the visible time span and Y ranges."""
+        full = self._full_span()
+        x0, x1 = self._visible_x_range()
+        if not self._follow and full:
+            self._span = None if x1 - x0 >= full else max(x1 - x0, _MIN_SPAN_S)
+        self._follow = True
+        if self.statusBar().currentMessage() == _NOT_LIVE:
+            self.statusBar().clearMessage()
+        self._render(labels=True)
+
+    def _on_link_y(self, on: bool) -> None:
+        for p in self._tiles[1:]:
+            p.setYLink(self._tiles[0] if on else None)
+        for p in self._tiles:
+            if on:
+                p.disableAutoRange(axis="y")
+            else:
+                p.enableAutoRange(axis="y")
+        self._link_auto = True
+        self._render()
+
+    def _show_keys(self) -> None:
+        box = QMessageBox(QMessageBox.Icon.NoIcon, "Line view keys", _KEYS_HELP, parent=self)
+        box.setTextFormat(Qt.TextFormat.RichText)
+        box.setModal(False)
+        box.show()
 
     def _set_focus_tile(self, sensor: int | None) -> None:
         if sensor == self._focus_tile:
@@ -511,23 +627,29 @@ class LineView(ViewWindow):
         for p in self._all_plots():
             p.getViewBox().setMouseMode(mode)
         msg = "Zoom box: drag a rectangle to zoom" if on else "Pan: drag to move the view"
-        if not self._follow:
-            msg += "; not following live data — Reset view to resume"
-        self.statusBar().showMessage(msg)
+        self.statusBar().showMessage(msg if self._follow else f"{msg}. {_NOT_LIVE}")
 
     def _on_manual_range(self, *_args) -> None:
+        """A mouse zoom / pan, or a key that moves time: leave live."""
+        self._link_auto = False
         if self._follow:
             self._follow = False
-            self.statusBar().showMessage("Not following live data — Reset view to resume")
+            self.statusBar().showMessage(_NOT_LIVE)
         # re-decimate for the new zoom (matters while paused); after the range lands
         self._request_render()
 
     def _reset_view(self) -> None:
         self._follow = True
+        self._span = None
+        self._gain = 1.0
+        self._link_auto = True
+        self._stacked.setLabel("left", "Whisker")
         self.statusBar().clearMessage()
         self._stacked.setYRange(-0.5, self._nsensor)
+        linked = self._act_link_y.isChecked()
         for p in (*self._tiles, self._single_plot.getPlotItem()):
-            p.enableAutoRange(axis="y")
+            if not (linked and p in self._tiles):
+                p.enableAutoRange(axis="y")
         self._render(labels=True)
 
     def _current_x_plot(self) -> pg.PlotItem:
@@ -539,9 +661,12 @@ class LineView(ViewWindow):
         return self._single_plot.getPlotItem()
 
     def _apply_x_range(self) -> None:
+        """Live: the newest ``span`` seconds (the whole buffer window if None)."""
         if self._x_range is None:
             return
         x0, x1 = self._x_range
+        if self._span is not None:
+            x0 = x1 - self._span
         self._current_x_plot().setXRange(x0, x1, padding=0)
 
     # ------------------------------------------------------------------
@@ -552,8 +677,7 @@ class LineView(ViewWindow):
         for line in self._probe_lines:
             line.setVisible(on)
         if not on:
-            self.statusBar().showMessage(
-                "" if self._follow else "Not following live data — Reset view to resume")
+            self.statusBar().showMessage("" if self._follow else _NOT_LIVE)
 
     def _on_mouse_moved(self, pos) -> None:
         if self._pages.currentIndex() == _GRID:
@@ -660,15 +784,19 @@ class LineView(ViewWindow):
 
     def showEvent(self, event) -> None:  # noqa: N802 — Qt naming
         super().showEvent(event)
+        # the zoom-key filter (eventFilter) is app-wide, so only while shown
+        QApplication.instance().installEventFilter(self)
         self._request_render()
+
+    def hideEvent(self, event) -> None:  # noqa: N802 — Qt naming
+        QApplication.instance().removeEventFilter(self)
+        super().hideEvent(event)
 
     def _decimated(self, plot: pg.PlotItem, cols: slice) -> tuple[np.ndarray, np.ndarray]:
         """``(t, (sig - v0) * scale)`` for ``cols``, ~2 points per pixel of ``plot``."""
         vb = plot.getViewBox()
-        n_vis = self._t.size
-        if not self._follow:
-            x0, x1 = vb.viewRange()[0]
-            n_vis = int(np.searchsorted(self._t, x1) - np.searchsorted(self._t, x0))
+        x0, x1 = vb.viewRange()[0]                # already the live window when following
+        n_vis = int(np.searchsorted(self._t, x1) - np.searchsorted(self._t, x0))
         k = max(1, n_vis // max(1, int(vb.width())))
         t, y = _peak_decimate(self._t, self._sig[:, cols], k)
         return t, (y - self._v0[cols]) * self._scale
@@ -680,7 +808,7 @@ class LineView(ViewWindow):
         page = self._pages.currentIndex()
         if page == _STACKED:
             t, y = self._decimated(self._stacked.getPlotItem(), slice(None))
-            y = (y + self._offsets).T.copy()      # contiguous rows, one per curve
+            y = (y * self._gain + self._offsets).T.copy()      # contiguous rows, one per curve
             finite = bool(np.isfinite(y).all())
             for c, curve in enumerate(self._stacked_curves):
                 curve.setData(t, y[c], skipFiniteCheck=finite)
@@ -690,11 +818,25 @@ class LineView(ViewWindow):
             finite = bool(np.isfinite(y).all())
             for c, curve in enumerate(self._grid_curves):
                 curve.setData(t, y[c], skipFiniteCheck=finite)
+            if self._act_link_y.isChecked() and self._link_auto:
+                self._fit_linked_y(y)
         elif self._single is not None:
             c0 = 2 * self._single
             t, y = self._decimated(self._single_plot.getPlotItem(), slice(c0, min(c0 + 2, self._nch)))
             for g in range(y.shape[1]):
                 self._single_curves[g].setData(t, y[:, g])
+
+    def _fit_linked_y(self, y: np.ndarray) -> None:
+        """Link Y, auto: one Y range over all tiles' data (pyqtgraph's per-tile
+        auto-range would fight over the linked range)."""
+        if not np.isfinite(y).any():
+            return
+        lo, hi = float(np.nanmin(y)), float(np.nanmax(y))
+        pad = 0.05 * (hi - lo) if hi > lo else 0.5
+        lo, hi = lo - pad, hi + pad
+        y0, y1 = self._tiles[0].getViewBox().viewRange()[1]
+        if abs(y0 - lo) + abs(y1 - hi) > 1e-3 * (hi - lo):
+            self._tiles[0].setYRange(lo, hi, padding=0)
 
     # ------------------------------------------------------------------
     # absolute-value labels
