@@ -1,85 +1,36 @@
 """Multi-channel time-series view — port of ``wavi/line_view.m``.
 
-Each sensor uses two channels, gauge A then gauge B (red / blue, with a legend).
-Two layouts:
+Layouts, keys, Link Y, probe, pause and the redraw scheme are shared with the
+Spectrum window: see ``whisker_plots.WhiskerPlotsView``. This module adds the
+time axis.
 
-- Stacked: the two channels of sensor ``i`` are plotted at Y-offset ``i``, so
-  all nsensor are visible at once on one axis.
-- Grid: one tile per sensor (4x4 for 16 whiskers), X linked, Y auto-ranged
-  per tile.
-
-The grid is the default. Double-clicking a tile (grid) or near a whisker's
-trace (stacked) shows that whisker alone; double-click again, Esc or "All
-whiskers" goes back.
-
-Time (X) is shared by all plots (grid tiles are X-linked). Y is per tile,
-unless Link Y gives all tiles one Y range. While live, X shows the newest
-``span`` seconds (default: the whole buffer). Zooming time keeps it live (the
-right edge stays at "now"); panning or mouse zoom / pan leaves live. Live (L)
-returns to live keeping the zoom (time span, Y ranges, gain); Resume does the
-same. Reset view (R) also restores the full span, auto Y and gain 1.
-
-Toolbar: grid, link Y, box zoom, reset view, live, probe. Pause and Re-zero mirror the
-control panel's Pause and Reset: the view only emits ``pauseToggled`` /
-``resetRequested``, and the control panel pushes its state back with
-``set_paused`` / ``set_stream_controls_enabled``.
-
-Keys (window-wide; see ``_KEYS_HELP``): = / - zoom time, + / _ zoom Y of the
-framed tile (the one last under the mouse; all tiles if none), . / , zoom Y of
-all tiles; in the stacked layout the Y keys change the trace gain instead.
-Arrows pan (Up/Down: the framed tile). The punctuation keys are matched by the
-character typed (an application event filter), not as QAction shortcuts: Qt
-can see Shift+= as both "+" and "Shift++" and then fire neither.
-
-The status bar's right side shows the stream status line pushed by the
-control panel (``set_stream_status``); its left side keeps transient messages
-(probe readout, "not following").
+Time (X) is shared by all plots. While live, X shows the newest ``span``
+seconds (default: the whole buffer). Zooming time (= / -) keeps it live (the
+right edge stays at "now"); panning time or mouse zoom / pan leaves live.
+Live (L) returns to live keeping the zoom (time span, Y ranges, gain); Resume
+does the same. Reset view (R) also restores the full span, auto Y and gain 1.
+Re-zero mirrors the control panel's Reset (re-capture V0).
 
 Every plot also shows the current absolute value of each gauge (raw, before V0
 and the display scale; mean of the last 0.1 s) in its corner, or on the right
-of each row in the stacked layout. Labels refresh at ~7 Hz, not every frame.
+of each row in the stacked layout.
 
 Redraw cost: curves are min/max decimated to about two points per pixel column
 (one vectorized pass over all channels) and drawn with 1 px pens; only major
 grid lines are drawn. These dominate the paint time with 30 s of 32 channels.
-New data and mouse-driven range changes only mark the view dirty; it is
-redrawn from a timer at most ~30 times a second, and not at all while hidden.
-After a redraw the scene's deferred range / auto-range work is done at once,
-so the paint that follows changes nothing and Qt paints once, not twice.
-Axes (which also draw the grid lines across the plot) are cached as pixmaps,
-so an axis whose ticks did not move is blitted instead of re-rendered.
 """
 
 from __future__ import annotations
 
-import math
-import time
-
 import numpy as np
-from PyQt6.QtCore import QEvent, QPointF, QRectF, QSize, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QAction, QFont, QFontMetricsF, QKeySequence, QPainter, QPixmapCache
-from PyQt6.QtWidgets import (QApplication, QGraphicsRectItem, QLabel, QMessageBox,
-                             QStackedWidget, QToolBar, QWidget)
+from PyQt6.QtGui import QAction, QKeySequence
 
 import pyqtgraph as pg
 
-from wavi_py.views.base import ViewWindow
+from wavi_py.views.whisker_plots import WhiskerPlotsView, gauge_html
 
 
-_RED = (220, 40, 40)
-_BLUE = (40, 80, 220)
-_PROBE_PEN = pg.mkPen((90, 90, 90), width=1, style=pg.QtCore.Qt.PenStyle.DashLine)
-_GAUGE_NAMES = ("A", "B")
-_HTML_COLOR = ("#dc2828", "#2850dc")
-_PEN_W = 1                      # stacked + grid: wider pens cost 3-6x the paint time
-_SINGLE_PEN_W = 2
-_LABEL_PERIOD_S = 0.15          # absolute-value labels refresh at ~7 Hz
-_LABEL_AVG_S = 0.1              # ...showing the mean of the last 0.1 s
-_LABEL_FILL = pg.mkBrush(255, 255, 255, 225)
-_ZOOM_STEP = 1.25               # +/- keys
-_PAN_STEP = 0.1                 # arrow keys: fraction of the visible span
-_FRAME_S = 1 / 30               # redraw at most ~30 times a second
-_FOCUS_PEN = pg.mkPen((255, 150, 0), width=2)
+_LABEL_AVG_S = 0.1              # absolute-value labels: mean of the last 0.1 s
 _MIN_SPAN_S = 0.05
 _NOT_LIVE = "Not live: L goes live at this zoom, R resets the view"
 _KEYS_HELP = """\
@@ -98,31 +49,6 @@ _KEYS_HELP = """\
 </table>
 The framed tile is the one last under the mouse. Mouse: wheel zooms time and that
 tile's Y, drag pans, double-click shows one whisker / goes back."""
-_PIXMAP_CACHE_KB = 128 * 1024
-
-
-def _add_gauge_legend(plot: pg.PlotItem) -> None:
-    """A / B legend in the top-right corner; curves named afterwards join it."""
-    plot.addLegend(offset=(-10, 10), labelTextColor="k",
-                   brush=pg.mkBrush(255, 255, 255, 200), pen=pg.mkPen(180, 180, 180))
-
-
-def _show_grid(plot: pg.PlotItem) -> None:
-    """Major grid lines only: the minor ones cost as much to paint as the data."""
-    plot.showGrid(x=True, y=True, alpha=0.2)
-    for ax in ("left", "bottom"):
-        plot.getAxis(ax).setStyle(maxTickLevel=0)
-        _cache(plot.getAxis(ax))
-
-
-def _cache(item: pg.GraphicsObject) -> None:
-    """Blit ``item`` from a pixmap unless it changed. Axes with grid lines span the
-    whole plot, so every curve update would re-render them otherwise."""
-    item.setCacheMode(item.CacheMode.DeviceCoordinateCache)
-    # those pixmaps are plot-sized (~20 MB each on a 2x screen); the default 10 MB
-    # QPixmapCache would evict them every frame
-    if QPixmapCache.cacheLimit() < _PIXMAP_CACHE_KB:
-        QPixmapCache.setCacheLimit(_PIXMAP_CACHE_KB)
 
 
 def _peak_decimate(t: np.ndarray, y: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
@@ -152,365 +78,57 @@ def _peak_decimate(t: np.ndarray, y: np.ndarray, k: int) -> tuple[np.ndarray, np
     return td, yd
 
 
-def _value_label() -> pg.TextItem:
-    label = pg.TextItem(anchor=(0, 0), fill=_LABEL_FILL)
-    label.setZValue(100)
-    # text is only re-laid out at the label rate; blit it from a cache otherwise
-    label.textItem.setCacheMode(label.textItem.CacheMode.DeviceCoordinateCache)
-    return label
-
-
-_STACKED, _GRID, _SINGLE = 0, 1, 2              # pages of the QStackedWidget
-_TITLE = "Wavi - Line"
-
-
-class _ElidedLabel(QLabel):
-    """One line of text that shrinks to any width, dropping text from the left
-    (the error counters at the end of the status line are what matters)."""
-
-    def minimumSizeHint(self) -> QSize:  # noqa: N802 — Qt naming
-        return QSize(0, super().minimumSizeHint().height())
-
-    def paintEvent(self, event) -> None:  # noqa: N802 — Qt naming
-        r = self.contentsRect()
-        text = self.fontMetrics().elidedText(self.text(), Qt.TextElideMode.ElideLeft, r.width())
-        QPainter(self).drawText(r, int(self.alignment()), text)
-
-
-class LineView(ViewWindow):
-    pauseToggled = pyqtSignal(bool)
-    resetRequested = pyqtSignal()
+class LineView(WhiskerPlotsView):
+    TITLE = "Wavi - Line"
+    X_LABEL = ("Time", "s")
+    KEYS_HELP = _KEYS_HELP
+    VALUE_AXIS_LABEL = "absolute"
 
     def __init__(self, nsensor: int, nch: int, t_buffer_s: float = 30.0):
-        super().__init__()
-        self.setWindowTitle(_TITLE)
-        self.resize(900, 600)
-
-        self._nsensor = int(nsensor)
-        self._nch = int(nch)
-        self._follow = True                       # live: keep X pinned to the newest data
+        super().__init__(nsensor, nch)
+        self._follow = True                        # live: keep X pinned to the newest data
         self._span: float | None = None            # live time span; None = the whole buffer
-        self._gain = 1.0                           # stacked layout: trace height
-        self._link_auto = True                     # Link Y: auto-range the shared Y
         self._x_range: tuple[float, float] | None = None
-        self._single: int | None = None            # the maximized sensor, if any
         self._t = np.empty(0)                      # last data shown (copied), for the probe
         self._sig = np.empty((0, self._nch), dtype=np.float32)   # raw, before V0 / scale
         self._v0 = np.zeros(self._nch, dtype=np.float32)
         self._scale = 1.0
-        self._offsets = (np.arange(self._nch) // 2).astype(np.float32)   # stacked Y offsets
         self._units = ""                           # absolute-value labels; see set_value_format
         self._open_level: float | None = None
-        self._labels_t = 0.0
-        self._paused = False
-        self._focus_tile: int | None = None        # grid: target of Up/Down, framed
-        self._last_render = 0.0
-        self._render_timer = QTimer(self)
-        self._render_timer.setSingleShot(True)
-        self._render_timer.timeout.connect(self._render)
-
-        # --- stacked: one axis, sensor i at Y-offset i
-        self._stacked = pg.PlotWidget()
-        self._stacked.setBackground("w")
-        self._stacked.setLabel("bottom", "Time", units="s")
-        self._stacked.setLabel("left", "Whisker")
-        self._stacked.getAxis("left").setTicks([[(s, f"W{s + 1}") for s in range(self._nsensor)]])
-        _show_grid(self._stacked.getPlotItem())
-        _add_gauge_legend(self._stacked.getPlotItem())
-        self._stacked_curves: list[pg.PlotDataItem] = []
-        for c in range(self._nch):
-            color = _RED if (c % 2) == 0 else _BLUE
-            name = _GAUGE_NAMES[c] if c < 2 else None
-            self._stacked_curves.append(self._stacked.plot(pen=pg.mkPen(color=color, width=_PEN_W), name=name))
-        # absolute values: a column right of the axis, one label per whisker row
-        self._stacked.showAxis("right")
-        self._value_axis = self._stacked.getAxis("right")
-        self._value_axis.setStyle(showValues=False, tickLength=0)
-        self._value_axis.setGrid(False)        # showGrid gave it a second copy of the left grid
-        _cache(self._value_axis)
-        self._stacked_labels = [_value_label() for _ in range(self._nsensor)]
-        for label in self._stacked_labels:
-            label.setAnchor((0, 0.5))
-            label.setParentItem(self._value_axis)
-        vb = self._stacked.getPlotItem().getViewBox()
-        vb.sigYRangeChanged.connect(self._place_stacked_labels)
-        vb.sigResized.connect(self._place_stacked_labels)
-
-        # --- grid: one tile per sensor
-        self._grid = pg.GraphicsLayoutWidget()
-        self._grid.setBackground("w")
-        ncol = math.ceil(math.sqrt(self._nsensor))
-        self._tiles: list[pg.PlotItem] = []
-        self._grid_curves: list[pg.PlotDataItem] = []
-        for s in range(self._nsensor):
-            p = self._grid.addPlot(row=s // ncol, col=s % ncol, title=f"W{s + 1}")
-            _show_grid(p)
-            if self._tiles:
-                p.setXLink(self._tiles[0])
-            if not self._tiles:
-                _add_gauge_legend(p)
-            self._tiles.append(p)
-            for g in range(2):
-                color = _RED if g == 0 else _BLUE
-                name = _GAUGE_NAMES[g] if s == 0 else None
-                self._grid_curves.append(p.plot(pen=pg.mkPen(color=color, width=_PEN_W), name=name))
-        self._tile_labels = [self._corner_label(p) for p in self._tiles]
-        self._focus_frames = [self._frame(p) for p in self._tiles]
-
-        # --- single: one sensor filling the window (double-click to enter)
-        self._single_plot = pg.PlotWidget()
-        self._single_plot.setBackground("w")
-        self._single_plot.setLabel("bottom", "Time", units="s")
-        _show_grid(self._single_plot.getPlotItem())
-        _add_gauge_legend(self._single_plot.getPlotItem())
-        self._single_curves = [
-            self._single_plot.plot(pen=pg.mkPen(color=color, width=_SINGLE_PEN_W), name=name)
-            for color, name in ((_RED, "A"), (_BLUE, "B"))]
-        self._single_label = self._corner_label(self._single_plot.getPlotItem())
-
-        self._pages = QStackedWidget()
-        self._pages.addWidget(self._stacked)
-        self._pages.addWidget(self._grid)
-        self._pages.addWidget(self._single_plot)
-        self.setCentralWidget(self._pages)
-
-        # --- probe: a vertical line per plot plus a status-bar readout
-        self._probe_lines: list[pg.InfiniteLine] = []
-        for p in self._all_plots():
-            line = pg.InfiniteLine(angle=90, movable=False, pen=_PROBE_PEN)
-            line.setVisible(False)
-            p.addItem(line, ignoreBounds=True)
-            self._probe_lines.append(line)
-        for scene in (self._stacked.scene(), self._grid.scene(), self._single_plot.scene()):
-            scene.sigMouseMoved.connect(self._on_mouse_moved)
-            scene.sigMouseClicked.connect(self._on_mouse_clicked)
-
-        for p in self._all_plots():
-            p.getViewBox().sigRangeChangedManually.connect(self._on_manual_range)
-
-        self._build_toolbar()
-        self._stream_status = _ElidedLabel()
-        self._stream_status.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.statusBar().addPermanentWidget(self._stream_status)
-        self.statusBar().messageChanged.connect(self._fit_stream_status)
+        self._vals = np.full(self._nch, np.nan)
         self.set_value_format("", None)
         self._act_grid.setChecked(True)            # grid by default (this also resets the view)
 
     # ------------------------------------------------------------------
-    # toolbar
+    # toolbar hooks
     # ------------------------------------------------------------------
 
-    def _build_toolbar(self) -> None:
-        tb = QToolBar("View")
-        tb.setMovable(False)
-        self.addToolBar(tb)
+    def _view_actions(self) -> list[QAction]:
+        if not hasattr(self, "_act_live"):
+            self._act_live = QAction("Live", self)
+            self._act_live.setToolTip("Follow the newest data at the current zoom; also resumes [L]")
+            self._act_live.setShortcut(QKeySequence("L"))
+            self._act_live.triggered.connect(self._on_live)
+            self._act_reset.setToolTip("Whole buffer, auto Y, gain 1, and live again [R]")
+        return [self._act_live]
 
-        self._act_grid = QAction("Grid", self, checkable=True)
-        self._act_grid.setToolTip("One tile per sensor instead of one stacked axis")
-        self._act_grid.toggled.connect(self._on_grid_toggled)
-
-        self._act_zoom = QAction("Zoom box", self, checkable=True)
-        self._act_zoom.setToolTip("Drag a box to zoom (off: drag pans). Wheel zooms either way. [Z]")
-        self._act_zoom.setShortcut(QKeySequence("Z"))
-        self._act_zoom.toggled.connect(self._on_zoom_toggled)
-
-        act_reset = QAction("Reset view", self)
-        act_reset.setToolTip("Whole buffer, auto Y, gain 1, and live again [R]")
-        act_reset.setShortcut(QKeySequence("R"))
-        act_reset.triggered.connect(self._reset_view)
-
-        act_live = QAction("Live", self)
-        act_live.setToolTip("Follow the newest data at the current zoom; also resumes [L]")
-        act_live.setShortcut(QKeySequence("L"))
-        act_live.triggered.connect(self._on_live)
-
-        self._act_link_y = QAction("Link Y", self, checkable=True)
-        self._act_link_y.setToolTip("Grid: all tiles share one Y range [Y]")
-        self._act_link_y.setShortcut(QKeySequence("Y"))
-        self._act_link_y.toggled.connect(self._on_link_y)
-
-        act_keys = QAction("Keys", self)
-        act_keys.setToolTip("Keyboard and mouse shortcuts")
-        act_keys.triggered.connect(self._show_keys)
-
-        self._act_probe = QAction("Probe", self, checkable=True)
-        self._act_probe.setToolTip("Show channel values under the cursor")
-        self._act_probe.toggled.connect(self._on_probe_toggled)
-
-        self._act_all = QAction("All whiskers", self)
-        self._act_all.setToolTip("Back to all whiskers (or double-click the plot) [Esc]")
-        self._act_all.setShortcut(QKeySequence("Esc"))
-        self._act_all.setEnabled(False)
-        self._act_all.triggered.connect(self._restore)
-
-        # Pause / Re-zero: the control panel owns the logic (see module docstring).
-        self._act_pause = QAction("Pause", self, checkable=True)
-        self._act_pause.setToolTip("Freeze the plots; data keeps flowing and recording continues [Space]")
-        self._act_pause.setShortcut(QKeySequence(Qt.Key.Key_Space))
-        self._act_pause.toggled.connect(self._on_pause_action)
-
-        self._act_rezero = QAction("Re-zero", self)
-        self._act_rezero.setToolTip("Re-capture the V0 baseline (the control panel's Reset) [0]")
-        self._act_rezero.setShortcut(QKeySequence("0"))
-        self._act_rezero.triggered.connect(self.resetRequested)
-
-        for a in (self._act_grid, self._act_link_y, self._act_zoom, act_reset, act_live,
-                  self._act_probe, self._act_all):
-            tb.addAction(a)
-        tb.addSeparator()
-        tb.addAction(self._act_pause)
-        tb.addAction(self._act_rezero)
-        tb.addSeparator()
-        tb.addAction(act_keys)
-        # Shortcuts are window-wide (QAction's default WindowShortcut context), so they
-        # work whichever plot has focus. A shortcut beats a focused button's own Space
-        # handling; the toolbar buttons also take no focus, so Space never clicks one.
-        for key, dx, dy in ((Qt.Key.Key_Left, -_PAN_STEP, 0), (Qt.Key.Key_Right, _PAN_STEP, 0),
-                            (Qt.Key.Key_Up, 0, _PAN_STEP), (Qt.Key.Key_Down, 0, -_PAN_STEP)):
-            act = QAction(self)
-            act.setShortcut(QKeySequence(key))
-            act.triggered.connect(lambda _=False, dx=dx, dy=dy: self._pan(dx, dy))
-            self.addAction(act)                    # window-wide, not on the toolbar
-        for a in tb.actions():
-            w = tb.widgetForAction(a)
-            if w is not None:
-                w.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.set_stream_controls_enabled(False)
-
-    def _all_plots(self) -> list[pg.PlotItem]:
-        return [self._stacked.getPlotItem(), *self._tiles, self._single_plot.getPlotItem()]
+    def _stream_actions(self) -> list[QAction]:
+        if not hasattr(self, "_act_rezero"):
+            self._act_rezero = QAction("Re-zero", self)
+            self._act_rezero.setToolTip("Re-capture the V0 baseline (the control panel's Reset) [0]")
+            self._act_rezero.setShortcut(QKeySequence("0"))
+            self._act_rezero.triggered.connect(self.resetRequested)
+        return [self._act_rezero]
 
     # ------------------------------------------------------------------
-    # pause / re-zero (state pushed from the control panel)
+    # live following
     # ------------------------------------------------------------------
 
-    def _on_pause_action(self, on: bool) -> None:
-        self._act_pause.setText("Resume" if on else "Pause")
-        self.pauseToggled.emit(on)
+    def _idle_hint(self) -> str:
+        return "" if self._follow else _NOT_LIVE
 
-    def set_paused(self, on: bool) -> None:
-        """Show the pause state without emitting ``pauseToggled``. Resuming also
-        goes live at the current zoom."""
-        self._act_pause.blockSignals(True)
-        self._act_pause.setChecked(on)
-        self._act_pause.blockSignals(False)
-        self._act_pause.setText("Resume" if on else "Pause")
-        was_paused, self._paused = self._paused, on
-        if was_paused and not on:
-            self._go_live()
-
-    def set_stream_status(self, text: str) -> None:
-        """The control panel's stream status line, shown on the right of the status bar."""
-        self._stream_status.setText(text)
-        self._stream_status.setToolTip(text)
-
-    def _fit_stream_status(self, *_args) -> None:
-        """A transient message on the left gets the room it needs; the status line
-        on the right takes the rest."""
-        msg = self.statusBar().currentMessage()
-        if msg:
-            room = self.statusBar().width() - self.fontMetrics().horizontalAdvance(msg) - 40
-            self._stream_status.setMaximumWidth(max(0, room))
-        else:
-            self._stream_status.setMaximumWidth(16777215)          # QWIDGETSIZE_MAX
-
-    def resizeEvent(self, event) -> None:  # noqa: N802 — Qt naming
-        super().resizeEvent(event)
-        self._fit_stream_status()
-
-    def set_stream_controls_enabled(self, on: bool) -> None:
-        """Pause / Re-zero only make sense while connected."""
-        self._act_pause.setEnabled(on)
-        self._act_rezero.setEnabled(on)
-
-    # ------------------------------------------------------------------
-    # layouts
-    # ------------------------------------------------------------------
-
-    def _on_grid_toggled(self, on: bool) -> None:
-        self._leave_single()
-        self._set_focus_tile(None)
-        self._pages.setCurrentIndex(_GRID if on else _STACKED)
-        self._reset_view()
-
-    def _on_mouse_clicked(self, ev) -> None:
-        if not ev.double() or ev.button() != pg.QtCore.Qt.MouseButton.LeftButton:
-            return
-        page = self._pages.currentIndex()
-        pos = ev.scenePos()
-        if page == _SINGLE:
-            self._restore()
-        elif page == _GRID:
-            sensor = next((i for i, p in enumerate(self._tiles)
-                           if p.sceneBoundingRect().contains(pos)), None)
-            if sensor is not None:
-                self._maximize(sensor)
-        else:
-            vb = self._stacked.getPlotItem().getViewBox()
-            if vb.sceneBoundingRect().contains(pos):
-                sensor = int(round(vb.mapSceneToView(pos).y()))
-                self._maximize(int(np.clip(sensor, 0, self._nsensor - 1)))
-
-    def _maximize(self, sensor: int) -> None:
-        x = self._visible_x_range()
-        self._single = sensor
-        self._single_plot.setTitle(f"W{sensor + 1}")
-        self.setWindowTitle(f"{_TITLE} - W{sensor + 1}")
-        self._act_all.setEnabled(True)
-        self._pages.setCurrentIndex(_SINGLE)
-        self._single_plot.enableAutoRange(axis="y")
-        self._show_x(x)
-        self._render(labels=True)
-
-    def _restore(self) -> None:
-        if self._single is None:
-            return
-        x = self._visible_x_range()
-        self._leave_single()
-        self._pages.setCurrentIndex(_GRID if self._act_grid.isChecked() else _STACKED)
-        self._show_x(x)
-        self._render(labels=True)
-
-    def _leave_single(self) -> None:
-        self._single = None
-        self._act_all.setEnabled(False)
-        self.setWindowTitle(_TITLE)
-
-    def _visible_x_range(self) -> tuple[float, float]:
-        x0, x1 = self._current_x_plot().getViewBox().viewRange()[0]
-        return x0, x1
-
-    def _show_x(self, x: tuple[float, float]) -> None:
-        """Carry the X view across a page switch: live window if following, else the zoom."""
-        if self._follow:
-            self._apply_x_range()
-        else:
-            self._current_x_plot().setXRange(*x, padding=0)
-
-    # ------------------------------------------------------------------
-    # keyboard zoom / pan / live
-    # ------------------------------------------------------------------
-
-    def eventFilter(self, obj, ev) -> bool:  # noqa: N802 — Qt naming
-        """Zoom keys by the character typed, anywhere in this window."""
-        if ev.type() != QEvent.Type.KeyPress or not isinstance(obj, QWidget) or obj.window() is not self:
-            return False
-        text = ev.text()
-        mods = ev.modifiers() & ~(Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.KeypadModifier)
-        if mods or not text:
-            return False
-        if ev.modifiers() & Qt.KeyboardModifier.KeypadModifier:
-            action = {"+": lambda: self._zoom_x(1 / _ZOOM_STEP), "-": lambda: self._zoom_x(_ZOOM_STEP)}.get(text)
-        else:
-            action = {
-                "=": lambda: self._zoom_x(1 / _ZOOM_STEP), "-": lambda: self._zoom_x(_ZOOM_STEP),
-                "+": lambda: self._zoom_y(1 / _ZOOM_STEP, False), "_": lambda: self._zoom_y(_ZOOM_STEP, False),
-                ".": lambda: self._zoom_y(1 / _ZOOM_STEP, True), ",": lambda: self._zoom_y(_ZOOM_STEP, True),
-            }.get(text)
-        if action is None:
-            return False
-        action()
-        return True
+    def _on_resumed(self) -> None:
+        self._go_live()
 
     def _full_span(self) -> float | None:
         return None if self._x_range is None else self._x_range[1] - self._x_range[0]
@@ -523,47 +141,7 @@ class LineView(ViewWindow):
             self._span = None if span >= full else max(span, _MIN_SPAN_S)
             self._render()
         else:
-            self._current_x_plot().getViewBox().scaleBy(x=f)
-            self._on_manual_range()
-
-    def _y_targets(self, all_tiles: bool) -> list[pg.PlotItem]:
-        """Grid plots a Y key acts on: the framed tile, or all (one if Y is linked)."""
-        if self._act_link_y.isChecked():
-            self._link_auto = False
-            return [self._tiles[0]]
-        if all_tiles or self._focus_tile is None:
-            return self._tiles
-        return [self._tiles[self._focus_tile]]
-
-    def _zoom_y(self, f: float, all_tiles: bool) -> None:
-        """Y zoom about the view centre; in the stacked layout, the trace gain."""
-        page = self._pages.currentIndex()
-        if page == _STACKED:
-            self._gain /= f
-            self._stacked.setLabel("left", "Whisker" if abs(self._gain - 1) < 1e-9
-                                   else f"Whisker (gain x{self._gain:.3g})")
-            self._render()
-            return
-        plots = self._y_targets(all_tiles) if page == _GRID else [self._single_plot.getPlotItem()]
-        for p in plots:
-            p.getViewBox().scaleBy(y=f)
-
-    def _pan(self, dx: float, dy: float) -> None:
-        """Shift the view by ``dx`` / ``dy`` visible spans. X moves all plots and
-        leaves live; Y moves the framed tile (all if none) and keeps live."""
-        def shift(p: pg.PlotItem, x: bool, y: bool) -> None:
-            vb = p.getViewBox()
-            (x0, x1), (y0, y1) = vb.viewRange()
-            vb.translateBy(x=dx * (x1 - x0) if x else None, y=dy * (y1 - y0) if y else None)
-        page = self._pages.currentIndex()
-        if dx:
-            shift(self._current_x_plot(), True, False)
-        if dy:
-            plots = self._y_targets(False) if page == _GRID else [self._current_x_plot()]
-            for p in plots:
-                shift(p, False, True)
-        if dx:
-            self._on_manual_range()
+            super()._zoom_x(f)
 
     def _on_live(self) -> None:
         if self._paused:
@@ -582,83 +160,27 @@ class LineView(ViewWindow):
             self.statusBar().clearMessage()
         self._render(labels=True)
 
-    def _on_link_y(self, on: bool) -> None:
-        for p in self._tiles[1:]:
-            p.setYLink(self._tiles[0] if on else None)
-        for p in self._tiles:
-            if on:
-                p.disableAutoRange(axis="y")
-            else:
-                p.enableAutoRange(axis="y")
-        self._link_auto = True
-        self._render()
-
-    def _show_keys(self) -> None:
-        box = QMessageBox(QMessageBox.Icon.NoIcon, "Line view keys", _KEYS_HELP, parent=self)
-        box.setTextFormat(Qt.TextFormat.RichText)
-        box.setModal(False)
-        box.show()
-
-    def _set_focus_tile(self, sensor: int | None) -> None:
-        if sensor == self._focus_tile:
-            return
-        if self._focus_tile is not None:
-            self._focus_frames[self._focus_tile].hide()
-        if sensor is not None:
-            self._focus_frames[sensor].show()
-        self._focus_tile = sensor
-
-    @staticmethod
-    def _frame(plot: pg.PlotItem) -> QGraphicsRectItem:
-        """A hidden frame around the whole tile (title and axes included)."""
-        frame = QGraphicsRectItem(plot)
-        frame.setPen(_FOCUS_PEN)
-        frame.setZValue(1000)
-        frame.hide()
-
-        def fit() -> None:
-            frame.setRect(QRectF(plot.boundingRect()).adjusted(1, 1, -1, -1))
-        plot.geometryChanged.connect(fit)
-        fit()
-        return frame
-
-    def _on_zoom_toggled(self, on: bool) -> None:
-        mode = pg.ViewBox.RectMode if on else pg.ViewBox.PanMode
-        for p in self._all_plots():
-            p.getViewBox().setMouseMode(mode)
-        msg = "Zoom box: drag a rectangle to zoom" if on else "Pan: drag to move the view"
-        self.statusBar().showMessage(msg if self._follow else f"{msg}. {_NOT_LIVE}")
-
     def _on_manual_range(self, *_args) -> None:
         """A mouse zoom / pan, or a key that moves time: leave live."""
-        self._link_auto = False
-        if self._follow:
+        if getattr(self, "_follow", False):
             self._follow = False
             self.statusBar().showMessage(_NOT_LIVE)
-        # re-decimate for the new zoom (matters while paused); after the range lands
-        self._request_render()
+        super()._on_manual_range()
 
-    def _reset_view(self) -> None:
+    def _reset_x(self) -> None:
         self._follow = True
         self._span = None
-        self._gain = 1.0
-        self._link_auto = True
-        self._stacked.setLabel("left", "Whisker")
-        self.statusBar().clearMessage()
-        self._stacked.setYRange(-0.5, self._nsensor)
-        linked = self._act_link_y.isChecked()
-        for p in (*self._tiles, self._single_plot.getPlotItem()):
-            if not (linked and p in self._tiles):
-                p.enableAutoRange(axis="y")
-        self._render(labels=True)
 
-    def _current_x_plot(self) -> pg.PlotItem:
-        page = self._pages.currentIndex()
-        if page == _STACKED:
-            return self._stacked.getPlotItem()
-        if page == _GRID:
-            return self._tiles[0]                         # the rest are X-linked
-        return self._single_plot.getPlotItem()
+    def _show_x(self, x: tuple[float, float]) -> None:
+        """Carry the X view across a page switch: live window if following, else the zoom."""
+        if self._follow:
+            self._apply_x_range()
+        else:
+            super()._show_x(x)
+
+    def _before_redraw(self) -> None:
+        if self._follow:
+            self._apply_x_range()
 
     def _apply_x_range(self) -> None:
         """Live: the newest ``span`` seconds (the whole buffer window if None)."""
@@ -668,50 +190,6 @@ class LineView(ViewWindow):
         if self._span is not None:
             x0 = x1 - self._span
         self._current_x_plot().setXRange(x0, x1, padding=0)
-
-    # ------------------------------------------------------------------
-    # probe
-    # ------------------------------------------------------------------
-
-    def _on_probe_toggled(self, on: bool) -> None:
-        for line in self._probe_lines:
-            line.setVisible(on)
-        if not on:
-            self.statusBar().showMessage("" if self._follow else _NOT_LIVE)
-
-    def _on_mouse_moved(self, pos) -> None:
-        if self._pages.currentIndex() == _GRID:
-            hit = next((i for i, p in enumerate(self._tiles)
-                        if p.sceneBoundingRect().contains(pos)), None)
-            if hit is not None:
-                self._set_focus_tile(hit)
-        if not self._act_probe.isChecked() or self._t.size == 0:
-            return
-        page = self._pages.currentIndex()
-        if page in (_STACKED, _SINGLE):
-            vb = self._current_x_plot().getViewBox()
-            if not vb.sceneBoundingRect().contains(pos):
-                return
-            pt = vb.mapSceneToView(pos)
-            sensor = int(round(pt.y())) if page == _STACKED else self._single
-        else:
-            sensor = next((i for i, p in enumerate(self._tiles)
-                           if p.getViewBox().sceneBoundingRect().contains(pos)), None)
-            if sensor is None:
-                return
-            pt = self._tiles[sensor].getViewBox().mapSceneToView(pos)
-        for line in self._probe_lines:
-            line.setPos(pt.x())
-        if not self._t[0] <= pt.x() <= self._t[-1]:
-            self.statusBar().showMessage(f"t = {pt.x():.3f} s   (no data here)")
-            return
-        i = int(np.clip(np.searchsorted(self._t, pt.x()), 0, self._t.size - 1))
-        if not 0 <= sensor < self._nsensor:
-            self.statusBar().showMessage(f"t = {self._t[i]:.3f} s")
-            return
-        a, b = (self._sig[i, 2 * sensor:2 * sensor + 2] - self._v0[2 * sensor:2 * sensor + 2]) * self._scale
-        self.statusBar().showMessage(
-            f"t = {self._t[i]:.3f} s   W{sensor + 1}   A = {a:+.4g}   B = {b:+.4g}   (minus V0)")
 
     # ------------------------------------------------------------------
     # data
@@ -758,41 +236,10 @@ class LineView(ViewWindow):
             self._x_range = x_range
         self._request_render()
 
-    # ------------------------------------------------------------------
-    # rendering: throttled, visible page only
-    # ------------------------------------------------------------------
+    def _has_data(self) -> bool:
+        return self._t.size > 0
 
-    def _request_render(self) -> None:
-        """Redraw soon, at most every ``_FRAME_S``; repeated requests coalesce."""
-        if not self._render_timer.isActive():
-            wait = self._last_render + _FRAME_S - time.monotonic()
-            self._render_timer.start(max(0, int(wait * 1000)))
-
-    def _render(self, labels: bool = False) -> None:
-        self._render_timer.stop()
-        self._last_render = time.monotonic()
-        if not self.isVisible():
-            return                                         # showEvent renders
-        if self._follow:
-            self._apply_x_range()
-        self._redraw()
-        if labels or self._last_render - self._labels_t >= _LABEL_PERIOD_S:
-            self._update_labels()
-        # do the deferred range / auto-range / transform updates now, not in paintEvent:
-        # changes made during a paint schedule a second paint
-        self._pages.currentWidget().scene().prepareForPaint()
-
-    def showEvent(self, event) -> None:  # noqa: N802 — Qt naming
-        super().showEvent(event)
-        # the zoom-key filter (eventFilter) is app-wide, so only while shown
-        QApplication.instance().installEventFilter(self)
-        self._request_render()
-
-    def hideEvent(self, event) -> None:  # noqa: N802 — Qt naming
-        QApplication.instance().removeEventFilter(self)
-        super().hideEvent(event)
-
-    def _decimated(self, plot: pg.PlotItem, cols: slice) -> tuple[np.ndarray, np.ndarray]:
+    def _plot_data(self, plot: pg.PlotItem, cols: slice) -> tuple[np.ndarray, np.ndarray]:
         """``(t, (sig - v0) * scale)`` for ``cols``, ~2 points per pixel of ``plot``."""
         vb = plot.getViewBox()
         x0, x1 = vb.viewRange()[0]                # already the live window when following
@@ -801,42 +248,14 @@ class LineView(ViewWindow):
         t, y = _peak_decimate(self._t, self._sig[:, cols], k)
         return t, (y - self._v0[cols]) * self._scale
 
-    def _redraw(self) -> None:
-        # Only the visible layout is drawn; switching layouts redraws the other.
-        if self._t.size == 0:
-            return
-        page = self._pages.currentIndex()
-        if page == _STACKED:
-            t, y = self._decimated(self._stacked.getPlotItem(), slice(None))
-            y = (y * self._gain + self._offsets).T.copy()      # contiguous rows, one per curve
-            finite = bool(np.isfinite(y).all())
-            for c, curve in enumerate(self._stacked_curves):
-                curve.setData(t, y[c], skipFiniteCheck=finite)
-        elif page == _GRID:
-            t, y = self._decimated(self._tiles[0], slice(None))
-            y = y.T.copy()
-            finite = bool(np.isfinite(y).all())
-            for c, curve in enumerate(self._grid_curves):
-                curve.setData(t, y[c], skipFiniteCheck=finite)
-            if self._act_link_y.isChecked() and self._link_auto:
-                self._fit_linked_y(y)
-        elif self._single is not None:
-            c0 = 2 * self._single
-            t, y = self._decimated(self._single_plot.getPlotItem(), slice(c0, min(c0 + 2, self._nch)))
-            for g in range(y.shape[1]):
-                self._single_curves[g].setData(t, y[:, g])
-
-    def _fit_linked_y(self, y: np.ndarray) -> None:
-        """Link Y, auto: one Y range over all tiles' data (pyqtgraph's per-tile
-        auto-range would fight over the linked range)."""
-        if not np.isfinite(y).any():
-            return
-        lo, hi = float(np.nanmin(y)), float(np.nanmax(y))
-        pad = 0.05 * (hi - lo) if hi > lo else 0.5
-        lo, hi = lo - pad, hi + pad
-        y0, y1 = self._tiles[0].getViewBox().viewRange()[1]
-        if abs(y0 - lo) + abs(y1 - hi) > 1e-3 * (hi - lo):
-            self._tiles[0].setYRange(lo, hi, padding=0)
+    def _probe_text(self, sensor: int | None, x: float) -> str:
+        if not self._t[0] <= x <= self._t[-1]:
+            return f"t = {x:.3f} s   (no data here)"
+        i = int(np.clip(np.searchsorted(self._t, x), 0, self._t.size - 1))
+        if sensor is None:
+            return f"t = {self._t[i]:.3f} s"
+        a, b = (self._sig[i, 2 * sensor:2 * sensor + 2] - self._v0[2 * sensor:2 * sensor + 2]) * self._scale
+        return f"t = {self._t[i]:.3f} s   W{sensor + 1}   A = {a:+.4g}   B = {b:+.4g}   (minus V0)"
 
     # ------------------------------------------------------------------
     # absolute-value labels
@@ -850,70 +269,22 @@ class LineView(ViewWindow):
         self._value_axis.setLabel(f"absolute ({units})" if units else "absolute")
         self._update_labels()
 
-    def _corner_label(self, plot: pg.PlotItem) -> pg.TextItem:
-        """Top-left of ``plot``'s view box, font sized to the plot."""
-        label = _value_label()
-        vb = plot.getViewBox()
-        label.setParentItem(vb)
-        label.setPos(2, 2)
-
-        def resize() -> None:
-            label.setFont(_px_font(round(0.07 * vb.height()), 8, 16))
-        vb.sigResized.connect(resize)
-        resize()
-        return label
-
-    def _place_stacked_labels(self) -> None:
-        vb = self._stacked.getPlotItem().getViewBox()
-        y0, y1 = vb.viewRange()[1]
-        row_px = vb.height() / max(y1 - y0, 1e-9)
-        font = _px_font(round(0.45 * row_px), 7, 14)
-        width = math.ceil(QFontMetricsF(font).horizontalAdvance("A -0000.0   B -0000.0")) + 12
-        if self._value_axis.width() != width:
-            self._value_axis.setWidth(width)
-        for s, label in enumerate(self._stacked_labels):
-            y = self._value_axis.mapFromScene(vb.mapViewToScene(QPointF(0, s))).y()
-            label.setVisible(0 <= y <= self._value_axis.height())
-            label.setFont(font)
-            label.setPos(4, y)
-
-    def _update_labels(self) -> None:
-        """Refresh the visible page's absolute-value labels."""
-        self._labels_t = time.monotonic()
+    def _prepare_labels(self) -> None:
         if self._t.size == 0:
-            vals = np.full(self._nch, np.nan)
+            self._vals = np.full(self._nch, np.nan)
         else:
             i0 = int(np.searchsorted(self._t, self._t[-1] - _LABEL_AVG_S))
-            vals = self._sig[i0:].mean(axis=0)
-        page = self._pages.currentIndex()
-        if page == _STACKED:
-            for s, label in enumerate(self._stacked_labels):
-                label.setHtml(self._value_html(vals, s, unit=False))
-        elif page == _GRID:
-            for s, label in enumerate(self._tile_labels):
-                label.setHtml(self._value_html(vals, s))
-        elif self._single is not None:
-            self._single_label.setHtml(self._value_html(vals, self._single))
+            self._vals = self._sig[i0:].mean(axis=0)
 
-    def _value_html(self, vals: np.ndarray, sensor: int, unit: bool = True) -> str:
-        parts = []
+    def _label_html(self, sensor: int, compact: bool) -> str:
+        texts = []
         for g in range(2):
             c = 2 * sensor + g
-            v = vals[c] if c < self._nch else np.nan
+            v = self._vals[c] if c < self._nch else np.nan
             if not np.isfinite(v):
-                text = "–"
+                texts.append("–")
             elif self._open_level is not None and abs(v) >= self._open_level:
-                text = "open"
+                texts.append("open")
             else:
-                text = f"{v:.1f}"
-            parts.append(f"<span style='color:{_HTML_COLOR[g]}'>{_GAUGE_NAMES[g]}&nbsp;{text}</span>")
-        html = "&nbsp;&nbsp;".join(parts)
-        if unit and self._units:
-            html += f"&nbsp;<span style='color:#666'>{self._units}</span>"
-        return html
-
-
-def _px_font(px: int, lo: int, hi: int) -> QFont:
-    font = QFont()
-    font.setPixelSize(int(min(max(px, lo), hi)))
-    return font
+                texts.append(f"{v:.1f}")
+        return gauge_html(tuple(texts), "" if compact else self._units)

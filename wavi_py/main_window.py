@@ -3,7 +3,7 @@
 This is one subscriber on the SampleBus among many. It owns:
 
 - The control panel (transport selector, record, pause, view toggles, tag, auto-stop).
-- The three view windows (line, fft, spectrogram).
+- The view windows (line, spectrum, fft, spectrogram, imu).
 - The local processing chain: outlier removal → recording → (optional) filter → plot updates.
 
 External agent loops can subscribe to ``WaviClient.bus`` independently without
@@ -52,7 +52,7 @@ from wavi_py.config import (
 )
 from wavi_py.daq.outliers import fill_outliers_linear
 from wavi_py.io.dat_writer import DatWriter, build_datalog_filename
-from wavi_py.views import FftView, ImuView, LineView, SpectrogramView
+from wavi_py.views import FftView, ImuView, LineView, SpectrogramView, SpectrumView
 from whisker_link.channels import SAT_CODE
 from whisker_link.esp32_frame import MV_PER_CODE
 
@@ -128,20 +128,24 @@ class MainWindow(QMainWindow):
 
         # construct views up front but hidden, mirroring MATLAB behavior
         self._line_view = LineView(self._nsensor, self._nch, self._t_buffer_s)
+        self._spectrum_view = SpectrumView(self._nsensor, self._nch)
         self._fft_view = FftView(self._nch, self._nfreq, self._t_fft_s)
         self._spec_view = SpectrogramView(
             self._nch, self._nfreq, self._fs, self._ns_spec, self._t_spec_s
         )
         self._imu_view = ImuView(self._t_buffer_s)
-        for v, btn in ((self._line_view, self._toggle_line), (self._fft_view, self._toggle_fft),
+        for v, btn in ((self._line_view, self._toggle_line), (self._spectrum_view, self._toggle_spectrum),
+                       (self._fft_view, self._toggle_fft),
                        (self._spec_view, self._toggle_spec), (self._imu_view, self._toggle_imu)):
             v.hide()
             # closing a view window unchecks its button (setChecked is a no-op if already off)
             v.closed.connect(lambda b=btn: b.setChecked(False))
-        # the line window's Pause / Re-zero drive the panel's buttons (state flows back
-        # through _on_pause_toggled / _set_stream_buttons_enabled)
-        self._line_view.pauseToggled.connect(self._pause_btn.setChecked)
-        self._line_view.resetRequested.connect(self._on_reset_clicked)
+        # the line / spectrum windows' Pause (and Re-zero) drive the panel's buttons (state
+        # flows back through _on_pause_toggled / _set_stream_buttons_enabled)
+        self._stream_views = (self._line_view, self._spectrum_view)
+        for v in self._stream_views:
+            v.pauseToggled.connect(self._pause_btn.setChecked)
+            v.resetRequested.connect(self._on_reset_clicked)
         # IMU rolling buffer (server transport only)
         self._imu_last_seq = 0
         self._imu_rows = np.empty((0, 9), dtype=np.float32)
@@ -245,6 +249,11 @@ class MainWindow(QMainWindow):
         self._toggle_line.setCheckable(True)
         self._toggle_line.toggled.connect(lambda on: self._toggle_window(self._line_view, on))
 
+        self._toggle_spectrum = QPushButton("Spectrum")
+        self._toggle_spectrum.setCheckable(True)
+        self._toggle_spectrum.setToolTip("Live amplitude spectrum per whisker (Hann window, mean removed)")
+        self._toggle_spectrum.toggled.connect(lambda on: self._toggle_window(self._spectrum_view, on))
+
         self._toggle_fft = QPushButton("FFT")
         self._toggle_fft.setCheckable(True)
         self._toggle_fft.toggled.connect(lambda on: self._toggle_window(self._fft_view, on))
@@ -269,6 +278,7 @@ class MainWindow(QMainWindow):
         self._reset_btn.setEnabled(False)
 
         h.addWidget(self._toggle_line)
+        h.addWidget(self._toggle_spectrum)
         h.addWidget(self._toggle_fft)
         h.addWidget(self._toggle_spec)
         h.addWidget(self._toggle_imu)
@@ -376,12 +386,15 @@ class MainWindow(QMainWindow):
         # server / esp32 samples are mV at the ADC; a railed (open) gauge reads ~ full scale
         if client.is_event_stream:
             self._line_view.set_value_format("mV", SAT_CODE * MV_PER_CODE)
+            self._spectrum_view.set_units("mV")
         else:
             self._line_view.set_value_format("", None)
+            self._spectrum_view.set_units("")
         self._record_btn.setEnabled(True)
         self._set_transport_inputs_enabled(False)
         self._path_label.setText(f"Connected to {client.endpoint_str} — output dir: {self._outpath}")
-        self._line_view.set_stream_status(f"Connected to {client.endpoint_str}")
+        for v in self._stream_views:
+            v.set_stream_status(f"Connected to {client.endpoint_str}")
         self._last_status_t = 0.0
         self._timer.start()
 
@@ -399,7 +412,8 @@ class MainWindow(QMainWindow):
         self._record_btn.setEnabled(False)
         self._set_transport_inputs_enabled(True)
         self._path_label.setText(f"Disconnected. Output dir: {self._outpath}")
-        self._line_view.set_stream_status("Disconnected")
+        for v in self._stream_views:
+            v.set_stream_status("Disconnected")
         self._progress.setValue(0)
 
     def _on_link_lost(self) -> None:
@@ -408,7 +422,8 @@ class MainWindow(QMainWindow):
         was_recording = self._is_recording
         self._disconnect()
         msg = f"Connection lost: {reason}. Click Connect to reconnect."
-        self._line_view.set_stream_status(f"Connection lost: {reason}")
+        for v in self._stream_views:
+            v.set_stream_status(f"Connection lost: {reason}")
         if was_recording:
             msg += " The local recording was saved; the ROV-side recording may still be running."
         self._path_label.setText(msg)
@@ -434,12 +449,14 @@ class MainWindow(QMainWindow):
     def _set_stream_buttons_enabled(self, on: bool) -> None:
         self._pause_btn.setEnabled(on)
         self._reset_btn.setEnabled(on)
-        self._line_view.set_stream_controls_enabled(on)
+        for v in self._stream_views:
+            v.set_stream_controls_enabled(on)
 
     def _on_pause_toggled(self, on: bool) -> None:
         self._is_paused = on
         self._pause_btn.setText("Resume" if on else "Pause")
-        self._line_view.set_paused(on)
+        for v in self._stream_views:
+            v.set_paused(on)
 
     def _on_reset_clicked(self) -> None:
         if self._client is None or not self._client.is_running:
@@ -585,6 +602,9 @@ class MainWindow(QMainWindow):
                     x_range=(latest_t - self._t_buffer_s, latest_t),
                 )
 
+            if self._spectrum_view.isVisible():
+                self._update_spectrum()
+
             # FFT / spectrogram: update every batch (mirrors n_update=1 default).
             self._samples_since_spec_update += n_new
             if self._samples_since_spec_update >= self._ns_spec:
@@ -611,7 +631,8 @@ class MainWindow(QMainWindow):
             text = self._format_status(st)
             # the line window's status bar always shows it; the panel's label
             # keeps "Recording -> path" while recording
-            self._line_view.set_stream_status(text)
+            for v in self._stream_views:
+                v.set_stream_status(text)
             if not self._is_recording:
                 self._path_label.setText(text)
 
@@ -634,6 +655,29 @@ class MainWindow(QMainWindow):
                if self._client.transport_kind == "server" else "")
         return (f"{self._client.endpoint_str} | whisker {self._fs:.2f} Hz | {imu}{pi_rec}"
                 f" | {errs}")
+
+    def _update_spectrum(self) -> None:
+        """Amplitude spectra of the newest ``window_s`` seconds: mean removed, Hann
+        window, scaled so a sine of amplitude a reads a (units as the line view)."""
+        n = int(round(self._spectrum_view.window_s * self._fs))
+        if n < 8 or self._samples_since_clear < n:
+            return
+        # float64: a railed gauge (~1200 mV, constant) leaves ~1e-4 of float32 rounding
+        # after the detrend, which would read as a tiny peak instead of nothing
+        x = self._sig[-n:].astype(np.float64)
+        if not np.isfinite(x).all():
+            return
+        w = np.hanning(n)
+        # Mean removal, not a linear detrend: with a 1 s window a 1 Hz sine is one cycle,
+        # and a line fitted to one cycle takes ~45 % of its amplitude (5 mV read as 2.7).
+        # Slow drift is kept out of the higher bins by the Hann window.
+        amp = np.abs(np.fft.rfft(detrend(x, axis=0, type="constant") * w[:, None], axis=0))
+        amp *= 2 * self._scale / w.sum()
+        amp[0] /= 2
+        if n % 2 == 0:
+            amp[-1] /= 2
+        amp[amp < 1e-9] = 0                    # detrend round-off of a constant (railed) gauge
+        self._spectrum_view.update_view(np.fft.rfftfreq(n, 1 / self._fs), amp)
 
     def _update_fft_and_spec(self) -> None:
         """Recompute the current FFT (matches ``do_fft`` in wavi.m:901-914)."""
@@ -688,6 +732,7 @@ class MainWindow(QMainWindow):
         try:
             self._disconnect()
         finally:
-            for v in (self._line_view, self._fft_view, self._spec_view, self._imu_view):
+            for v in (self._line_view, self._spectrum_view, self._fft_view, self._spec_view,
+                      self._imu_view):
                 v.close()
         super().closeEvent(event)
