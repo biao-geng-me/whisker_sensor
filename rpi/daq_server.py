@@ -285,6 +285,7 @@ class Esp32Source:
         self.n_adc_recov = 0          # scans with FLAG_RECOVERED (ADC halt recovered)
         self.n_adc_crc = 0            # scans with FLAG_CRC_RETRY (SPI read re-read)
         self.n_adc_stale = 0          # scans with FLAG_STALE (read had no new conversion)
+        self.n_adc_reinit = 0         # scans with FLAG_REINIT (ADC had reset, re-initialised)
         self.info: Optional[dict] = None
         self._thread = threading.Thread(target=self._run, name="esp32", daemon=True)
 
@@ -375,6 +376,8 @@ class Esp32Source:
                 self.n_adc_crc += 1
             if ev.flags & ef.FLAG_STALE:
                 self.n_adc_stale += 1
+            if ev.flags & ef.FLAG_REINIT:
+                self.n_adc_reinit += 1
             self.n_scans += 1
             self.rates.tick("wsk")
             self.hub.publish({"k": "wsk", "t": now, "seq": ev.seq, "tus": self._unwrap(ev.t_us),
@@ -541,7 +544,10 @@ class Server:
                            "crc_fail": dec.n_crc_fail, "skipped": dec.n_skipped,
                            "adc_recov": self.esp32.n_adc_recov, "adc_crc": self.esp32.n_adc_crc,
                            "adc_stale": self.esp32.n_adc_stale,
+                           "adc_reinit": self.esp32.n_adc_reinit,
                            "streaming": time.monotonic() - self.esp32.last_scan_mono < 1.0}
+            if self.esp32.info:
+                st["esp32"]["cfg"] = ef.info_cfg(self.esp32.info)
         if self.mav:
             st["mav"] = {"msgs": self.mav.n_msgs, "target": self.mav.target}
         return st
@@ -560,11 +566,12 @@ class Server:
                 imu = ", ".join(f"{k} {hz[k]:g}" for k in self.args.mav_rates if k in hz)
                 e = st.get("esp32", {})
                 log.info("whisker %s Hz | %s | clients %d | rec %s | errs: gap %d link-crc %d "
-                         "adc-crc %d adc-stale %d adc-recov %d",
+                         "adc-crc %d adc-stale %d adc-recov %d adc-reinit %d",
                          hz.get("wsk", 0), imu or "no MAVLink", st["clients"],
                          os.path.basename(st["rec"]["path"]) if st["rec"]["on"] else "off",
                          e.get("seq_gaps", 0), e.get("crc_fail", 0),
-                         e.get("adc_crc", 0), e.get("adc_stale", 0), e.get("adc_recov", 0))
+                         e.get("adc_crc", 0), e.get("adc_stale", 0), e.get("adc_recov", 0),
+                         e.get("adc_reinit", 0))
 
     # ----- lifecycle
 

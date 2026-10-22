@@ -21,6 +21,8 @@ Frame types:
                    bit1: an ADC SPI read failed CRC and was re-read
                    bit2: an ADC read carried no new conversion (STATUS DRDY
                          bits clear) and was dropped; older firmware never sets it
+                   bit3: the ADC had reset (STATUS RESET bit) and was re-initialised;
+                         the sweep was restarted. Older firmware never sets it
     u8  nch        number of codes that follow (32)
     nch x i24      raw ADC codes, OUT order 1..nch
 
@@ -36,6 +38,10 @@ so diagnostics never corrupt the binary stream.
     u32 clkin_hz
     u32 fdata_sps  per-channel ADC data rate
     u32 baud
+    -- appended in PROTO_VERSION 2 (absent from version-1 firmware) --
+    u16 osr              ADC oversampling ratio of the normal scan
+    u16 settle_us        mux settle time per select
+    u8  discard_samples  conversions dropped per select after the settle
 
 This module is pure stdlib so it runs on the BlueOS Pi without numpy.
 """
@@ -47,7 +53,7 @@ from dataclasses import dataclass
 from typing import Iterator, Union
 
 SYNC = b"\xA5\x5A"
-PROTO_VERSION = 1
+PROTO_VERSION = 2
 
 T_SCAN = 0x01
 T_TEXT = 0x02
@@ -55,10 +61,12 @@ T_INFO = 0x03
 
 NCH = 32
 _SCAN_HDR = struct.Struct("<IIHIBB")       # seq, t_us, dur_us, railmask, flags, nch
-_INFO = struct.Struct("<BBHHIII")
+_INFO = struct.Struct("<BBHHIII")          # version 1
+_INFO_EXT = struct.Struct("<HHB")          # appended in version 2
 FLAG_RECOVERED = 0x01
 FLAG_CRC_RETRY = 0x02
 FLAG_STALE = 0x04
+FLAG_REINIT = 0x08
 
 # Physical conversion: code -> volts at the ADC input (PGA gain 1).
 VREF_V = 1.2
@@ -114,6 +122,9 @@ class Info:
     clkin_hz: int
     fdata_sps: int
     baud: int
+    osr: int | None = None              # None: version-1 firmware didn't send it
+    settle_us: int | None = None
+    discard_samples: int | None = None
 
 
 Event = Union[Scan, Text, Info]
@@ -141,9 +152,20 @@ def encode_text(text: str) -> bytes:
 
 
 def encode_info(info: Info) -> bytes:
-    return _frame(T_INFO, _INFO.pack(info.proto, info.nch, info.device_id,
-                                     info.clock_rb, info.clkin_hz,
-                                     info.fdata_sps, info.baud))
+    p = _INFO.pack(info.proto, info.nch, info.device_id, info.clock_rb,
+                   info.clkin_hz, info.fdata_sps, info.baud)
+    if info.osr is not None:
+        p += _INFO_EXT.pack(info.osr, info.settle_us or 0, info.discard_samples or 0)
+    return _frame(T_INFO, p)
+
+
+def info_cfg(info: dict) -> dict:
+    """The active ADC/scan config from an INFO event dict, for status records.
+
+    Keys a version-1 INFO doesn't carry are left out rather than guessed.
+    """
+    keys = ("clkin_hz", "fdata_sps", "osr", "settle_us", "discard_samples")
+    return {k: info[k] for k in keys if info.get(k) is not None}
 
 
 # ----- decoding
@@ -167,6 +189,8 @@ def _parse(ftype: int, p: bytes) -> Event | None:
         return Text(p.decode("utf-8", errors="replace"))
     if ftype == T_INFO and len(p) == _INFO.size:
         return Info(*_INFO.unpack(p))
+    if ftype == T_INFO and len(p) == _INFO.size + _INFO_EXT.size:
+        return Info(*_INFO.unpack_from(p), *_INFO_EXT.unpack_from(p, _INFO.size))
     return None
 
 

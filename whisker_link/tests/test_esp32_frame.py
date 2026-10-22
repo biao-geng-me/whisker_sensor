@@ -57,17 +57,23 @@ def test_corrupted_frame_is_dropped_not_misparsed():
 
 
 def test_flags_roundtrip():
-    flags = ef.FLAG_RECOVERED | ef.FLAG_CRC_RETRY | ef.FLAG_STALE
-    assert flags == 0x07
+    flags = ef.FLAG_RECOVERED | ef.FLAG_CRC_RETRY | ef.FLAG_STALE | ef.FLAG_REINIT
+    assert flags == 0x0F
     frame = ef.encode_scan(7, 1000, 12300, 0, flags, [0] * ef.NCH)
     (scan,) = list(ef.Decoder().feed(frame))
     assert scan.flags & ef.FLAG_STALE and scan.flags == flags
 
 
 def test_info_roundtrip():
-    info = ef.Info(ef.PROTO_VERSION, 32, 0x2240, 0xFF02, 800000, 3125, 921600)
+    info = ef.Info(ef.PROTO_VERSION, 32, 0x2240, 0xFF02, 800000, 3125, 921600, 128, 250, 3)
     (ev,) = list(ef.Decoder().feed(ef.encode_info(info)))
     assert ev == info
+
+
+def test_info_v1_still_decodes():
+    info = ef.Info(1, 32, 0x2405, 0x0F02, 800000, 3125, 921600)
+    (ev,) = list(ef.Decoder().feed(ef.encode_info(info)))
+    assert ev == info and ev.osr is None
 
 
 def test_micros_unwrap():
