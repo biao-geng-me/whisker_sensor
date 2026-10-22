@@ -20,6 +20,37 @@ Defined once in [`whisker_link/esp32_frame.py`](../../whisker_link/esp32_frame.p
 
 Channels within one scan are not simultaneous: the four ADC channels of one mux select are, but the 8 selects follow each other ~1.5 ms apart (~12.3 ms per scan). `t_us` is the scan start.
 
+SCAN `flags`: bit0 halt recovered, bit1 CRC re-read, bit2 stale read dropped, bit3 ADC reset detected and re-initialised (`adc_reinit`). INFO (sent on `B`) carries, from `PROTO_VERSION` 2, the active `osr`, `settle_us` and `discard_samples` next to `clkin_hz` and `fdata_sps`; `daq_server.py` and the wavi_py esp32 transport copy them into every 1 Hz status record as `esp32.cfg`, so each jsonl log says what config it was taken at. Version-1 INFO frames still decode (the new fields are `None`).
+
+## ADC reset detection (2026-10-22)
+
+When the whisker board is powered after the ESP32 (e.g. from the BlueROV 5 V rail), or the ADC browns out, the ADS131M04 comes back at its power-on defaults (OSR 1024). Frames and CRCs stay valid, so the old firmware never noticed and the scan ran at exactly 12.2 Hz (8 selects × 4 conversions × 2.56 ms) until the ESP32 was reset. Now `initADC()` writes MODE = 0x0110, which clears the sticky RESET flag (SBAS890D Tables 8-15/8-16: STATUS and MODE bit 10). Every frame read checks STATUS bit 10; if it is set again, the ADC really reset, so the firmware re-runs the boot init, restarts the sweep, sets SCAN flag bit3 and logs `[adc reset #n]`. Re-inits are limited to one per second, so a MODE write that doesn't stick can't cause a storm. A periodic CLOCK readback was considered and left out: the RESET bit is checked on every conversion (~2500/s) at no cost, while a readback needs a command frame between scans that disturbs the DRDY/FIFO accounting.
+
+Also fixed: the RESET command was sent as a single 3-byte word, but the ADC latches RESET only at the end of a complete 6-word frame ("Terminating the frame early causes the RESET command to be ignored", SBAS890D 8.4.1.3), so the init's reset was probably a no-op. It now clocks a full 18-byte frame. The registers the init writes end up the same either way.
+
+## Raw burst capture and spectrum (finding the true interference frequencies)
+
+The scan samples each gauge at ~76 Hz, so the ~0.2 mV common tone at 6–7 Hz and the ROV-supply tones at 16.25 and 27.5 Hz are probably aliases of faster sources. The `r` command holds one mux select and records every conversion of the 4 ADC channels into ESP32 RAM, with the DRDY edge time, then dumps it as text:
+
+```
+r<sel> [n] [osr] [clkin_hz] [spi_hz]      then ';' or newline, e.g.  r2 8192 1024;
+```
+
+Defaults: n 8192 (capped by free RAM, up to 16384), OSR 128, CLKIN 0.8 MHz, SPI 600 kHz. OSR is 128…16384 (powers of 2), and fDATA = CLKIN / 2 / OSR. CLKIN can be raised for the burst only, up to 8 MHz. It must be 80 MHz / integer, so 8.192 MHz isn't reachable; the ADC allows 0.3–8.4 MHz in high-resolution mode. Each conversion is one 18-byte SPI read (~260 µs at 600 kHz), so keep fDATA below ~3.5 kSPS or raise `spi_hz`; missed conversions are flagged as overruns. Afterwards CLKIN, SPI and the OSR-128 config are restored with the boot init, and normal operation resumes (binary mode drops to the grid view; `daq_server.py` re-sends `B` by itself). The dump format is in the comment above `burst_capture()` in the `.ino`; it ends with a line count and a CRC over the data lines.
+
+Host side, [`burst_spectrum.py`](burst_spectrum.py) (numpy, scipy, pyserial; matplotlib for the plot). Close wavi_py / daq_server first, since they hold the port.
+
+```bash
+# laptop, ESP32 on USB: 3 bursts, saves bench_sel2.{txt,npz,png,html}
+python msd/esp32/burst_spectrum.py capture --port /dev/ttyUSB0 --sel 2 --out bench_sel2
+# choose the bursts: OSR alone (0.8 MHz) or CLKIN:OSR
+python msd/esp32/burst_spectrum.py capture --port COM5 --sel 2 --burst 128 1000000:128 8000000:2048
+# offline, e.g. on the cluster
+python msd/esp32/burst_spectrum.py analyze bench_sel2.npz --out bench_sel2
+```
+
+The report gives Welch amplitude spectra (peak mV at the ADC input, 1.4305e-4 mV/code) per channel and burst, the peaks, the peaks common to ≥3 channels, and where each peak would alias in the scan (`--scan-hz`, default 76.2). It also lists the true-frequency candidates up to `--f-max` that explain the peaks of every burst. Bursts that differ only in OSR can't resolve aliases, because the rates nest (3125 = 4 × 781.25) and any frequency that fits the fastest burst fits them all. That is why the default set mixes CLKINs: 0.8 MHz/OSR 128 (3125 SPS), 1 MHz/OSR 128 (3906.25 SPS) and 8 MHz/OSR 2048 (1953.125 SPS). Tests on synthetic dumps: `python -m pytest msd/esp32/test_burst_spectrum.py`.
+
 ## Mux settling and fresh conversions (bench, 2026-10-20)
 
 Before commit 3c7e881, `waitDRDY()` tested the DRDY level, so a scan could return a conversion that had already been read (or the older slot of the ADC's 2-deep FIFO). That stale-sample bug, not the hardware, caused the spikes and the "~2 ms/select analog settling floor (~52 Hz for 32 ch)" in the MSD handoff (`/shared/rc/whiskers/MSD_P25937/PROJECT_HANDOFF.md` §3.3). The firmware now counts DRDY falling edges in an ISR and checks STATUS DRDY[3:0] = 1111 on every frame; a read that fails is dropped and counted (SCAN flag bit2 `FLAG_STALE`, `adc-stale` in the status line). The handoff's "SCLK must stay below CLKIN" rule is not in the datasheet either.

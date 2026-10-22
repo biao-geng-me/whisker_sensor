@@ -87,7 +87,7 @@ def main() -> None:
             if k == "B":
                 binary = True
                 out(ef.encode_info(ef.Info(ef.PROTO_VERSION, 32, 0x2240, 0xFF02,
-                                           800_000, 3125, 921600)))
+                                           800_000, 3125, 921600, 128, 250, 3)))
             elif k == "b":
                 out(ef.encode_text("Re-capturing baseline...") if binary
                     else b"Re-capturing baseline...\r\n")

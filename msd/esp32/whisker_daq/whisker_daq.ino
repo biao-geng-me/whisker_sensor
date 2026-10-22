@@ -46,6 +46,13 @@
  *            channel is railed/far off to <sel>, reads every conversion for
  *            ~5 ms (no discards) and prints the averaged mV vs time since
  *            the switch. Shows the true analog + sinc3 settling floor.
+ *    r<sel> [n] [osr] [clkin_hz] [spi_hz]  then ';' or newline
+ *            RAW BURST: holds mux select <sel> and records every conversion
+ *            of the 4 ADC channels (default n 8192, OSR 128, CLKIN 0.8 MHz,
+ *            SPI 600 kHz; OSR 128..16384, CLKIN up to 8 MHz), then dumps
+ *            "#BURST ..." header, one "t_us flags c0 c1 c2 c3" line per
+ *            conversion and "#END lines= crc=". Restores the normal config.
+ *            Host side: msd/esp32/burst_spectrum.py. Details at burst_capture.
  *  Any text-mode command leaves binary mode. Serial Monitor: set the line
  *  ending to "No line ending" and the baud to SERIAL_BAUD.
  *
@@ -64,6 +71,7 @@
  */
 
 #include <SPI.h>
+#include <esp_heap_caps.h>
 
 // ── Serial ───────────────────────────────────────────────────────────────────
 #define SERIAL_BAUD   921600UL    // CP2102 handles this; 115200 caps at ~50 scans/s
@@ -115,18 +123,30 @@
 #define CMD_RREG(a) (0xA000 | ((a) << 7))
 #define CMD_WREG(a) (0x6000 | ((a) << 7))
 #define REG_ID      0x00
+#define REG_MODE    0x02
 #define REG_CLOCK   0x03
 #define REG_GAIN1   0x04   // the only GAIN register on the M04; 0x05 is reserved
 // CLOCK: reserved[15:12]=1111 (preserve), CH_EN[11:8]=1111, OSR[4:2]=000 (128),
 // PWR[1:0]=10 (high-resolution) -> 0xFF02
 #define CLOCK_ALL_CH_OSR128  0xFF02
 #define CLOCK_MASK  0x0FFF
+#define CLOCK_OSR_MASK  0x001C   // OSR[2:0] at bits 4:2: 128 << code, 7 = 16384
+#define OSR_NORMAL  128
+// MODE (reset 0x0510): RESET bit 10 = 0 (clears STATUS RESET), WLENGTH 01b
+// (24 bit), TIMEOUT 1, DRDY_SEL 00, DRDY_HiZ 0, DRDY_FMT 0: the defaults with
+// the reset flag cleared (SBAS890D Table 8-16).
+#define MODE_CLEAR_RESET  0x0110
 #define GAIN_ALL_1  0x0000
 // STATUS (reg 0x01, returned as word 0 of every data frame, MSB-aligned in the
 // 24-bit word): bits 3:0 = DRDY3..DRDY0, "1b = New data are available" per
 // channel (SBAS890D Table 8-15). All four channels are enabled, so a frame
 // with a fresh conversion has all four set.
 #define STATUS_DRDY_ALL  0x000F
+// STATUS bit 10 RESET: "1b = Reset occurred" (Table 8-15). It stays set until
+// MODE bit 10 is written 0, which initADC does, so seeing it later means the
+// ADC reset behind our back (late power-up, brown-out, spark) and is back at
+// its defaults (OSR 1024: the scan drops from ~76 to 12.2 Hz, CRCs stay fine).
+#define STATUS_RESET     0x0400
 
 #define VREF        1.2f
 #define ADC_FS      8388608.0f   // 2^23
@@ -161,10 +181,12 @@ static const uint8_t CONN_TO_JPIN[17] =
 #define FT_SCAN       0x01
 #define FT_TEXT       0x02
 #define FT_INFO       0x03
-#define PROTO_VERSION 1
+#define PROTO_VERSION 2      // 2: INFO carries osr, settle_us, discard_samples
 #define FLAG_RECOVERED 0x01   // an ADC halt was recovered during this sweep
 #define FLAG_CRC_RETRY 0x02   // an ADC SPI read failed CRC and was re-read
 #define FLAG_STALE     0x04   // a read carried no new conversion and was dropped
+#define FLAG_REINIT    0x08   // the ADC had reset (STATUS RESET); re-initialised,
+                              // sweep restarted
 
 // ── State ────────────────────────────────────────────────────────────────────
 SPIClass vspi(VSPI);
@@ -178,10 +200,13 @@ static float outNoise[NUM_OUT + 1];
 // output slams to a rail, and the ADC clips at a constant +/- full scale.
 #define SAT_CODE   8380000L           // 2^23 = 8388608; anything near it is clipped
 
-static uint16_t g_id = 0, g_clockRb = 0;
+static uint16_t g_id = 0, g_clockRb = 0, g_modeRb = 0;
 static uint32_t g_halts = 0, g_crcFails = 0, g_unrecovered = 0, g_scans = 0;
 static uint32_t g_recByLevel[4] = {0, 0, 0, 0};
 static uint32_t g_staleReads = 0;      // reads whose STATUS DRDY bits said "no new data"
+static uint32_t g_adcReinits = 0;      // re-inits after STATUS RESET was seen set
+static uint32_t g_reinitMs   = 0;      // millis() of the last one
+static bool     g_reinitArmed = false; // set once boot init is done
 static bool     g_absolute = false;   // 'v' toggles
 static char     g_mode     = 'g';     // 'g' grid, 'x' profile, 's' table, 'c' cal, 'n' noise, 'B' binary
 static uint32_t g_scanT0   = 0;       // micros() at the start of the last scan
@@ -189,6 +214,7 @@ static uint32_t g_scanDur  = 0;
 static bool     g_scanRecovered = false;
 static bool     g_scanCrcRetry  = false;
 static bool     g_scanStale     = false;
+static bool     g_scanReinit    = false;
 
 // DRDY edge bookkeeping. Each falling edge is one new conversion; the ISR
 // counts them and reads claim them one at a time, so no read can ever reuse
@@ -211,7 +237,7 @@ static bool  g_autoScale = true;
 inline void cs_low()  { digitalWrite(PIN_CS, LOW);  }
 inline void cs_high() { digitalWrite(PIN_CS, HIGH); }
 
-static bool initADC();
+static bool initADC(uint16_t clockReg = CLOCK_ALL_CH_OSR128);
 static bool readValid(long ch[4], uint32_t budget_ms, uint32_t *idx = nullptr,
                       uint32_t *tConv = nullptr);
 
@@ -261,7 +287,7 @@ static inline void put_u32(uint8_t *p, uint32_t v) {
 }
 
 static void send_info() {
-    uint8_t p[18];
+    uint8_t p[23];
     p[0] = PROTO_VERSION;
     p[1] = NUM_OUT;
     put_u16(p + 2, g_id);
@@ -269,6 +295,9 @@ static void send_info() {
     put_u32(p + 6, CLKIN_HZ);
     put_u32(p + 10, FDATA_SPS);
     put_u32(p + 14, SERIAL_BAUD);
+    put_u16(p + 18, OSR_NORMAL);
+    put_u16(p + 20, SETTLE_US);
+    p[22] = DISCARD_SAMPLES;
     send_frame(FT_INFO, p, sizeof(p));
 }
 
@@ -284,7 +313,7 @@ static void send_scan() {
     put_u16(p + 8, g_scanDur > 0xFFFF ? 0xFFFF : (uint16_t)g_scanDur);
     put_u32(p + 10, rail);
     p[14] = (g_scanRecovered ? FLAG_RECOVERED : 0) | (g_scanCrcRetry ? FLAG_CRC_RETRY : 0) |
-            (g_scanStale ? FLAG_STALE : 0);
+            (g_scanStale ? FLAG_STALE : 0) | (g_scanReinit ? FLAG_REINIT : 0);
     p[15] = NUM_OUT;
     for (int o = 1; o <= NUM_OUT; o++) {
         uint32_t c = (uint32_t)outRaw[o] & 0xFFFFFF;
@@ -315,6 +344,16 @@ static void spi_word(uint16_t cmd) {
     vspi.transfer((cmd >> 8) & 0xFF);
     vspi.transfer( cmd       & 0xFF);
     vspi.transfer(0x00);
+    cs_high();
+}
+
+// RESET is latched only at the end of a complete frame; "Terminating the frame
+// early causes the RESET command to be ignored. Six words are required"
+// (SBAS890D 8.4.1.3). spi_word() sends one word, so it can't be used here.
+static void ads_reset_cmd() {
+    uint8_t f[18] = {(uint8_t)(CMD_RESET >> 8), (uint8_t)(CMD_RESET & 0xFF)};
+    cs_low();
+    vspi.writeBytes(f, sizeof(f));
     cs_high();
 }
 
@@ -426,30 +465,50 @@ static void spiFlush() {
     delayMicroseconds(100);
 }
 
-static void restartCLKIN() {
+static void setClkin(uint32_t hz) {
     ledcDetach(PIN_CLKIN);
     delay(5);
-    ledcAttach(PIN_CLKIN, CLKIN_HZ, 1);
+    ledcAttach(PIN_CLKIN, hz, 1);
     ledcWrite(PIN_CLKIN, 1);
     delay(20);
 }
 
-static bool initADC() {
-    spi_word(CMD_RESET);
+static void restartCLKIN() { setClkin(CLKIN_HZ); }
+
+// clockReg: CLOCK value to write; the normal scan uses CLOCK_ALL_CH_OSR128,
+// the 'r' burst other OSRs. Also clears the MODE RESET flag (see STATUS_RESET).
+static bool initADC(uint16_t clockReg) {
+    ads_reset_cmd();
     delay(50);
     drdyResync();
     waitDRDY(300);
     spi_word(CMD_UNLOCK);
     delayMicroseconds(50);
-    ads_write_reg(REG_CLOCK, CLOCK_ALL_CH_OSR128);
+    ads_write_reg(REG_MODE, MODE_CLEAR_RESET);
+    ads_write_reg(REG_CLOCK, clockReg);
     ads_write_reg(REG_GAIN1, GAIN_ALL_1);
     g_clockRb = ads_read_reg(REG_CLOCK);     // read back BEFORE locking
+    g_modeRb  = ads_read_reg(REG_MODE);
     g_id      = ads_read_reg(REG_ID);
     spi_word(CMD_LOCK);
     delay(10);
     drdyResync();
     g_respPending = true;                    // next frame answers LOCK (0x0555)
-    return (g_clockRb & CLOCK_MASK) == (CLOCK_ALL_CH_OSR128 & CLOCK_MASK);
+    return (g_clockRb & CLOCK_MASK) == (clockReg & CLOCK_MASK);
+}
+
+// STATUS said RESET: the ADC is back at its power-on defaults. Re-run the boot
+// init. At most one per REINIT_MIN_MS, so a MODE write that doesn't stick
+// can't turn into a re-init storm (the counter and the log still show it).
+#define REINIT_MIN_MS  1000
+static void reinitADC() {
+    g_reinitMs = millis();
+    g_adcReinits++;
+    g_scanReinit = true;
+    bool ok = initADC();
+    logf("[adc reset #%lu] ADC had reset (STATUS RESET=1), re-initialised: CLOCK=0x%04X %s"
+         " MODE=0x%04X ID=0x%04X\n", (unsigned long)g_adcReinits, g_clockRb,
+         ok ? "ok" : "NOT accepted", g_modeRb, g_id);
 }
 
 // One conversion that is alive (STATUS not 0/FFFFFF), CRC-clean and fresh
@@ -470,6 +529,10 @@ static bool readValid(long ch[4], uint32_t budget_ms, uint32_t *idx, uint32_t *t
         }
         if (g_respPending) {
             g_respPending = false;
+        } else if (((st >> 8) & STATUS_RESET) && g_reinitArmed &&
+                   millis() - g_reinitMs >= REINIT_MIN_MS) {
+            reinitADC();                      // this conversion was at the defaults
+            continue;
         } else if (((st >> 8) & STATUS_DRDY_ALL) != STATUS_DRDY_ALL) {
             g_staleReads++;                   // no new conversion behind this read
             g_scanStale = true;
@@ -501,9 +564,11 @@ static int recoverADC(long ch[4], uint32_t *idx = nullptr) {
     return 0;
 }
 
-// 0 = failed, 1 = read, 2 = read after an ADC re-init (its filters restarted).
+// 0 = failed, 1 = read, 2 = read after a halt recovery (filters restarted),
+// 3 = read after a reinitADC (the ADC had reset; the sweep must restart).
 static int readOrRecover(long ch[4], uint32_t *idx = nullptr) {
-    if (readValid(ch, 250, idx)) return 1;
+    uint32_t reinits = g_adcReinits;
+    if (readValid(ch, 250, idx)) return g_adcReinits != reinits ? 3 : 1;
     g_halts++;
     g_scanRecovered = true;
     int lvl = recoverADC(ch, idx);
@@ -514,7 +579,7 @@ static int readOrRecover(long ch[4], uint32_t *idx = nullptr) {
              (unsigned long)g_recByLevel[1], (unsigned long)g_recByLevel[2],
              (unsigned long)g_recByLevel[3], (unsigned long)g_unrecovered,
              (unsigned long)g_crcFails, (unsigned long)g_staleReads);
-        return 2;
+        return g_adcReinits != reinits ? 3 : 2;
     }
     g_unrecovered++;
     logf("[halt #%lu] UNRECOVERED  ID=0x%04X CLOCKrb=0x%04X crcbad=%lu"
@@ -557,11 +622,10 @@ static int probeSelectsGrounded() {
 // reachable if DRDY edges keep getting swallowed; normally DISCARD + 1 or +2).
 #define MAX_READS_PER_SEL  (4 * (DISCARD_SAMPLES + 1))
 
-static bool scan_all() {
+// One sweep: 1 = done, 0 = ADC halt not recovered, 3 = the ADC had reset and
+// was re-initialised mid-sweep (earlier selects ran at the wrong config).
+static int sweep() {
     long ch[4];
-    g_scanRecovered = false;
-    g_scanCrcRetry  = false;
-    g_scanStale     = false;
     drdyResync();
     g_scanT0 = micros();
     for (uint8_t sel = 0; sel < NUM_SEL; sel++) {
@@ -569,15 +633,18 @@ static bool scan_all() {
         uint32_t tSel = micros();
         // Settle, but keep reading (and dropping) conversions meanwhile, so
         // none is left in the FIFO to come back later as a "new" sample.
-        while (micros() - tSel < SETTLE_US)
-            if (drdyPending() && !readOrRecover(ch)) return false;
+        while (micros() - tSel < SETTLE_US) {
+            if (!drdyPending()) continue;
+            int r = readOrRecover(ch);
+            if (r == 0 || r == 3) return r;
+        }
         // Keep the (DISCARD_SAMPLES+1)-th conversion that completes after the
         // settle: its sinc3 window (3 conversions) lies entirely after it.
         uint32_t mark = g_drdyEdges, k;
         uint8_t got = 0;
         for (int reads = 0; got <= DISCARD_SAMPLES; reads++) {
             int r = readOrRecover(ch, &k);
-            if (r == 0) return false;
+            if (r == 0 || r == 3) return r;
             if (r == 2) { mark = k; got = 0; continue; }   // filters restarted
             if ((int32_t)(k - mark) > 0) got++;
             else if (reads >= MAX_READS_PER_SEL) { g_staleReads++; g_scanStale = true; break; }
@@ -588,6 +655,17 @@ static bool scan_all() {
             outV  [o] = (ch[a] / ADC_FS) * VREF;
         }
     }
+    return 1;
+}
+
+static bool scan_all() {
+    g_scanRecovered = false;
+    g_scanCrcRetry  = false;
+    g_scanStale     = false;
+    g_scanReinit    = false;
+    int r = sweep();
+    if (r == 3) r = sweep();     // restart cleanly at the restored config
+    if (r != 1) return false;    // (a second reset within REINIT_MIN_MS can't recur)
     g_scanDur = micros() - g_scanT0;
     g_scans++;
     return true;
@@ -953,6 +1031,186 @@ static void settle_diag_cmd() {
     Serial.println("settle diag: cancelled");
 }
 
+// ── Raw burst capture ('r'): find the true frequency of interference ─────────
+// The scan samples each gauge at ~76 Hz, so anything faster folds down
+// (the 6-7 Hz common tone, the 16.25 / 27.5 Hz ROV tones). A burst holds ONE
+// select and keeps EVERY conversion of all 4 ADC channels (no discards, no
+// mux switching) with the DRDY edge micros(), at an OSR (and optionally a
+// CLKIN) of your choice, into RAM, then dumps it as text:
+//   r<sel> [n] [osr] [clkin_hz] [spi_hz]   terminated by '\n' or ';'
+//   defaults n 8192, osr 128, clkin 800000, spi 600000. Example "r2 8192 1024;"
+// Dump (all lines '\n'-terminated, nothing else interleaved):
+//   #BURST v1 sel=.. n=.. osr=.. clkin_hz=.. fdata_sps=.. spi_hz=.. clock_rb=0x....
+//          out=o0,o1,o2,o3 mv_per_code=.. crc_bad=.. stale=.. overrun=.. edgeless=..
+//          adc_reset=..
+//   t_us flags c0 c1 c2 c3          one line per conversion; t_us relative to
+//                                   the first, codes = raw signed 24 bit
+//   #END lines=<n> crc=<hex>        CRC-16-CCITT (init FFFF) over the data lines
+//   or "#BURSTERR <reason>" alone.
+// flags: bit0 CRC bad, bit1 STATUS DRDY not all set (stale), bit2 >1 DRDY
+// edge pending at the claim (conversions were missed: the read can't keep up),
+// bit3 edgeless (claimed off the DRDY level, t_us = read time not edge time),
+// bit4 STATUS RESET set.
+// Each conversion is one 18-byte SPI read, so its period must exceed the read:
+// at 600 kHz SPI that is ~260 us, i.e. fDATA <= ~3.5 kSPS. With CLKIN 8 MHz
+// use OSR >= 2048 or raise spi_hz (2-8 MHz; check crc_bad). CLKIN must divide
+// 80 MHz (LEDC, 1-bit duty); 8.192 MHz is not reachable, 8 MHz is, and the ADC
+// allows 0.3-8.4 MHz in high-resolution mode (SBAS890D 6.3).
+// Afterwards CLKIN, SPI and the OSR-128 config are restored (same init as
+// boot) and the previous mode resumes (binary mode drops to the grid).
+#define BURST_MAX       16384
+#define BURST_DEFAULT   8192
+#define BURST_SKIP      8        // conversions dropped after init (filter + mux settle)
+#define BF_CRC      0x01
+#define BF_STALE    0x02
+#define BF_OVERRUN  0x04
+#define BF_EDGELESS 0x08
+#define BF_RESET    0x10
+
+static int osrCode(long osr) {
+    for (int c = 0; c < 8; c++) if (osr == (128L << c)) return c;
+    return -1;
+}
+
+static void setSpi(uint32_t hz) {
+    vspi.endTransaction();
+    vspi.beginTransaction(SPISettings(hz, MSBFIRST, SPI_MODE1));
+}
+
+static void burst_put_line(const char *line, uint16_t *crc) {
+    size_t n = strlen(line);
+    *crc = crc16_ccitt_update(*crc, (const uint8_t *)line, (int)n);
+    Serial.write((const uint8_t *)line, n);
+}
+
+static void burst_capture(int sel, long n, long osr, long clkin, long spiHz) {
+    int code = osrCode(osr);
+    if (sel < 0 || sel >= NUM_SEL)           { Serial.print("#BURSTERR bad select\n"); return; }
+    if (code < 0)                            { Serial.print("#BURSTERR osr must be 128..16384, power of 2\n"); return; }
+    if (n < 16) n = 16;
+    if (n > BURST_MAX) n = BURST_MAX;
+    if (clkin < 300000 || clkin > 8400000)   { Serial.print("#BURSTERR clkin out of 0.3-8.4 MHz\n"); return; }
+    if (spiHz < 100000 || spiHz > 8000000)   { Serial.print("#BURSTERR spi_hz out of 0.1-8 MHz\n"); return; }
+    // Per conversion: 4 x i24 codes (12 B), t (4 B), flags (1 B), in three
+    // blocks. Shrink n until they fit, keeping 16 kB of heap for everything else.
+    uint8_t *codes = nullptr; uint32_t *tt = nullptr; uint8_t *fl = nullptr;
+    for (; n >= 16; n -= n / 8) {
+        size_t big = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+        if ((size_t)n * 12 + 16384 > big) continue;
+        codes = (uint8_t *)malloc((size_t)n * 12);
+        tt    = (uint32_t *)malloc((size_t)n * 4);
+        fl    = (uint8_t *)malloc((size_t)n);
+        if (codes && tt && fl) break;
+        free(codes); free(tt); free(fl); codes = nullptr; tt = nullptr; fl = nullptr;
+    }
+    if (!codes) { Serial.print("#BURSTERR out of RAM\n"); return; }
+
+    mux_select(sel);
+    bool clkChanged = (uint32_t)clkin != CLKIN_HZ;
+    if (clkChanged) setClkin((uint32_t)clkin);
+    if ((uint32_t)spiHz != SPI_HZ) setSpi((uint32_t)spiHz);
+    uint16_t clockReg = (CLOCK_ALL_CH_OSR128 & ~CLOCK_OSR_MASK) | (code << 2);
+    bool cfgOk = initADC(clockReg);
+    uint16_t clockRb = g_clockRb;
+    uint32_t clkActual = ledcReadFreq(PIN_CLKIN);
+    if (clkActual == 0) clkActual = (uint32_t)clkin;
+    // Conversion period plus slack for the waits below.
+    uint32_t convMs = (uint32_t)(2000.0 * osr / clkActual) + 50;
+
+    uint32_t nCrc = 0, nStale = 0, nOver = 0, nEdgeless = 0, nReset = 0;
+    bool fail = !cfgOk;
+    long got = 0;
+    for (long i = -BURST_SKIP; i < n && !fail; i++) {
+        uint8_t f = 0;
+        if ((int32_t)(g_drdyEdges - g_drdyTaken) > 1) {   // reads fell behind
+            f |= BF_OVERRUN;
+            g_drdyTaken = g_drdyEdges - 1;
+        }
+        uint32_t taken = g_drdyTaken, t;
+        if (!waitDRDY(convMs, nullptr, &t)) { fail = true; break; }
+        if (g_drdyTaken == taken) f |= BF_EDGELESS;      // waitDRDY's level path
+        bool crcOk;
+        long ch[4];
+        uint32_t st = ads_read_all(ch, &crcOk);
+        if (g_respPending) { g_respPending = false; st = (uint32_t)STATUS_DRDY_ALL << 8; }
+        if (!crcOk) f |= BF_CRC;
+        if (((st >> 8) & STATUS_DRDY_ALL) != STATUS_DRDY_ALL) f |= BF_STALE;
+        if ((st >> 8) & STATUS_RESET) f |= BF_RESET;
+        if (i < 0) continue;
+        uint8_t *q = codes + 12 * i;
+        for (int a = 0; a < 4; a++) {
+            uint32_t c = (uint32_t)ch[a] & 0xFFFFFF;
+            q[3*a] = c; q[3*a + 1] = c >> 8; q[3*a + 2] = c >> 16;
+        }
+        tt[i] = t; fl[i] = f;
+        nCrc += !!(f & BF_CRC); nStale += !!(f & BF_STALE); nOver += !!(f & BF_OVERRUN);
+        nEdgeless += !!(f & BF_EDGELESS); nReset += !!(f & BF_RESET);
+        got = i + 1;
+    }
+
+    // Restore the normal config before the (slow) dump.
+    if (clkChanged) setClkin(CLKIN_HZ);
+    if ((uint32_t)spiHz != SPI_HZ) setSpi(SPI_HZ);
+    initADC();
+    drdyResync();
+
+    if (fail && got == 0) {
+        Serial.printf("#BURSTERR %s\n", cfgOk ? "ADC not converting" : "CLOCK config not accepted");
+    } else {
+        char line[160];
+        snprintf(line, sizeof(line),
+                 "#BURST v1 sel=%d n=%ld osr=%ld clkin_hz=%lu fdata_sps=%.3f spi_hz=%ld"
+                 " clock_rb=0x%04X out=%u,%u,%u,%u", sel, got, osr,
+                 (unsigned long)clkActual, clkActual / 2.0 / osr, spiHz, clockRb,
+                 OUT_OF[0][sel], OUT_OF[1][sel], OUT_OF[2][sel], OUT_OF[3][sel]);
+        Serial.print(line);
+        Serial.printf(" mv_per_code=%.12g crc_bad=%lu stale=%lu overrun=%lu edgeless=%lu"
+                      " adc_reset=%lu%s\n", (double)VREF * 1000.0 / ADC_FS,
+                      (unsigned long)nCrc, (unsigned long)nStale, (unsigned long)nOver,
+                      (unsigned long)nEdgeless, (unsigned long)nReset,
+                      fail ? " truncated=1" : "");
+        uint16_t crc = 0xFFFF;
+        uint32_t t0 = got ? tt[0] : 0;
+        for (long i = 0; i < got; i++) {
+            const uint8_t *q = codes + 12 * i;
+            long c[4];
+            for (int a = 0; a < 4; a++) {
+                uint32_t v = q[3*a] | ((uint32_t)q[3*a + 1] << 8) | ((uint32_t)q[3*a + 2] << 16);
+                if (v & 0x800000UL) v |= 0xFF000000UL;
+                c[a] = (long)(int32_t)v;
+            }
+            snprintf(line, sizeof(line), "%lu %u %ld %ld %ld %ld\n",
+                     (unsigned long)(tt[i] - t0), fl[i], c[0], c[1], c[2], c[3]);
+            burst_put_line(line, &crc);
+        }
+        Serial.printf("#END lines=%ld crc=%04X\n", got, crc);
+    }
+    free(codes); free(tt); free(fl);
+    Serial.flush();
+    drdyResync();
+}
+
+// Reads "<sel> [n] [osr] [clkin] [spi]" up to '\n' or ';' (5 s timeout).
+static void burst_cmd() {
+    char buf[64];
+    int len = 0;
+    uint32_t t0 = millis();
+    while (millis() - t0 < 5000 && len < (int)sizeof(buf) - 1) {
+        if (!Serial.available()) { delay(1); continue; }
+        char c = Serial.read();
+        if (c == '\n' || c == ';' || c == '\r') { if (len) break; else continue; }
+        buf[len++] = c;
+    }
+    buf[len] = '\0';
+    int sel = -1;
+    long n = BURST_DEFAULT, osr = OSR_NORMAL, clk = CLKIN_HZ, spi = SPI_HZ;
+    if (sscanf(buf, "%d %ld %ld %ld %ld", &sel, &n, &osr, &clk, &spi) < 1) {
+        Serial.print("#BURSTERR usage: r<sel> [n] [osr] [clkin_hz] [spi_hz] then ';' or newline\n");
+        return;
+    }
+    burst_capture(sel, n, osr, clk, spi);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  Setup
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1015,6 +1273,9 @@ void setup() {
                   (g_id == 0x0000 || g_id == 0xFFFF) ? "(NO RESPONSE)" : "(unexpected ID)");
     Serial.printf("CLOCK readback = 0x%04X  %s\n", g_clockRb,
                   cfg ? "(config ACCEPTED)" : "(NOT accepted)");
+    Serial.printf("MODE readback  = 0x%04X  %s\n", g_modeRb,
+                  g_modeRb == MODE_CLEAR_RESET ? "(RESET flag cleared)" : "(unexpected)");
+    g_reinitArmed = true;     // from now on STATUS RESET=1 means a real ADC reset
 
     int edges = 0, last = digitalRead(PIN_DRDY);
     uint32_t t0 = millis();
@@ -1026,6 +1287,7 @@ void setup() {
     Serial.println("\nCommands: B=binary stream  g=grid  x=profile  s=table  b=rebaseline");
     Serial.println("          v=abs/delta  m=map  c=calibrate  n=noise  [ ]=scale  0=auto");
     Serial.println("          d<0-7>=mux settling diagnostic for that select");
+    Serial.println("          r<sel> [n] [osr] [clkin_hz] [spi_hz];=raw burst (see header)");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1056,6 +1318,7 @@ void loop() {
                       logf("scale +/-%.2f mV (manual)\n", g_scale); break;
             case '0': g_autoScale = true; logf("scale: auto\n"); break;
             case 'd': if (g_mode == 'B') g_mode = 'g'; settle_diag_cmd(); break;
+            case 'r': if (g_mode == 'B') g_mode = 'g'; burst_cmd(); break;
             default: break;    // ignore CR/LF and anything unknown
         }
     }
