@@ -17,8 +17,9 @@ control panel's Pause and Reset: the view only emits ``pauseToggled`` /
 ``resetRequested``, and the control panel pushes its state back with
 ``set_paused`` / ``set_stream_controls_enabled``.
 
-Keys (window-wide): Space pause/resume, Z zoom box on/off, R reset view,
-0 re-zero, Esc back to all whiskers.
+Keys (window-wide): Space pause/resume, Z zoom box on/off, + / = / - zoom
+in / out (x1.25 about the view centre), R reset view, 0 re-zero, Esc back to
+all whiskers.
 
 The status bar's right side shows the stream status line pushed by the
 control panel (``set_stream_status``); its left side keeps transient messages
@@ -58,6 +59,7 @@ _SINGLE_PEN_W = 2
 _LABEL_PERIOD_S = 0.15          # absolute-value labels refresh at ~7 Hz
 _LABEL_AVG_S = 0.1              # ...showing the mean of the last 0.1 s
 _LABEL_FILL = pg.mkBrush(255, 255, 255, 225)
+_ZOOM_STEP = 1.25               # +/- keys
 
 
 def _add_gauge_legend(plot: pg.PlotItem) -> None:
@@ -244,6 +246,18 @@ class LineView(ViewWindow):
         act_reset.setShortcut(QKeySequence("R"))
         act_reset.triggered.connect(self._reset_view)
 
+        # "=" too, so zoom-in needs no Shift; the keypad keys carry KeypadModifier
+        act_zoom_in = QAction("+", self)
+        act_zoom_in.setToolTip("Zoom in x1.25 about the view centre [+ or =]")
+        act_zoom_in.setShortcuts([QKeySequence("+"), QKeySequence("="),
+                                  QKeySequence(Qt.KeyboardModifier.KeypadModifier | Qt.Key.Key_Plus)])
+        act_zoom_in.triggered.connect(lambda: self._zoom_by(1 / _ZOOM_STEP))
+        act_zoom_out = QAction("\u2212", self)
+        act_zoom_out.setToolTip("Zoom out x1.25 about the view centre [-]")
+        act_zoom_out.setShortcuts([QKeySequence("-"),
+                                   QKeySequence(Qt.KeyboardModifier.KeypadModifier | Qt.Key.Key_Minus)])
+        act_zoom_out.triggered.connect(lambda: self._zoom_by(_ZOOM_STEP))
+
         self._act_probe = QAction("Probe", self, checkable=True)
         self._act_probe.setToolTip("Show channel values under the cursor")
         self._act_probe.toggled.connect(self._on_probe_toggled)
@@ -265,7 +279,8 @@ class LineView(ViewWindow):
         self._act_rezero.setShortcut(QKeySequence("0"))
         self._act_rezero.triggered.connect(self.resetRequested)
 
-        for a in (self._act_grid, self._act_zoom, act_reset, self._act_probe, self._act_all):
+        for a in (self._act_grid, self._act_zoom, act_zoom_in, act_zoom_out, act_reset,
+                  self._act_probe, self._act_all):
             tb.addAction(a)
         tb.addSeparator()
         tb.addAction(self._act_pause)
@@ -371,6 +386,17 @@ class LineView(ViewWindow):
             self._apply_x_range()
         else:
             self._current_x_plot().setXRange(*x, padding=0)
+
+    def _zoom_by(self, f: float) -> None:
+        """Scale the shown plots' X and Y ranges by ``f`` about their view centre."""
+        page = self._pages.currentIndex()
+        if page == _GRID:
+            self._tiles[0].getViewBox().scaleBy(x=f)      # the other tiles are X-linked
+            for p in self._tiles:
+                p.getViewBox().scaleBy(y=f)
+        else:
+            self._current_x_plot().getViewBox().scaleBy(x=f, y=f)
+        self._on_manual_range()
 
     def _on_zoom_toggled(self, on: bool) -> None:
         mode = pg.ViewBox.RectMode if on else pg.ViewBox.PanMode
