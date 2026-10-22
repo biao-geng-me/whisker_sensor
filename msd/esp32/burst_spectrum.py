@@ -208,6 +208,7 @@ class Spectrum:
     fs: float
     f: np.ndarray
     amp: dict                   # ADC channel -> peak-mV amplitude spectrum
+    dc: dict                    # ADC channel -> mean level, mV
     peaks: dict                 # ADC channel -> [(f_hz, amp_mv)]
     notes: list
 
@@ -250,7 +251,7 @@ def spectrum(b: Burst, nperseg: int | None, k_noise: float, n_peaks: int) -> Spe
     if nperseg is None:
         nperseg = max(256, 1 << int(np.floor(np.log2(max(n // 4, 1)))))
     nperseg = min(nperseg, n)
-    amp, peaks = {}, {}
+    amp, peaks, dc = {}, {}, {}
     for c in range(4):
         if np.median(np.abs(b.codes[:, c])) >= SAT_CODE:
             notes.append(f"CH{c} railed (nothing plugged in), skipped")
@@ -259,6 +260,7 @@ def spectrum(b: Burst, nperseg: int | None, k_noise: float, n_peaks: int) -> Spe
                      scaling="spectrum")
         a = np.sqrt(2.0 * p)                     # peak amplitude of a sinusoid, mV
         amp[c] = a
+        dc[c] = float(mv[:, c].mean())
         df = f[1] - f[0]
         floor = np.median(a[f > 2 * df])
         idx, _ = find_peaks(a, height=k_noise * floor, prominence=0.5 * k_noise * floor)
@@ -267,7 +269,7 @@ def spectrum(b: Burst, nperseg: int | None, k_noise: float, n_peaks: int) -> Spe
         peaks[c] = [(_refine(f, a, i), float(a[i])) for i in sorted(idx)]
     label = (f"sel {b.meta.get('sel')} OSR {b.meta.get('osr')} CLKIN {b.meta.get('clkin_hz', 0)/1e6:g} MHz"
              f" fs {fs:.1f} SPS n {n}")
-    return Spectrum(label, fs, f, amp, peaks, notes)
+    return Spectrum(label, fs, f, amp, dc, peaks, notes)
 
 
 def _refine(f: np.ndarray, a: np.ndarray, i: int) -> float:
@@ -347,12 +349,30 @@ def _resolve_text(specs, cands) -> str:
     return "\n".join(lines)
 
 
+def _track_text(specs: list[Spectrum], f0: float, half_bw: float = 2.0) -> str:
+    """Per burst and live channel: DC level and the largest amplitude within f0 +/- half_bw."""
+    lines = [f"tracked tone {f0:g} Hz (largest bin within +/-{half_bw:g} Hz) vs channel DC level:"]
+    for s in specs:
+        lines.append(f"   {s.label}")
+        win = (s.f >= f0 - half_bw) & (s.f <= f0 + half_bw)
+        for c in sorted(s.amp):
+            if not win.any():
+                lines.append(f"      CH{c}  DC {s.dc[c]:8.1f} mV   (tone above fs/2)")
+                continue
+            i = np.flatnonzero(win)[np.argmax(s.amp[c][win])]
+            lines.append(f"      CH{c}  DC {s.dc[c]:8.1f} mV   {s.amp[c][i]:.4f} mV at {s.f[i]:.2f} Hz")
+    return "\n".join(lines)
+
+
 def report(bursts: list[Burst], out: Path, scan_hz: float, nperseg: int | None,
-           k_noise: float, n_peaks: int, f_max: float = 5000.0) -> list[Spectrum]:
+           k_noise: float, n_peaks: int, f_max: float = 5000.0,
+           track: float | None = None) -> list[Spectrum]:
     specs = [spectrum(b, nperseg, k_noise, n_peaks) for b in bursts]
     text = _peak_text(specs, bursts, scan_hz)
     cands = resolve(specs, f_max)
     text += "\n" + _resolve_text(specs, cands)
+    if track:
+        text += "\n" + _track_text(specs, track)
     print(text)
     png = _plot(specs, bursts, out.with_suffix(".png"))
     out.with_suffix(".html").write_text(_html(specs, bursts, scan_hz, png, cands), encoding="utf-8")
@@ -465,6 +485,8 @@ def main(argv=None) -> int:
     an.add_argument("--n-peaks", type=int, default=8, help="peaks listed per channel")
     an.add_argument("--f-max", type=float, default=5000.0,
                     help="highest true frequency to consider when unfolding aliases")
+    an.add_argument("--track", type=float, metavar="HZ",
+                    help="also print each channel's DC level and its amplitude near HZ (e.g. 845)")
     c = sub.add_parser("capture", parents=[an], help="trigger burst(s) on the ESP32, save, analyze")
     c.add_argument("--port", required=True)
     c.add_argument("--sel", type=int, default=0, help="mux select 0-7")
@@ -487,7 +509,7 @@ def main(argv=None) -> int:
     else:
         bursts = [b for p in args.files for b in load(p)]
         args.out = args.out or args.files[0].with_suffix("")
-    report(bursts, args.out, args.scan_hz, args.nperseg, args.k_noise, args.n_peaks, args.f_max)
+    report(bursts, args.out, args.scan_hz, args.nperseg, args.k_noise, args.n_peaks, args.f_max, args.track)
     return 0
 
 
