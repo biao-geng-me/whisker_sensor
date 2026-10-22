@@ -46,6 +46,8 @@ Click **Connect**. Toggle **Line / FFT / Spec** to bring up plot windows. **Paus
 
 The **Line** window has its own **Pause** and **Re-zero** buttons, which are the control panel's Pause and Reset (re-capture the V0 baseline) and stay in sync with them; **Reset view** only resets zoom and live following. **Grid** shows one tile per whisker; double-click a tile (or, in the stacked layout, near a whisker's trace) to show that whisker alone, and double-click again, press Esc or click **All whiskers** to go back.
 
+Keys in the Line window (whichever plot has focus): **Space** pause / resume, **Z** zoom box on / off (off = drag pans), **R** reset view, **0** re-zero, **Esc** back to all whiskers. The right side of its status bar shows the same stream status line as the control panel (scan rate, error counters), also while recording and when the control panel is hidden.
+
 Each plot also shows the current absolute value of both gauges (raw mV at the ADC, before the V0 subtraction and the `--scale`; mean of the last 0.1 s, refreshed ~7 times a second) in its corner, or on the right of each row in the stacked layout; a railed gauge (nothing plugged in) reads **open**. With the TCP / Serial (Arduino) transports the values are shown without a unit and never as open. Curves are min/max decimated to about two points per pixel column and drawn with 1 px pens, so the redraw cost does not grow with the sample rate.
 
 ## Run (library / headless)

@@ -17,6 +17,13 @@ control panel's Pause and Reset: the view only emits ``pauseToggled`` /
 ``resetRequested``, and the control panel pushes its state back with
 ``set_paused`` / ``set_stream_controls_enabled``.
 
+Keys (window-wide): Space pause/resume, Z zoom box on/off, R reset view,
+0 re-zero, Esc back to all whiskers.
+
+The status bar's right side shows the stream status line pushed by the
+control panel (``set_stream_status``); its left side keeps transient messages
+(probe readout, "not following").
+
 Every plot also shows the current absolute value of each gauge (raw, before V0
 and the display scale; mean of the last 0.1 s) in its corner, or on the right
 of each row in the stacked layout. Labels refresh at ~7 Hz, not every frame.
@@ -32,9 +39,9 @@ import math
 import time
 
 import numpy as np
-from PyQt6.QtCore import QPointF, QTimer, pyqtSignal
+from PyQt6.QtCore import QPointF, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction, QFont, QFontMetricsF, QKeySequence
-from PyQt6.QtWidgets import QStackedWidget, QToolBar
+from PyQt6.QtWidgets import QLabel, QSizePolicy, QStackedWidget, QToolBar
 
 import pyqtgraph as pg
 
@@ -205,6 +212,12 @@ class LineView(ViewWindow):
             p.getViewBox().sigRangeChangedManually.connect(self._on_manual_range)
 
         self._build_toolbar()
+        self._stream_status = QLabel()
+        self._stream_status.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        # don't let a long status line set the window's minimum width; it clips instead
+        self._stream_status.setMinimumWidth(1)
+        self._stream_status.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        self.statusBar().addPermanentWidget(self._stream_status)
         self.set_value_format("", None)
         self._reset_view()
 
@@ -222,11 +235,13 @@ class LineView(ViewWindow):
         self._act_grid.toggled.connect(self._on_grid_toggled)
 
         self._act_zoom = QAction("Zoom box", self, checkable=True)
-        self._act_zoom.setToolTip("Drag a box to zoom (off: drag pans). Wheel zooms either way.")
+        self._act_zoom.setToolTip("Drag a box to zoom (off: drag pans). Wheel zooms either way. [Z]")
+        self._act_zoom.setShortcut(QKeySequence("Z"))
         self._act_zoom.toggled.connect(self._on_zoom_toggled)
 
         act_reset = QAction("Reset view", self)
-        act_reset.setToolTip("Full range, and follow the newest data again")
+        act_reset.setToolTip("Full range, and follow the newest data again [R]")
+        act_reset.setShortcut(QKeySequence("R"))
         act_reset.triggered.connect(self._reset_view)
 
         self._act_probe = QAction("Probe", self, checkable=True)
@@ -234,18 +249,20 @@ class LineView(ViewWindow):
         self._act_probe.toggled.connect(self._on_probe_toggled)
 
         self._act_all = QAction("All whiskers", self)
-        self._act_all.setToolTip("Back to all whiskers (Esc, or double-click the plot)")
+        self._act_all.setToolTip("Back to all whiskers (or double-click the plot) [Esc]")
         self._act_all.setShortcut(QKeySequence("Esc"))
         self._act_all.setEnabled(False)
         self._act_all.triggered.connect(self._restore)
 
         # Pause / Re-zero: the control panel owns the logic (see module docstring).
         self._act_pause = QAction("Pause", self, checkable=True)
-        self._act_pause.setToolTip("Freeze the plots; data keeps flowing and recording continues")
+        self._act_pause.setToolTip("Freeze the plots; data keeps flowing and recording continues [Space]")
+        self._act_pause.setShortcut(QKeySequence(Qt.Key.Key_Space))
         self._act_pause.toggled.connect(self._on_pause_action)
 
         self._act_rezero = QAction("Re-zero", self)
-        self._act_rezero.setToolTip("Re-capture the V0 baseline (the control panel's Reset)")
+        self._act_rezero.setToolTip("Re-capture the V0 baseline (the control panel's Reset) [0]")
+        self._act_rezero.setShortcut(QKeySequence("0"))
         self._act_rezero.triggered.connect(self.resetRequested)
 
         for a in (self._act_grid, self._act_zoom, act_reset, self._act_probe, self._act_all):
@@ -253,6 +270,13 @@ class LineView(ViewWindow):
         tb.addSeparator()
         tb.addAction(self._act_pause)
         tb.addAction(self._act_rezero)
+        # Shortcuts are window-wide (QAction's default WindowShortcut context), so they
+        # work whichever plot has focus. A shortcut beats a focused button's own Space
+        # handling; the toolbar buttons also take no focus, so Space never clicks one.
+        for a in tb.actions():
+            w = tb.widgetForAction(a)
+            if w is not None:
+                w.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.set_stream_controls_enabled(False)
 
     def _all_plots(self) -> list[pg.PlotItem]:
@@ -272,6 +296,11 @@ class LineView(ViewWindow):
         self._act_pause.setChecked(on)
         self._act_pause.blockSignals(False)
         self._act_pause.setText("Resume" if on else "Pause")
+
+    def set_stream_status(self, text: str) -> None:
+        """The control panel's stream status line, shown on the right of the status bar."""
+        self._stream_status.setText(text)
+        self._stream_status.setToolTip(text)
 
     def set_stream_controls_enabled(self, on: bool) -> None:
         """Pause / Re-zero only make sense while connected."""
@@ -347,6 +376,10 @@ class LineView(ViewWindow):
         mode = pg.ViewBox.RectMode if on else pg.ViewBox.PanMode
         for p in self._all_plots():
             p.getViewBox().setMouseMode(mode)
+        msg = "Zoom box: drag a rectangle to zoom" if on else "Pan: drag to move the view"
+        if not self._follow:
+            msg += "; not following live data — Reset view to resume"
+        self.statusBar().showMessage(msg)
 
     def _on_manual_range(self, *_args) -> None:
         if self._follow:
