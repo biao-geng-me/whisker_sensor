@@ -179,7 +179,7 @@ text(160, 620, "5.5 V bench supply", "lab"); text(160, 637, "→ J1 (pin 1 +, pi
 text(160, 653, "→ MD1 buck (TPSM84203)", "val")
 line((360, 635), (400, 635)); flag(400, 635, "3V3")
 text(372, 655, "bridges, INA351s,", "note"); text(372, 668, "muxes, ADC", "note")
-text(160, 692, "ESP32 GND ← one wire from supply −", "note")
+text(160, 692, "ESP32 GND ← one wire, twisted with CLKIN", "note")
 # REF net: two copies of the Amplifier_Reference sheet, both on the one AMP_REF_3V3 net
 text(480, 604, "REF net (AMP_REF_3V3): two divider copies in parallel, one net for all 32 INA351 REF pins", "blk")
 ry, yref = 650, 730            # 3V3 rail, REF bus
@@ -552,7 +552,7 @@ tr.mark td {{ background: color-mix(in srgb, var(--ref) 16%, transparent); font-
         <li><b>REF</b> (<code>AMP_REF_3V3</code>) is one net for all 32 INA351s, set by R7/R8 with C4. It sets where zero bridge signal sits on the output. The ADC measures OUT against GND (AINxN grounded), so REF drift shows on every channel at once. The layout has two copies of the divider (the schematic places the <code>Amplifier_Reference</code> sheet twice): pads at the top and bottom board edges, wired in parallel onto that one net, so either copy sets REF. As built (bench, 2026-10-21): bottom copy empty; top copy R7 ≈ 46 k (joint reflowed), C4 fitted, R8 replaced with 10 k (the original part measured open, which had REF at 3.28 V and every channel railed). REF now reads 0.294 V, stable; 3.3 × 10/(46 + 10) predicts 0.59 V, so something adds ~8–13 k to GND (unexplained, accepted).</li>
         <li><b>Mux and ADC.</b> Two CD4097B (X and Y sections each) feed the four ADC inputs: mux #1 X → AIN2, Y → AIN3 (OUT1–16); mux #2 X → AIN0, Y → AIN1 (OUT17–32). Each mux has its own three select lines (P2), and the firmware sets both to the same select, so 8 selects × 4 ADC channels = 32 gauges per scan.</li>
         <li><b>ADC</b> ADS131M04: ±1.2 V full scale, gain 1, internal 1.2 V reference, OSR 128 at CLKIN 0.8 MHz (from ESP32 GPIO16) → 320 µs per conversion. Per select the firmware settles 250 µs, drops 3 conversions and keeps the 4th (sinc3 filter flushed), ≈1.6 ms per select, ≈76 scans/s.</li>
-        <li><b>Power</b>: 5.5 V bench supply → J1 → MD1 buck → 3V3 for the bridges, amplifiers, muxes and ADC. The ESP32 is powered by USB and shares ground through one wire from the supply negative to one ESP32 GND pin. A second pair of ground wires twisted with CLKIN/SCLK (bench, 2026-10-21) gave continuous CRC and stale-read errors, so use only the one wire.</li>
+        <li><b>Power</b>: 5.5 V bench supply → J1 → MD1 buck → 3V3 for the bridges, amplifiers, muxes and ADC. The ESP32 is powered by USB and shares ground through exactly one wire. Best on the bench (2026-10-22): the wire from MD1 pin 2 twisted with CLKIN (CRC 0, 75.9 scans/s). Two ground wires at once gave continuous CRC errors (a ground loop); a loose wire routed away from the signals gave ~60 CRC errors/s, depending on where it lay.</li>
       </ul>
     </div>
   </section>
