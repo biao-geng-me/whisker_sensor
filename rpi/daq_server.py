@@ -270,8 +270,11 @@ class RateCounter:
 class Esp32Source:
     """Reads binary frames from the ESP32; reopens the port if it goes away."""
 
-    def __init__(self, port: str, baud: int, hub: Hub, rates: RateCounter):
+    def __init__(self, port: str, baud: int, hub: Hub, rates: RateCounter,
+                 selects: Optional[str] = None):
         self.port, self.baud = port, baud
+        # what "start streaming" sends; with --selects the select list goes first
+        self.kick = (f"S{selects};".encode() if selects else b"") + b"B"
         self.hub, self.rates = hub, rates
         self.decoder = ef.Decoder()
         self._unwrap = ef.TimeUnwrapper()
@@ -361,7 +364,7 @@ class Esp32Source:
                     self._handle(ev, now)
             # Not streaming (boot banner / text mode / ESP32 rebooted)? Ask again.
             if now - self.last_scan_mono > 2.0 and now - last_kick > 2.0:
-                self.write(b"B")
+                self.write(self.kick)
                 last_kick = now
 
     def _handle(self, ev, now: float) -> None:
@@ -486,7 +489,7 @@ class Server:
         self.args = args
         self.hub = Hub(args.rec_dir)
         self.rates = RateCounter()
-        self.esp32 = (Esp32Source(args.serial, args.baud, self.hub, self.rates)
+        self.esp32 = (Esp32Source(args.serial, args.baud, self.hub, self.rates, args.selects)
                       if args.serial.lower() != "none" else None)
         self.mav = (MavSource(args.mavlink, self.hub, self.rates, args.mav_rates,
                               args.sysid, args.compid)
@@ -619,6 +622,14 @@ def _parse_bind(s: str) -> tuple[str, int]:
     return host, int(port)
 
 
+def _parse_selects(s: str) -> str:
+    """``0123457`` -> the same digits, sorted and checked (mux selects 0-7)."""
+    digits = sorted(set(s.replace(",", "")))
+    if not digits or any(d not in "01234567" for d in digits):
+        raise argparse.ArgumentTypeError("selects: digits 0-7, e.g. 0123457")
+    return "".join(digits)
+
+
 def _parse_rates(s: str) -> dict[str, float]:
     """``RAW_IMU=200,ATTITUDE=50`` -> overrides on top of DEFAULT_MAV_RATES."""
     out = dict(DEFAULT_MAV_RATES)
@@ -632,6 +643,9 @@ def main(argv: Optional[list[str]] = None) -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--serial", default="/dev/ttyUSB0", help="ESP32 port, or 'none'")
     ap.add_argument("--baud", type=int, default=DEFAULT_SERIAL_BAUD)
+    ap.add_argument("--selects", type=_parse_selects, default=None,
+                    help="mux selects the ESP32 scans, e.g. 0123457 (sent as S<digits>; before"
+                         " every B, since the ESP32 forgets it on reboot); default: leave as is")
     ap.add_argument("--mavlink", default=DEFAULT_MAVLINK,
                     help="pymavlink URL of the BlueOS endpoint, or 'none'")
     ap.add_argument("--mav-rates", type=_parse_rates, default=dict(DEFAULT_MAV_RATES),

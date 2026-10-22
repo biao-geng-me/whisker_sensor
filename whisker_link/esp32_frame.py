@@ -42,6 +42,10 @@ so diagnostics never corrupt the binary stream.
     u16 osr              ADC oversampling ratio of the normal scan
     u16 settle_us        mux settle time per select
     u8  discard_samples  conversions dropped per select after the settle
+    -- appended in PROTO_VERSION 3 --
+    u8  sel_mask         mux selects in the scan (bit s = select s). The 4
+                         outputs of a skipped select carry +full scale, so the
+                         SCAN railmask marks them railed ("open")
 
 This module is pure stdlib so it runs on the BlueOS Pi without numpy.
 """
@@ -53,7 +57,7 @@ from dataclasses import dataclass
 from typing import Iterator, Union
 
 SYNC = b"\xA5\x5A"
-PROTO_VERSION = 2
+PROTO_VERSION = 3
 
 T_SCAN = 0x01
 T_TEXT = 0x02
@@ -63,6 +67,7 @@ NCH = 32
 _SCAN_HDR = struct.Struct("<IIHIBB")       # seq, t_us, dur_us, railmask, flags, nch
 _INFO = struct.Struct("<BBHHIII")          # version 1
 _INFO_EXT = struct.Struct("<HHB")          # appended in version 2
+_INFO_EXT3 = struct.Struct("<B")           # appended in version 3
 FLAG_RECOVERED = 0x01
 FLAG_CRC_RETRY = 0x02
 FLAG_STALE = 0x04
@@ -125,6 +130,7 @@ class Info:
     osr: int | None = None              # None: version-1 firmware didn't send it
     settle_us: int | None = None
     discard_samples: int | None = None
+    sel_mask: int | None = None         # None: firmware before version 3 (all 8 scanned)
 
 
 Event = Union[Scan, Text, Info]
@@ -156,6 +162,8 @@ def encode_info(info: Info) -> bytes:
                    info.clkin_hz, info.fdata_sps, info.baud)
     if info.osr is not None:
         p += _INFO_EXT.pack(info.osr, info.settle_us or 0, info.discard_samples or 0)
+        if info.sel_mask is not None:
+            p += _INFO_EXT3.pack(info.sel_mask)
     return _frame(T_INFO, p)
 
 
@@ -164,8 +172,11 @@ def info_cfg(info: dict) -> dict:
 
     Keys a version-1 INFO doesn't carry are left out rather than guessed.
     """
-    keys = ("clkin_hz", "fdata_sps", "osr", "settle_us", "discard_samples")
-    return {k: info[k] for k in keys if info.get(k) is not None}
+    keys = ("clkin_hz", "fdata_sps", "osr", "settle_us", "discard_samples", "sel_mask")
+    cfg = {k: info[k] for k in keys if info.get(k) is not None}
+    if "sel_mask" in cfg:
+        cfg["selects"] = "".join(str(s) for s in range(8) if cfg["sel_mask"] >> s & 1)
+    return cfg
 
 
 # ----- decoding
@@ -191,6 +202,9 @@ def _parse(ftype: int, p: bytes) -> Event | None:
         return Info(*_INFO.unpack(p))
     if ftype == T_INFO and len(p) == _INFO.size + _INFO_EXT.size:
         return Info(*_INFO.unpack_from(p), *_INFO_EXT.unpack_from(p, _INFO.size))
+    if ftype == T_INFO and len(p) == _INFO.size + _INFO_EXT.size + _INFO_EXT3.size:
+        return Info(*_INFO.unpack_from(p), *_INFO_EXT.unpack_from(p, _INFO.size),
+                    *_INFO_EXT3.unpack_from(p, _INFO.size + _INFO_EXT.size))
     return None
 
 
