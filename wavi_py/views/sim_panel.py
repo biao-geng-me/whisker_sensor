@@ -1,7 +1,8 @@
 """Signal panel for the simulated array (``--transport sim`` / the Sim transport).
 
 Edits a ``SimSignals`` live, also before connecting: per-gauge live / open,
-sine amplitude and frequency; scan rate, noise and drift; presets; taps (a
+sine amplitude and frequency, and noise; scan rate, drift and mains hum; the
+noise of all gauges at once; presets; taps (a
 decaying ring on one whisker, by hand or every few seconds); and faults (the
 scan flags, a sequence gap, a link CRC error, a dropout) to exercise the
 status line.
@@ -10,6 +11,8 @@ status line.
 from __future__ import annotations
 
 import random
+
+import numpy as np
 
 from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QGridLayout, QGroupBox,
@@ -39,7 +42,7 @@ class SimPanel(ViewWindow):
     def __init__(self, signals: SimSignals):
         super().__init__()
         self.setWindowTitle("Wavi - Sim signals")
-        self.resize(560, 760)
+        self.resize(800, 800)
         self._sig = signals
         self._loading = False
 
@@ -59,33 +62,44 @@ class SimPanel(ViewWindow):
 
     def _build_global(self) -> QGroupBox:
         box = QGroupBox("Array")
-        h = QHBoxLayout(box)
+        grid = QGridLayout(box)
         self._rate = QComboBox()
         self._rate.addItems([f"{r:g} Hz" for r in RATES_HZ])
         self._rate.setToolTip("Scan rate. The GUI adopts a new measured rate unless recording.")
         self._rate.currentIndexChanged.connect(lambda i: setattr(self._sig, "rate_hz", RATES_HZ[i]))
         self._noise = _spin(0, 100, 0.1, 2, " mV")
-        self._noise.setToolTip("White noise on every live gauge (RMS)")
-        self._noise.valueChanged.connect(lambda v: setattr(self._sig, "noise_mv", v))
+        self._noise.setToolTip("Set the white noise (RMS) of every gauge at once; "
+                               "the table sets it per gauge")
+        self._noise.valueChanged.connect(self._on_noise_all)
         self._drift = _spin(-100, 100, 0.1, 2, " mV/s")
         self._drift.setToolTip("Linear drift on every live gauge (Re-zero to take it out)")
         self._drift.valueChanged.connect(lambda v: setattr(self._sig, "drift_mv_s", v))
+        self._hum = _spin(0, 1000, 0.5, 2, " mV")
+        self._hum.setToolTip("Mains hum on every live gauge (each with its own coupling "
+                             "0.3..1.5). Below 2x the mains frequency it aliases: 50 Hz at "
+                             "80 Hz scans shows at 30 Hz.")
+        self._hum.valueChanged.connect(lambda v: setattr(self._sig, "hum_mv", v))
+        self._hum_hz = QComboBox()
+        self._hum_hz.addItems(["50 Hz", "60 Hz"])
+        self._hum_hz.currentIndexChanged.connect(lambda i: setattr(self._sig, "hum_hz", (50.0, 60.0)[i]))
         self._preset = QComboBox()
         self._preset.addItems(["preset...", *SimSignals.PRESETS])
-        self._preset.setToolTip("demo: a few gauges, distinct frequencies; all live: 1..16 Hz "
-                                "by whisker; all live, same: 2 Hz 3 mV; all open")
+        self._preset.setToolTip(SimSignals.PRESET_HELP)
         self._preset.activated.connect(self._on_preset)
-        for w in (QLabel("Rate"), self._rate, QLabel("Noise"), self._noise,
-                  QLabel("Drift"), self._drift, self._preset):
-            h.addWidget(w)
+        for col, w in enumerate((QLabel("Rate"), self._rate, QLabel("Noise (all)"), self._noise,
+                                 QLabel("Drift"), self._drift)):
+            grid.addWidget(w, 0, col)
+        for col, w in enumerate((QLabel("Hum"), self._hum, QLabel("at"), self._hum_hz)):
+            grid.addWidget(w, 1, col)
+        grid.addWidget(self._preset, 1, 4, 1, 2)
         return box
 
     def _build_gauges(self) -> QGroupBox:
-        box = QGroupBox("Gauges: sine per gauge (unticked = open, railed)")
+        box = QGroupBox("Gauges: sine and noise per gauge (unticked = open, railed)")
         grid = QGridLayout()
-        for col, text in enumerate(("", "A", "amp", "freq", "B", "amp", "freq")):
+        for col, text in enumerate(("", "A", "amp", "freq", "noise", "B", "amp", "freq", "noise")):
             grid.addWidget(QLabel(f"<b>{text}</b>"), 0, col)
-        self._rows: list[tuple[QCheckBox, QDoubleSpinBox, QDoubleSpinBox]] = []
+        self._rows: list[tuple[QCheckBox, QDoubleSpinBox, QDoubleSpinBox, QDoubleSpinBox]] = []
         for w in range(NUM_WHISKER):
             grid.addWidget(QLabel(f"W{w + 1}"), w + 1, 0)
             for g in range(2):
@@ -93,12 +107,15 @@ class SimPanel(ViewWindow):
                 live = QCheckBox()
                 amp = _spin(0, 1000, 0.5, 2, " mV")
                 freq = _spin(0, 500, 0.5, 2, " Hz")
+                noise = _spin(0, 100, 0.05, 2, " mV")
+                noise.setToolTip("White noise, RMS")
                 live.toggled.connect(lambda on, ch=ch: self._edit(ch, live=on))
                 amp.valueChanged.connect(lambda v, ch=ch: self._edit(ch, amp_mv=v))
                 freq.valueChanged.connect(lambda v, ch=ch: self._edit(ch, freq_hz=v))
-                for k, wdg in enumerate((live, amp, freq)):
-                    grid.addWidget(wdg, w + 1, 1 + 3 * g + k)
-                self._rows.append((live, amp, freq))
+                noise.valueChanged.connect(lambda v, ch=ch: self._edit(ch, noise_mv=v))
+                for k, wdg in enumerate((live, amp, freq, noise)):
+                    grid.addWidget(wdg, w + 1, 1 + 4 * g + k)
+                self._rows.append((live, amp, freq, noise))
         inner = QWidget()
         inner.setLayout(grid)
         scroll = QScrollArea()
@@ -150,13 +167,23 @@ class SimPanel(ViewWindow):
         """Show the current SimSignals (after a preset)."""
         self._loading = True
         self._rate.setCurrentIndex(RATES_HZ.index(self._sig.rate_hz) if self._sig.rate_hz in RATES_HZ else 1)
-        self._noise.setValue(self._sig.noise_mv)
+        self._noise.setValue(float(np.median(self._sig.noise_mv)))
         self._drift.setValue(self._sig.drift_mv_s)
-        for ch, (live, amp, freq) in enumerate(self._rows):
+        self._hum.setValue(self._sig.hum_mv)
+        self._hum_hz.setCurrentIndex(0 if self._sig.hum_hz == 50 else 1)
+        for ch, (live, amp, freq, noise) in enumerate(self._rows):
             live.setChecked(bool(self._sig.live[ch]))
             amp.setValue(float(self._sig.amp_mv[ch]))
             freq.setValue(float(self._sig.freq_hz[ch]))
+            noise.setValue(float(self._sig.noise_mv[ch]))
         self._loading = False
+
+    def _on_noise_all(self, v: float) -> None:
+        if self._loading:
+            return
+        with self._sig.lock:
+            self._sig.noise_mv[:] = v
+        self._load()
 
     def _edit(self, ch: int, **kw) -> None:
         if not self._loading:

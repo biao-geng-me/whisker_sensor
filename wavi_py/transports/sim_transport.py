@@ -10,8 +10,11 @@ What it sends is set by a ``SimSignals`` object, which can be changed while
 streaming (the GUI's signal panel, or a script):
 
 - per gauge: live or open (railed at full scale, rail bit set), a baseline
-  (mV), and a sine (amplitude mV, frequency Hz, phase);
-- for all gauges: white noise (mV RMS) and a linear drift (mV/s);
+  (mV), a sine (amplitude mV, frequency Hz, phase) and white noise (mV RMS);
+- for all gauges: a linear drift (mV/s) and mains hum (amplitude mV at 50 or
+  60 Hz; each gauge picks it up with its own fixed coupling 0.3..1.5 and
+  phase). The hum is evaluated at the scan times, so a scan rate below 2x the
+  mains frequency aliases it (50 Hz at 80 Hz scans shows at 30 Hz);
 - taps: a decaying ring on one whisker (amplitude, frequency, decay time,
   direction split between gauges A and B), like a contact;
 - faults: the scan flags (ADC recovered / CRC retry / stale / re-init), a
@@ -61,8 +64,12 @@ class SimSignals:
     between scans (each block reads a consistent copy under ``lock``)."""
 
     rate_hz: float = 80.0
-    noise_mv: float = 0.2
     drift_mv_s: float = 0.0
+    hum_mv: float = 0.0
+    hum_hz: float = 50.0
+    noise_mv: np.ndarray = field(default_factory=lambda: np.full(NCH, 0.2))
+    hum_coupling: np.ndarray = field(default_factory=lambda: np.ones(NCH))
+    hum_phase_rad: np.ndarray = field(default_factory=lambda: np.zeros(NCH))
     live: np.ndarray = field(default_factory=lambda: np.zeros(NCH, bool))
     baseline_mv: np.ndarray = field(default_factory=lambda: np.zeros(NCH))
     amp_mv: np.ndarray = field(default_factory=lambda: np.zeros(NCH))
@@ -80,24 +87,57 @@ class SimSignals:
         rng = np.random.default_rng(1)
         self.baseline_mv = rng.uniform(400, 650, NCH)      # where a real bridge sits
         self.phase_rad = rng.uniform(0, 2 * math.pi, NCH)
+        self.hum_coupling = rng.uniform(0.3, 1.5, NCH)
+        self.hum_phase_rad = rng.uniform(-0.3, 0.3, NCH)   # same mains, small wiring differences
+        self._noise_spread = np.exp(rng.uniform(np.log(0.05), np.log(0.5), NCH))
         self.preset("demo")
 
     # ----- presets and edits (any thread)
 
-    PRESETS = ("demo", "all live", "all live, same", "all open")
+    PRESETS = ("demo", "all live", "all live, same", "all open",
+               "noise floor", "noisy gauges", "hum 50 Hz", "hum 60 Hz", "bench")
+    PRESET_HELP = (
+        "demo: 7 gauges, 0.5..12 Hz, 0.2 mV noise\n"
+        "all live: every gauge, 1..16 Hz by whisker\n"
+        "all live, same: every gauge 2 Hz 3 mV\n"
+        "all open: nothing plugged in\n"
+        "noise floor: every gauge live, no sine, noise 0.05..0.5 mV (fixed per gauge)\n"
+        "noisy gauges: demo plus W3_B 3 mV, W6_A 2 mV, W12 A/B 5 mV of noise\n"
+        "hum 50 Hz / hum 60 Hz: demo plus 2 mV of mains hum\n"
+        "bench: every gauge live with a 0.5 mV sine at 1..16 Hz, noise 0.05..0.5 mV, "
+        "1 mV of 50 Hz hum, 0.05 mV/s drift")
+    _DEMO = (("W1_A", 5, 1), ("W1_B", 3, 1), ("W3_B", 4, 2), ("W4_A", 2, 5),
+             ("W4_B", 2, 5), ("W8_B", 1, 12), ("W9_A", 6, 0.5))
 
     def preset(self, name: str) -> None:
-        """demo: a few gauges with distinct frequencies; all live: every gauge,
-        1..16 Hz by whisker; all live, same: every gauge 2 Hz 3 mV; all open."""
+        """Replace the signals with a named set (see ``PRESET_HELP``)."""
+        if name not in self.PRESETS:
+            raise ValueError(f"unknown preset {name!r}")
         with self.lock:
             self.live[:] = False
             self.amp_mv[:] = 0
             self.freq_hz[:] = 1
-            if name == "demo":
-                for ch, amp, f in (("W1_A", 5, 1), ("W1_B", 3, 1), ("W3_B", 4, 2), ("W4_A", 2, 5),
-                                   ("W4_B", 2, 5), ("W8_B", 1, 12), ("W9_A", 6, 0.5)):
+            self.noise_mv[:] = 0.2
+            self.hum_mv, self.hum_hz, self.drift_mv_s = 0.0, 50.0, 0.0
+            if name in ("demo", "noisy gauges", "hum 50 Hz", "hum 60 Hz"):
+                for ch, amp, f in self._DEMO:
                     i = CHANNEL_NAMES.index(ch)
                     self.live[i], self.amp_mv[i], self.freq_hz[i] = True, amp, f
+            if name == "noisy gauges":
+                for ch, noise in (("W3_B", 3), ("W6_A", 2), ("W12_A", 5), ("W12_B", 5)):
+                    i = CHANNEL_NAMES.index(ch)
+                    self.live[i], self.noise_mv[i] = True, noise
+            elif name in ("hum 50 Hz", "hum 60 Hz"):
+                self.hum_mv, self.hum_hz = 2.0, 50.0 if name == "hum 50 Hz" else 60.0
+            elif name == "noise floor":
+                self.live[:] = True
+                self.noise_mv[:] = self._noise_spread
+            elif name == "bench":
+                self.live[:] = True
+                self.amp_mv[:] = 0.5
+                self.freq_hz[:] = np.repeat(np.arange(1, NCH // 2 + 1), 2)
+                self.noise_mv[:] = self._noise_spread
+                self.hum_mv, self.drift_mv_s = 1.0, 0.05
             elif name == "all live":
                 self.live[:] = True
                 self.amp_mv[:] = 3
@@ -106,12 +146,12 @@ class SimSignals:
                 self.live[:] = True
                 self.amp_mv[:] = 3
                 self.freq_hz[:] = 2
-            elif name != "all open":
-                raise ValueError(f"unknown preset {name!r}")
 
     def set_channel(self, ch: int, *, live: bool | None = None, amp_mv: float | None = None,
-                    freq_hz: float | None = None) -> None:
+                    freq_hz: float | None = None, noise_mv: float | None = None) -> None:
         with self.lock:
+            if noise_mv is not None:
+                self.noise_mv[ch] = noise_mv
             if live is not None:
                 self.live[ch] = live
             if amp_mv is not None:
@@ -160,9 +200,12 @@ class SimSignals:
                                 * np.sin(2 * math.pi * tp.freq_hz * dt), 0.0)
                 mv[:, 2 * tp.whisker] += math.cos(tp.angle_rad) * ring
                 mv[:, 2 * tp.whisker + 1] += math.sin(tp.angle_rad) * ring
-            noise = self.noise_mv
-        if noise > 0:
-            mv += np.random.normal(0, noise, mv.shape)
+            if self.hum_mv:
+                mv += self.hum_mv * self.hum_coupling * np.sin(
+                    2 * math.pi * self.hum_hz * t[:, None] + self.hum_phase_rad)
+            noise = self.noise_mv.copy()
+        if noise.any():
+            mv += np.random.standard_normal(mv.shape) * noise
         rail = int(sum(1 << i for i in range(NCH) if not live[i]))
         return np.where(live, mv, np.nan), rail
 
