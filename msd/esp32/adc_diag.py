@@ -14,17 +14,19 @@ Subcommands (the ESP32 on a serial port, e.g. COM5 or /dev/ttyUSB0):
 ``selects``  Set the scanned mux selects (firmware ``S``), e.g. ``0123457`` or
              ``all``. The ESP32 forgets it on reboot.
 
-Settle analysis, per ADC channel: ``pre`` = mean of the conversions that ended
-before the switch, ``final`` = mean over the end of the window. The ideal
-response is what an instantaneous analog step does through the ADC's sinc3
-filter (computed for the same OSR and CLKIN): pre + (final - pre) * S(t - d),
-where S is the cumulative sinc3 impulse response and d a fitted latency (DRDY
-edge + ISR timing; fitted on the channel with the largest step and shared).
-What is left over is the analog tail. It is fitted as a decaying exponential
-A*exp(-t/tau) passed through the same sinc3 filter (the expectation is charge
-sharing: A ~ 3e-4 x (pre - final), tau ~ 100 us). The report gives A, tau, the
-time at which the tail is below 0.01 mV, and the binned data, as text,
-``<out>.html`` and (with matplotlib) ``<out>.png``.
+Settle analysis, per ADC channel with a step: ``pre`` = mean of the conversions
+that ended before the switch, ``final`` = mean over the end of the window. The
+analog input after the switch (u = t - d > 0) is modelled as a fast
+first-order response carrying the whole step plus a slow tail,
+pre + step*(1 - exp(-u/tau_a)) + A2*exp(-u/tau2), and seen through the
+ADC's sinc3 filter (computed for the same OSR and CLKIN). d is the latency
+(mux, DRDY edge, ISR). Each channel is fitted with |A2| bounded to 5 % of the
+step. The weights include DRDY timestamp jitter (--sigma-t-us), which
+dominates while the filtered signal moves by mV/us. The report gives d,
+tau_a, A2, tau2, the analog time at which the slow tail (and the fast part)
+fall below 3e-4 and 1e-4 of the step, and a residual table by time window
+(data minus the fast-only model, mean +- sem, beside the slow-tail fit), as
+text, ``<out>.html`` and (with matplotlib) ``<out>.png``.
 
 Needs numpy and scipy, pyserial for the commands that talk to the ESP32, and
 matplotlib only for the plot. All files are written as UTF-8.
@@ -51,7 +53,6 @@ BF_CRC, BF_STALE, BF_OVERRUN, BF_EDGELESS, BF_RESET = 0x01, 0x02, 0x04, 0x08, 0x
 BAD = BF_CRC | BF_STALE | BF_RESET | BF_OVERRUN | BF_EDGELESS
 DEFAULT_SPIS = [600_000, 1_000_000, 2_000_000, 3_000_000, 4_000_000, 5_000_000,
                 6_000_000, 8_000_000]
-SETTLED_MV = 0.01
 
 
 def crc16_ccitt(data: bytes, crc: int = 0xFFFF) -> int:
@@ -297,10 +298,32 @@ class Sinc3:
         return np.where(t >= self.length_us, 1.0, out)
 
     def exp_tail(self, t: np.ndarray, tau: float) -> np.ndarray:
-        """sinc3-filtered exp(-u/tau) for u > 0 (unit amplitude)."""
-        u = np.asarray(t, float)[:, None] - self.lag[None, :]
-        e = np.where(u > 0, np.exp(-np.clip(u, 0, None) / tau), 0.0)
-        return e @ self.h
+        """sinc3-filtered exp(-u/tau) for u > 0 (unit amplitude).
+
+        sum over lags with u_n = t - lag[n] > 0 of h[n] exp(-u_n / tau). With
+        lag[n] = n*ts + off and i = the last included lag this is
+        exp(-(t - lag[i]) / tau) * G[i], G[i] = sum_{n<=i} h[n] r^(i-n),
+        r = exp(-ts/tau): one recursive filter pass, O(N + L), no overflow.
+        """
+        from scipy.signal import lfilter
+
+        t = np.asarray(t, float)
+        ts = self.tmod * self.stride
+        off = self.lag[0]
+        g = lfilter([1.0], [1.0, -np.exp(-ts / tau)], self.h)
+        i = np.ceil((t - off) / ts).astype(np.int64) - 1          # lag[i] < t
+        i = np.minimum(i, len(self.h) - 1)
+        ok = i >= 0
+        out = np.zeros_like(t)
+        ii = i[ok]
+        out[ok] = np.exp(-(t[ok] - self.lag[ii]) / tau) * g[ii]
+        return out
+
+
+WINDOWS_US = ((150, 250), (250, 350), (350, 500), (500, 700), (700, 1000), (1000, 1400), (1400, 2000))
+TAIL_FRACS = (3e-4, 1e-4)
+SIGMA_T_US = 2.0          # DRDY timestamp jitter assumed by the fit weights
+TAU_A_MIN = 0.2
 
 
 @dataclass
@@ -311,20 +334,37 @@ class ChanFit:
     pre: float
     final: float
     noise: float            # sd of single conversions over the final part
-    delay_us: float
-    amp_mv: float
-    tau_us: float
-    amp_err: float
-    tau_err: float
-    significant: bool       # the tail stands out of the fit noise (|A| > 3 sigma, > SETTLED_MV
-                            # once the filter has seen the whole step)
-    t_settle_us: float | None   # tail (fit) below SETTLED_MV, from the switch
-    t_settle_data_us: float | None
-    bins: dict
+    fitted: bool            # False: no step big enough to fit
+    delay_us: float = float("nan")
+    tau_a_us: float = float("nan")      # fast analog first-order response (100 % of the step)
+    a2_mv: float = float("nan")         # slow tail amplitude at the switch
+    tau2_us: float = float("nan")
+    err: dict = field(default_factory=dict)      # 1-sigma of the above
+    rms: float = float("nan")                    # weighted-fit residual rms, mV
+    t_slow_us: dict = field(default_factory=dict)  # frac -> analog time (from the switch)
+    t_fast_us: dict = field(default_factory=dict)  #   when that part is below frac x step
+    windows: list = field(default_factory=list)    # (lo, hi, mean, sem, n, slow-fit mean)
+    bins: dict = field(default_factory=dict)
+
+    @property
+    def step(self) -> float:
+        return self.final - self.pre
+
+
+def _fast(filt, pre, step, t, d, ta):
+    """Analog first-order step (time constant ta, delay d) through the sinc3."""
+    return pre + step * (filt.step(t - d) - filt.exp_tail(t - d, ta))
 
 
 def analyze(s: Settle, final_from_us: float | None = None, bin_us: float | None = None,
-            fit_delay: bool = True) -> tuple[list[ChanFit], list[str]]:
+            sigma_t_us: float = SIGMA_T_US) -> tuple[list[ChanFit], list[str]]:
+    """Fit pre + step * (1 - exp(-u/tau_a)) + A2 * exp(-u/tau2), u = t - d > 0,
+    through the sinc3 filter, per channel with a step.
+
+    Weights: 1 / sqrt(noise^2 + (slope * sigma_t)^2). Around the step the
+    filtered signal moves by several mV/us, so the DRDY timestamp jitter, not
+    the ADC noise, sets the error there. Soft-L1 loss against outliers.
+    """
     from scipy.optimize import least_squares
 
     m = s.meta
@@ -345,6 +385,9 @@ def analyze(s: Settle, final_from_us: float | None = None, bin_us: float | None 
         notes.append("WARNING capture truncated (DRDY timeout)")
     notes.append(f"read_us_max {e.get('read_us_max')} lat_us_max {e.get('lat_us_max')}"
                  f" (conversion period {period:.1f} us)")
+    if "jitter_us" not in m:
+        notes.append("rep spacing not randomized (firmware before the jitter_us option):"
+                     " a board line at a multiple of 1/dwell adds up coherently across reps")
     t = s.t_us.astype(float)
     if final_from_us is None:
         final_from_us = 0.6 * window
@@ -355,90 +398,84 @@ def analyze(s: Settle, final_from_us: float | None = None, bin_us: float | None 
         raise ValueError("not enough clean conversions before the switch / at the end of the window")
     if bin_us is None:
         bin_us = period / max(1, int(m.get("dither", 1)))
-    pre = mv[pre_m].mean(0)
-    fin = mv[fin_m].mean(0)
-    noise = mv[fin_m].std(0)
-    step = fin - pre
-
-    def model(p, c, delay_fixed=None):
-        if delay_fixed is None:
-            d, amp, tau = p
-        else:
-            (amp, tau), d = p, delay_fixed
-        tt = t[post_m] - d
-        return pre[c] + step[c] * filt.step(tt) + amp * filt.exp_tail(tt, tau)
-
-    def fit(c, delay_fixed=None):
-        y = mv[post_m, c]
-        a0 = 3e-4 * (pre[c] - fin[c]) or 1e-3
-        if delay_fixed is None:
-            p0, lo, hi = [0.0, a0, 100.0], [-period, -50.0, 1.0], [period, 50.0, 1e4]
-            r = least_squares(lambda p: model(p, c) - y, p0, bounds=(lo, hi), x_scale=[5, 0.01, 50])
-        else:
-            p0, lo, hi = [a0, 100.0], [-50.0, 1.0], [50.0, 1e4]
-            r = least_squares(lambda p: model(p, c, delay_fixed) - y, p0, bounds=(lo, hi),
-                              x_scale=[0.01, 50])
-        # 1-sigma from the Jacobian
-        try:
-            dof = max(1, len(y) - len(r.x))
-            cov = np.linalg.inv(r.jac.T @ r.jac) * (2 * r.cost / dof)
-            err = np.sqrt(np.clip(np.diag(cov), 0, None))
-        except np.linalg.LinAlgError:
-            err = np.full(len(r.x), np.nan)
-        return r.x, err
-
-    big = int(np.argmax(np.abs(step)))
-    if fit_delay and abs(step[big]) > 20 * max(noise[big], 1e-6):
-        (delay, _, _), _ = fit(big)
-        notes.append(f"latency d = {delay:.2f} us, fitted on CH{big} (step {step[big]:+.1f} mV)")
-    else:
-        delay = 0.0
-        notes.append("latency d fixed at 0 (no channel with a large enough step)")
+    pre_all, fin_all = mv[pre_m].mean(0), mv[fin_m].mean(0)
+    noise_all = mv[fin_m].std(0)
+    tp = t[post_m]
+    hi_d = max(2 * period, 100.0)
+    of, ot = m.get("out_from", [0] * 4), m.get("out_to", [0] * 4)
 
     fits = []
-    of, ot = m.get("out_from", [0] * 4), m.get("out_to", [0] * 4)
     for c in range(4):
-        (amp, tau), (ea, et) = fit(c, delay)
-        ideal = pre[c] + step[c] * filt.step(t - delay)
-        diff = mv[:, c] - ideal
+        pre, fin, noise = float(pre_all[c]), float(fin_all[c]), float(noise_all[c])
+        step = fin - pre
+        cf = ChanFit(c, of[c], ot[c], pre, fin, noise, False)
+        fits.append(cf)
+        if abs(step) < max(5.0, 20 * noise):
+            continue
+        y = mv[post_m, c]
+        sn = max(noise, 0.005)
+        lim = 0.05 * abs(step)
+
+        def model(p, tt=tp):
+            d, ta, a2, t2 = p
+            return _fast(filt, pre, step, tt, d, ta) + a2 * filt.exp_tail(tt - d, t2)
+
+        best = None
+        for d0 in (5.0, 20.0, 40.0):
+            for ta0 in (3.0, 10.0, 30.0):
+                slope = (_fast(filt, pre, step, tp + 0.5, d0, ta0)
+                         - _fast(filt, pre, step, tp - 0.5, d0, ta0))
+                w = 1.0 / np.sqrt(sn ** 2 + (slope * sigma_t_us) ** 2)
+                for t20 in (40.0, 100.0, 300.0):
+                    r = least_squares(lambda p: (model(p) - y) * w,
+                                      [min(d0, hi_d), ta0, -0.003 * step, t20],
+                                      bounds=([-period, TAU_A_MIN, -lim, 15.0], [hi_d, 60.0, lim, 3000.0]),
+                                      x_scale=[5.0, 5.0, max(0.003 * abs(step), 0.01), 50.0],
+                                      loss="soft_l1", f_scale=3.0)
+                    if best is None or r.cost < best.cost:
+                        best, best_w = r, w
+        d, ta, a2, t2 = (float(x) for x in best.x)
+        try:
+            jac = best.jac
+            cov = np.linalg.pinv(jac.T @ jac) * (2 * best.cost / max(1, len(y) - 4))
+            errs = np.sqrt(np.clip(np.diag(cov), 0, None))
+        except np.linalg.LinAlgError:
+            errs = np.full(4, np.nan)
+        cf.fitted = True
+        cf.delay_us, cf.tau_a_us, cf.a2_mv, cf.tau2_us = d, ta, a2, t2
+        cf.err = dict(zip(("delay_us", "tau_a_us", "a2_mv", "tau2_us"), map(float, errs)))
+        cf.rms = float(np.sqrt(np.mean(((model(best.x) - y)) ** 2)))
+        for frac in TAIL_FRACS:
+            lvl = frac * abs(step)
+            cf.t_slow_us[frac] = d + (t2 * np.log(abs(a2) / lvl) if abs(a2) > lvl else 0.0)
+            cf.t_fast_us[frac] = d + ta * np.log(1.0 / frac)
+        fast_all = _fast(filt, pre, step, t, d, ta)
+        diff = mv[:, c] - fast_all
+        slow = a2 * filt.exp_tail(t - d, t2)
+        for lo, hi in WINDOWS_US:
+            k = good & (t >= lo) & (t < hi)
+            n = int(k.sum())
+            if n:
+                cf.windows.append((lo, hi, float(diff[k].mean()),
+                                   float(diff[k].std() / np.sqrt(n)) if n > 1 else float("nan"),
+                                   n, float(slow[k].mean())))
         sel = good & (t > -3 * period) & (t <= window + period)
         edges = np.arange(np.floor(t[sel].min() / bin_us) * bin_us, t[sel].max() + bin_us, bin_us)
         idx = np.digitize(t[sel], edges) - 1
-        b = {"t_us": [], "n": [], "mv": [], "ideal_mv": [], "diff_mv": [], "diff_sem": []}
+        b = {k: [] for k in ("t_us", "n", "mv", "model_mv", "diff_mv", "diff_sem", "slow_mv")}
+        full = fast_all + slow
         for i in np.unique(idx):
             k = idx == i
-            if k.sum() == 0:
-                continue
             b["t_us"].append(float(t[sel][k].mean()))
             b["n"].append(int(k.sum()))
             b["mv"].append(float(mv[sel, c][k].mean()))
-            b["ideal_mv"].append(float(ideal[sel][k].mean()))
+            b["model_mv"].append(float(full[sel][k].mean()))
             b["diff_mv"].append(float(diff[sel][k].mean()))
             b["diff_sem"].append(float(diff[sel][k].std() / np.sqrt(k.sum())) if k.sum() > 1 else np.nan)
-        # Without a real tail A and tau trade off (tiny tau, any A); judge it by
-        # what the fitted tail leaves once the filter has seen the whole step.
-        visible = abs(amp * filt.exp_tail(np.array([filt.length_us]), tau)[0])
-        sig = bool(abs(amp) > 3 * ea and visible > SETTLED_MV)
-        ts = delay + filt.length_us
-        if sig:
-            ts += tau * np.log(visible / SETTLED_MV)
-        # From the data: after the filter has seen the whole step, the last
-        # point where the tail, smoothed over one conversion period, is above
-        # SETTLED_MV by more than 3 sigma.
-        td = None
-        bt, bd, bs = map(np.asarray, (b["t_us"], b["diff_mv"], b["diff_sem"]))
-        w = max(1, int(round(period / bin_us)))
-        if len(bd) >= w:
-            ker = np.ones(w) / w
-            bd = np.convolve(bd, ker, mode="same")
-            bs = np.sqrt(np.convolve(np.nan_to_num(bs) ** 2, ker, mode="same") / w)
-        after = bt >= delay + filt.length_us
-        loud = after & (np.abs(bd) - 3 * bs > SETTLED_MV)
-        if after.any():
-            td = float(bt[loud].max()) if loud.any() else float(bt[after].min())
-        fits.append(ChanFit(c, of[c], ot[c], float(pre[c]), float(fin[c]), float(noise[c]),
-                            float(delay), float(amp), float(tau), float(ea), float(et), sig,
-                            float(ts), td, b))
+            b["slow_mv"].append(float(slow[sel][k].mean()))
+        cf.bins = b
+    if not any(f.fitted for f in fits):
+        notes.append("no channel has a step to fit (need |final - pre| > max(5 mV, 20 x noise))")
     return fits, notes
 
 
@@ -448,27 +485,46 @@ def settle_text(s: Settle, fits: list[ChanFit], notes: list[str]) -> str:
     lines = [f"mux settle: select {m['from']} -> {m['to']}, CLKIN {m['clkin_hz']/1e6:g} MHz,"
              f" OSR {m['osr']} ({m['fdata_sps']:.0f} SPS, {float(m['period_us']):.1f} us),"
              f" SPI {m.get('spi_actual', m.get('spi_hz', 0))/1e6:g} MHz, {m['reps']} reps,"
-             f" dither {m['dither']}; sinc3 sees the whole step after {filt_us:.0f} us"]
+             f" dither {m['dither']}, rep jitter {m.get('jitter_us', 0)} us;"
+             f" sinc3 window {filt_us:.0f} us"]
     lines += [f"  {n}" for n in notes]
-    lines.append("   ch  OUT from->to     pre_mV   final_mV    step_mV  noise_mV    tail_A_mV"
-                 "     tau_us  A*tau_mVus  A/(pre-final)  tail<0.01mV_at_us (fit / data)")
+    lines.append("model (analog, u = t - d > 0): pre + step*(1 - exp(-u/tau_a)) + A2*exp(-u/tau2),"
+                 " seen through the sinc3")
+    lines.append("   ch  OUT from->to     pre_mV   final_mV    step_mV  noise_mV     d_us        tau_a_us"
+                 "        A2_mV     A2/step    tau2_us   rms_mV")
     for f in fits:
-        rel = f.amp_mv / (f.pre - f.final) if abs(f.pre - f.final) > 1e-9 else float("nan")
-        tail = (f"{f.amp_mv:+8.4f}±{f.amp_err:.4f} {f.tau_us:7.1f}±{f.tau_err:<5.1f}"
-                f" {f.amp_mv * f.tau_us:+10.3f} {rel:+12.2e}" if f.significant
-                else f"{'no significant tail':>48}")
-        lines.append(f"  CH{f.ch}  OUT{f.out_from:>2}->OUT{f.out_to:<2} {f.pre:+10.3f} {f.final:+10.3f}"
-                     f" {f.final - f.pre:+10.3f} {f.noise:9.4f} {tail}   "
-                     f"{_fmt(f.t_settle_us)} / {_fmt(f.t_settle_data_us)}")
+        head = (f"  CH{f.ch}  OUT{f.out_from:>2}->OUT{f.out_to:<2} {f.pre:+10.3f} {f.final:+10.3f}"
+                f" {f.step:+10.3f} {f.noise:9.4f}")
+        if not f.fitted:
+            lines.append(head + "   no step to fit")
+            continue
+        e = f.err
+        ta = (f"<={TAU_A_MIN:g} (bound)" if f.tau_a_us <= TAU_A_MIN * 1.01
+              else f"{f.tau_a_us:5.1f}±{e.get('tau_a_us', np.nan):<5.1f}")
+        lines.append(head + f" {f.delay_us:5.1f}±{e.get('delay_us', np.nan):<4.1f} {ta:>14}"
+                     f" {f.a2_mv:+8.3f}±{e.get('a2_mv', np.nan):<6.3f} {f.a2_mv / f.step:+.2e}"
+                     f" {f.tau2_us:6.0f}±{e.get('tau2_us', np.nan):<4.0f} {f.rms:7.3f}")
+    for f in fits:
+        if not f.fitted:
+            continue
+        lines.append(f"  CH{f.ch} (step {f.step:+.1f} mV), analog time from the switch when each part is"
+                     " below a fraction of the step:")
+        for frac in TAIL_FRACS:
+            lines.append(f"     {frac:.0e} x step ({frac * abs(f.step):.3f} mV): slow tail at"
+                         f" {f.t_slow_us[frac]:5.0f} us, fast part at {f.t_fast_us[frac]:5.0f} us"
+                         f"  -> a conversion must END >= {max(f.t_slow_us[frac], f.t_fast_us[frac]) + filt_us:.0f} us")
+        if f.tau_a_us <= TAU_A_MIN * 1.01:
+            lines.append("     (tau_a at its lower bound: the fast part is not resolved from the delay"
+                         " d at this rate; d is the effective delay)")
+        lines.append("      window_us     data - fast-only model, mV        slow-tail fit, mV      n")
+        for lo, hi, mean, sem, n, slow in f.windows:
+            lines.append(f"     {lo:5d}-{hi:<5d}   {mean:+9.4f} ± {sem:.4f}            {slow:+9.4f}        {n:5d}")
     return "\n".join(lines)
 
 
-def _fmt(v) -> str:
-    return "-" if v is None else f"{v:.0f}"
-
-
-def settle_report(s: Settle, out: Path, final_from_us=None, bin_us=None) -> list[ChanFit]:
-    fits, notes = analyze(s, final_from_us, bin_us)
+def settle_report(s: Settle, out: Path, final_from_us=None, bin_us=None,
+                  sigma_t_us: float = SIGMA_T_US) -> list[ChanFit]:
+    fits, notes = analyze(s, final_from_us, bin_us, sigma_t_us)
     text = settle_text(s, fits, notes)
     print(text)
     png = _settle_plot(s, fits, out.with_suffix(".png"))
@@ -479,6 +535,9 @@ def settle_report(s: Settle, out: Path, final_from_us=None, bin_us=None) -> list
 
 
 def _settle_plot(s: Settle, fits: list[ChanFit], path: Path) -> bytes | None:
+    fitted = [f for f in fits if f.fitted]
+    if not fitted:
+        return None
     try:
         import matplotlib
     except ImportError:
@@ -487,28 +546,28 @@ def _settle_plot(s: Settle, fits: list[ChanFit], path: Path) -> bytes | None:
     import matplotlib.pyplot as plt
 
     m = s.meta
-    filt = Sinc3(int(m["osr"]), float(m["clkin_hz"]))
-    fig, axs = plt.subplots(4, 2, figsize=(12, 13), squeeze=False)
-    for f in fits:
+    fig, axs = plt.subplots(len(fitted), 2, figsize=(12, 3.4 * len(fitted)), squeeze=False)
+    for row, f in zip(axs, fitted):
         b = {k: np.asarray(v) for k, v in f.bins.items()}
-        ax = axs[f.ch, 0]
+        ax = row[0]
         ax.plot(b["t_us"], b["mv"], ".", ms=3, label="measured (bin mean)")
-        ax.plot(b["t_us"], b["ideal_mv"], "-", lw=1, label="ideal sinc3 step")
+        ax.plot(b["t_us"], b["model_mv"], "-", lw=1, label="fit")
         ax.axvline(0, color="0.6", lw=0.6)
-        ax.set_title(f"CH{f.ch}: OUT{f.out_from} -> OUT{f.out_to}", fontsize=9)
+        ax.set_title(f"CH{f.ch}: OUT{f.out_from} -> OUT{f.out_to}, step {f.step:+.1f} mV", fontsize=9)
         ax.set_ylabel("mV")
         ax.legend(fontsize=7)
-        ax = axs[f.ch, 1]
+        ax = row[1]
         ax.errorbar(b["t_us"], b["diff_mv"], yerr=b["diff_sem"], fmt=".", ms=3, lw=0.6,
-                    label="measured - ideal")
-        tt = np.linspace(0, b["t_us"].max(), 400)
-        ax.plot(tt, f.amp_mv * filt.exp_tail(tt - f.delay_us, f.tau_us), "r-", lw=1,
-                label=f"fit A={f.amp_mv:+.4f} mV, tau={f.tau_us:.0f} us")
-        for y in (SETTLED_MV, -SETTLED_MV):
-            ax.axhline(y, color="0.7", lw=0.6, ls="--")
-        lim = max(5 * abs(f.amp_mv), 4 * SETTLED_MV)
+                    label="data - fast-only fit")
+        ax.plot(b["t_us"], b["slow_mv"], "r-", lw=1,
+                label=f"slow tail A2={f.a2_mv:+.3f} mV, tau2={f.tau2_us:.0f} us")
+        for frac, ls in zip(TAIL_FRACS, ("--", ":")):
+            for sg in (1, -1):
+                ax.axhline(sg * frac * abs(f.step), color="0.6", lw=0.7, ls=ls)
+        lim = max(4 * 3e-4 * abs(f.step), 0.05)
         ax.set_ylim(-lim, lim)
-        ax.set_ylabel("analog tail, mV")
+        ax.set_xlim(left=0)
+        ax.set_ylabel("mV (lines: 3e-4, 1e-4 x step)")
         ax.legend(fontsize=7)
     for ax in axs[-1]:
         ax.set_xlabel("us since mux switch (conversion end)")
@@ -524,16 +583,18 @@ def _settle_plot(s: Settle, fits: list[ChanFit], path: Path) -> bytes | None:
 
 def _settle_html(s: Settle, fits: list[ChanFit], text: str, png: bytes | None) -> str:
     img = (f'<img src="data:image/png;base64,{base64.b64encode(png).decode()}" alt="settle plot">'
-           if png else "<p><i>No plot: matplotlib was not installed.</i></p>")
+           if png else "<p><i>No plot (matplotlib not installed, or no channel with a step).</i></p>")
     tables = []
     for f in fits:
-        rows = "".join(f"<tr><td>{t:.1f}</td><td>{n}</td><td>{v:+.4f}</td><td>{i:+.4f}</td>"
-                       f"<td>{d:+.4f}</td><td>{e:.4f}</td></tr>"
-                       for t, n, v, i, d, e in zip(*(f.bins[k] for k in
-                                                     ("t_us", "n", "mv", "ideal_mv", "diff_mv", "diff_sem"))))
+        if not f.fitted:
+            continue
+        keys = ("t_us", "n", "mv", "model_mv", "diff_mv", "diff_sem", "slow_mv")
+        rows = "".join(f"<tr><td>{t:.1f}</td><td>{n}</td><td>{v:+.4f}</td><td>{mo:+.4f}</td>"
+                       f"<td>{d:+.4f}</td><td>{e:.4f}</td><td>{sl:+.4f}</td></tr>"
+                       for t, n, v, mo, d, e, sl in zip(*(f.bins[k] for k in keys)))
         tables.append(f"<details><summary>CH{f.ch} binned data</summary><table><tr><th>t, us</th>"
-                      f"<th>n</th><th>mV</th><th>ideal mV</th><th>diff mV</th><th>sem</th></tr>"
-                      f"{rows}</table></details>")
+                      f"<th>n</th><th>mV</th><th>fit mV</th><th>data - fast mV</th><th>sem</th>"
+                      f"<th>slow fit mV</th></tr>{rows}</table></details>")
     return f"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Mux settle</title>
 <style>
@@ -557,22 +618,22 @@ td,th {{ border-bottom:1px solid var(--line); padding:1px 8px; text-align:right;
 
 def cmd_settle(a) -> int:
     cmd = (f"D{a.from_sel} {a.to_sel} {a.clkin} {a.osr} {a.spi} {a.reps} {a.window_us}"
-           f" {a.dither} {a.dwell_us};")
+           f" {a.dither} {a.dwell_us} {a.jitter_us};")
     lines_est = a.reps * (4 + a.window_us / (2e6 * a.osr / a.clkin) + 2)
-    budget = a.reps * (a.dwell_us + a.window_us) / 1e6 + lines_est * 50 * 10 / 921600 + 20
+    budget = a.reps * (a.dwell_us + a.jitter_us + a.window_us) / 1e6 + lines_est * 50 * 10 / 921600 + 20
     print(f"settle diag: {cmd}  (up to {budget:.0f} s)", flush=True)
     raw = run_command(a.port, cmd, (b"#END", b"#SETTLEERR"), budget)
     a.out.with_suffix(".txt").write_bytes(raw)
     s = parse_settle(raw)
     save_settle_npz(a.out.with_suffix(".npz"), s)
     print(f"saved {a.out.with_suffix('.txt')} and {a.out.with_suffix('.npz')}")
-    settle_report(s, a.out, a.final_from_us, a.bin_us)
+    settle_report(s, a.out, a.final_from_us, a.bin_us, a.sigma_t_us)
     return 0
 
 
 def cmd_analyze(a) -> int:
     s = load_settle(a.file)
-    settle_report(s, a.out or a.file.with_suffix(""), a.final_from_us, a.bin_us)
+    settle_report(s, a.out or a.file.with_suffix(""), a.final_from_us, a.bin_us, a.sigma_t_us)
     return 0
 
 
@@ -618,6 +679,8 @@ def main(argv=None) -> int:
     an = argparse.ArgumentParser(add_help=False)
     an.add_argument("--final-from-us", type=float, help="final value = mean after this (default 0.6 x window)")
     an.add_argument("--bin-us", type=float, help="bin width (default period / dither)")
+    an.add_argument("--sigma-t-us", type=float, default=SIGMA_T_US,
+                    help="DRDY timestamp jitter for the fit weights (default %(default)s us)")
 
     p = sub.add_parser("settle", parents=[an], help="fine mux settle diagnostic")
     p.add_argument("--port", required=True)
@@ -630,6 +693,8 @@ def main(argv=None) -> int:
     p.add_argument("--window-us", type=int, default=2000)
     p.add_argument("--dither", type=int, default=4, help="switch phases per conversion period")
     p.add_argument("--dwell-us", type=int, default=3000)
+    p.add_argument("--jitter-us", type=int, default=1000,
+                   help="random 0..N us added to each rep's dwell (breaks coherence with board lines)")
     p.add_argument("--out", type=Path, default=Path(f"settle_{stamp}"))
     p.set_defaults(func=cmd_settle)
 

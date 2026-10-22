@@ -53,10 +53,11 @@
  *            "#BURST ..." header, one "t_us flags c0 c1 c2 c3" line per
  *            conversion and "#END lines= crc=". Restores the normal config.
  *            Host side: msd/esp32/burst_spectrum.py. Details at burst_capture.
- *    D<from> <to> [clkin] [osr] [spi] [reps] [window_us] [dither] [dwell_us];
+ *    D<from> <to> [clkin] [osr] [spi] [reps] [window_us] [dither] [dwell_us] [jitter_us];
  *            FINE MUX SETTLE: per rep, dwell on <from>, switch to <to> and
  *            read every conversion for window_us (defaults 8 MHz, OSR 256,
- *            SPI 4 MHz, 64 reps, 2000 us, dither 4, dwell 3000 us); dumps all
+ *            SPI 4 MHz, 64 reps, 2000 us, dither 4, dwell 3000 us + random
+ *            0..1000 us per rep); dumps all
  *            of them. Host: msd/esp32/adc_diag.py settle. See settle_fine.
  *    p[clkin] [osr] [secs] [spi_hz ...];
  *            SPI SPEED SWEEP: per SPI clock, read every conversion for <secs>
@@ -1318,9 +1319,12 @@ static void burst_cmd() {
 // sharing, not the mux (~0.1 us): at the switch the COM node (~30 pF) dumps
 // the previous channel's voltage into the new channel's 1 k / 0.1 uF filter,
 // a kick of ~3e-4 x the voltage difference that recovers with tau ~100 us.
-//   D<from> <to> [clkin] [osr] [spi] [reps] [window_us] [dither] [dwell_us]
-//   defaults 8000000 256 4000000 64 2000 4 3000.  Example "D6 2 8000000 256 4000000;"
-// Per rep: dwell on <from> for dwell_us reading every conversion, wait
+//   D<from> <to> [clkin] [osr] [spi] [reps] [window_us] [dither] [dwell_us] [jitter_us]
+//   defaults 8000000 256 4000000 64 2000 4 3000 1000.  Example "D6 2 8000000 256 4000000;"
+// Per rep: dwell on <from> for dwell_us + a random 0..jitter_us (esp_random)
+// reading every conversion. A fixed rep spacing is a multiple of the period of
+// any board line at k/dwell (1 kHz with 3000 us), which then adds up coherently
+// across reps and fakes a tail; the random spacing averages it out. Then wait
 // (rep % dither) / dither of a conversion period (so the switch lands at
 // different phases and the host can resolve below one period), switch to
 // <to>, read every conversion for window_us. Pick a <from> where the channel
@@ -1328,7 +1332,7 @@ static void burst_cmd() {
 // Output (lines '\n'-terminated):
 //   #SETTLE v1 from= to= out_from=a,b,c,d out_to=a,b,c,d clkin_hz= osr= fdata_sps=
 //              period_us= spi_hz= spi_actual= reps= window_us= dither= dwell_us=
-//              mux_us= clock_rb= mv_per_code=
+//              jitter_us= mux_us= clock_rb= mv_per_code=
 //   rep t_us flags c0 c1 c2 c3   t_us = DRDY edge (end of conversion) minus the
 //                                start of mux_select; the last 4 conversions
 //                                before the switch come first (t_us < 0)
@@ -1338,13 +1342,14 @@ static void burst_cmd() {
 #define SD_MAXK  512
 
 static void settle_fine(int from, int to, long clkin, long osr, long spi, long reps,
-                        long windowUs, long dither, long dwellUs) {
+                        long windowUs, long dither, long dwellUs, long jitterUs) {
     const char *err = fastCfgCheck(clkin, osr, spi);
     if (from < 0 || from >= NUM_SEL || to < 0 || to >= NUM_SEL) err = "bad select";
     if (reps < 1 || reps > 4096)                 err = "reps out of 1-4096";
     if (windowUs < 50 || windowUs > 50000)       err = "window_us out of 50-50000";
     if (dither < 1 || dither > 64)               err = "dither out of 1-64";
     if (dwellUs < 100 || dwellUs > 200000)       err = "dwell_us out of 100-200000";
+    if (jitterUs < 0 || jitterUs > 100000)       err = "jitter_us out of 0-100000";
     if (err) { Serial.printf("#SETTLEERR %s\n", err); return; }
     Conv *buf = (Conv *)malloc(sizeof(Conv) * (SD_MAXK + 4));
     if (!buf) { Serial.print("#SETTLEERR out of RAM\n"); return; }
@@ -1360,12 +1365,13 @@ static void settle_fine(int from, int to, long clkin, long osr, long spi, long r
     uint32_t m0 = micros(); mux_select(from); uint32_t muxUs = micros() - m0;
     Serial.printf("#SETTLE v1 from=%d to=%d out_from=%u,%u,%u,%u out_to=%u,%u,%u,%u"
                   " clkin_hz=%lu osr=%ld fdata_sps=%.3f period_us=%.3f spi_hz=%ld spi_actual=%lu"
-                  " reps=%ld window_us=%ld dither=%ld dwell_us=%ld mux_us=%lu clock_rb=0x%04X"
+                  " reps=%ld window_us=%ld dither=%ld dwell_us=%ld jitter_us=%ld mux_us=%lu"
+                  " clock_rb=0x%04X"
                   " mv_per_code=%.12g\n",
                   from, to, OUT_OF[0][from], OUT_OF[1][from], OUT_OF[2][from], OUT_OF[3][from],
                   OUT_OF[0][to], OUT_OF[1][to], OUT_OF[2][to], OUT_OF[3][to],
                   (unsigned long)cfg.clkActual, osr, cfg.fdata, cfg.periodUs, spi,
-                  (unsigned long)cfg.spiActual, reps, windowUs, dither, dwellUs,
+                  (unsigned long)cfg.spiActual, reps, windowUs, dither, dwellUs, jitterUs,
                   (unsigned long)muxUs, cfg.clockRb, (double)VREF * 1000.0 / ADC_FS);
 
     uint32_t nCrc = 0, nStale = 0, nOver = 0, nMissed = 0, nEdge = 0, nReset = 0;
@@ -1378,8 +1384,9 @@ static void settle_fine(int from, int to, long clkin, long osr, long spi, long r
         drdyResync();
         Conv pre[4];
         int np = 0;
+        uint32_t dwell = (uint32_t)dwellUs + (jitterUs ? esp_random() % (uint32_t)(jitterUs + 1) : 0);
         uint32_t t0 = micros();
-        while (micros() - t0 < (uint32_t)dwellUs || np < 4) {
+        while (micros() - t0 < dwell || np < 4) {
             if (!readConv(cfg.timeoutMs, &pre[np % 4])) { fail = true; break; }
             np++;
         }
@@ -1423,13 +1430,13 @@ static void settle_fine(int from, int to, long clkin, long osr, long spi, long r
 static void settle_fine_cmd() {
     char buf[96];
     readCmdLine(buf, sizeof(buf));
-    long v[9] = {-1, -1, 8000000, 256, 4000000, 64, 2000, 4, 3000};
-    if (parseLongs(buf, v, 9) < 2) {
+    long v[10] = {-1, -1, 8000000, 256, 4000000, 64, 2000, 4, 3000, 1000};
+    if (parseLongs(buf, v, 10) < 2) {
         Serial.print("#SETTLEERR usage: D<from> <to> [clkin] [osr] [spi] [reps] [window_us]"
-                     " [dither] [dwell_us] then ';' or newline\n");
+                     " [dither] [dwell_us] [jitter_us] then ';' or newline\n");
         return;
     }
-    settle_fine((int)v[0], (int)v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8]);
+    settle_fine((int)v[0], (int)v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8], v[9]);
 }
 
 // ── SPI speed sweep ('p') ────────────────────────────────────────────────────
@@ -1629,7 +1636,7 @@ void setup() {
     Serial.println("          v=abs/delta  m=map  c=calibrate  n=noise  [ ]=scale  0=auto");
     Serial.println("          d<0-7>=mux settling diagnostic for that select");
     Serial.println("          r<sel> [n] [osr] [clkin_hz] [spi_hz];=raw burst (see header)");
-    Serial.println("          D<from> <to> [clkin] [osr] [spi] [reps] [win] [dither] [dwell];=fine settle");
+    Serial.println("          D<from> <to> [clkin] [osr] [spi] [reps] [win] [dither] [dwell] [jitter];=fine settle");
     Serial.println("          p[clkin] [osr] [secs] [spi ...];=SPI speed sweep");
     Serial.println("          S<digits>;=scan only these selects (S; = all 8)");
 }
