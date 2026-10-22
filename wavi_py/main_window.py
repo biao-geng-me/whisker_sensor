@@ -381,6 +381,8 @@ class MainWindow(QMainWindow):
         self._record_btn.setEnabled(True)
         self._set_transport_inputs_enabled(False)
         self._path_label.setText(f"Connected to {client.endpoint_str} — output dir: {self._outpath}")
+        self._line_view.set_stream_status(f"Connected to {client.endpoint_str}")
+        self._last_status_t = 0.0
         self._timer.start()
 
     def _disconnect(self) -> None:
@@ -397,6 +399,7 @@ class MainWindow(QMainWindow):
         self._record_btn.setEnabled(False)
         self._set_transport_inputs_enabled(True)
         self._path_label.setText(f"Disconnected. Output dir: {self._outpath}")
+        self._line_view.set_stream_status("Disconnected")
         self._progress.setValue(0)
 
     def _on_link_lost(self) -> None:
@@ -405,6 +408,7 @@ class MainWindow(QMainWindow):
         was_recording = self._is_recording
         self._disconnect()
         msg = f"Connection lost: {reason}. Click Connect to reconnect."
+        self._line_view.set_stream_status(f"Connection lost: {reason}")
         if was_recording:
             msg += " The local recording was saved; the ROV-side recording may still be running."
         self._path_label.setText(msg)
@@ -602,24 +606,33 @@ class MainWindow(QMainWindow):
             n = len(self._imu_rows)
             if not self._is_paused and self._imu_view.isVisible():
                 self._imu_view.update_view(np.arange(-n + 1, 1) / hz, self._imu_rows)
-        if st and st.get("t", 0) != self._last_status_t and not self._is_recording:
+        if st and st.get("t", 0) != self._last_status_t:
             self._last_status_t = st.get("t", 0)
-            hz = st.get("hz", {})
-            rec = st.get("rec", {})
-            if self._client.transport_kind == "server":
-                pi_rec = f"ROV rec {rec.get('secs', 0):.0f}s" if rec.get("on") else "ROV rec off"
-            else:
-                pi_rec = "streaming" if st.get("esp32", {}).get("streaming") else "NOT streaming"
-            e = st.get("esp32", {})
-            # running totals since daq_server started; adc-crc = SPI reads re-read,
-            # adc-stale = scans where a read had no new conversion (dropped)
-            errs = (f"errs: gap {e.get('seq_gaps', 0)} link-crc {e.get('crc_fail', 0)} "
-                    f"adc-crc {e.get('adc_crc', 0)} adc-stale {e.get('adc_stale', 0)} "
-                    f"adc-recov {e.get('adc_recov', 0)} adc-reinit {e.get('adc_reinit', 0)}")
-            imu = (f"IMU {hz.get('RAW_IMU', 0):g} Hz | att {hz.get('ATTITUDE', 0):g} Hz | "
-                   if self._client.transport_kind == "server" else "")
-            self._path_label.setText(
-                f"{self._client.endpoint_str} | whisker {self._fs:.2f} Hz | {imu}{pi_rec}"
+            text = self._format_status(st)
+            # the line window's status bar always shows it; the panel's label
+            # keeps "Recording -> path" while recording
+            self._line_view.set_stream_status(text)
+            if not self._is_recording:
+                self._path_label.setText(text)
+
+    def _format_status(self, st: dict) -> str:
+        """One line from the server / ESP32 status record."""
+        assert self._client is not None
+        hz = st.get("hz", {})
+        rec = st.get("rec", {})
+        if self._client.transport_kind == "server":
+            pi_rec = f"ROV rec {rec.get('secs', 0):.0f}s" if rec.get("on") else "ROV rec off"
+        else:
+            pi_rec = "streaming" if st.get("esp32", {}).get("streaming") else "NOT streaming"
+        e = st.get("esp32", {})
+        # running totals since daq_server started; adc-crc = SPI reads re-read,
+        # adc-stale = scans where a read had no new conversion (dropped)
+        errs = (f"errs: gap {e.get('seq_gaps', 0)} link-crc {e.get('crc_fail', 0)} "
+                f"adc-crc {e.get('adc_crc', 0)} adc-stale {e.get('adc_stale', 0)} "
+                f"adc-recov {e.get('adc_recov', 0)} adc-reinit {e.get('adc_reinit', 0)}")
+        imu = (f"IMU {hz.get('RAW_IMU', 0):g} Hz | att {hz.get('ATTITUDE', 0):g} Hz | "
+               if self._client.transport_kind == "server" else "")
+        return (f"{self._client.endpoint_str} | whisker {self._fs:.2f} Hz | {imu}{pi_rec}"
                 f" | {errs}")
 
     def _update_fft_and_spec(self) -> None:
@@ -639,8 +652,11 @@ class MainWindow(QMainWindow):
         self._spec_data[:, :-1] = self._spec_data[:, 1:]
         self._spec_data[:, -1] = self._fft_map.reshape(-1, order="F")
 
-        self._fft_view.update_view(self._fft_map, self._fs)
-        self._spec_view.update_view(self._spec_data)
+        # the spectrogram history above is kept regardless; only redraw what is shown
+        if self._fft_view.isVisible():
+            self._fft_view.update_view(self._fft_map, self._fs)
+        if self._spec_view.isVisible():
+            self._spec_view.update_view(self._spec_data)
 
     def _write_record(self, cleaned: np.ndarray, new_seq: int) -> None:
         assert self._dat_writer is not None
