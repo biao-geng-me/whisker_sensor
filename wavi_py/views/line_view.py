@@ -17,9 +17,11 @@ control panel's Pause and Reset: the view only emits ``pauseToggled`` /
 ``resetRequested``, and the control panel pushes its state back with
 ``set_paused`` / ``set_stream_controls_enabled``.
 
-Keys (window-wide): Space pause/resume, Z zoom box on/off, + / = / - zoom
-in / out (x1.25 about the view centre), R reset view, 0 re-zero, Esc back to
-all whiskers.
+Keys (window-wide): Space pause/resume (resuming also resets the view),
+Z zoom box on/off, + / = / - zoom in / out (x1.25 about the view centre),
+arrow keys pan (in the grid, Up/Down pan the tile last under the cursor,
+which gets an orange frame), R reset view, 0 re-zero, Esc back to all
+whiskers.
 
 The status bar's right side shows the stream status line pushed by the
 control panel (``set_stream_status``); its left side keeps transient messages
@@ -32,6 +34,12 @@ of each row in the stacked layout. Labels refresh at ~7 Hz, not every frame.
 Redraw cost: curves are min/max decimated to about two points per pixel column
 (one vectorized pass over all channels) and drawn with 1 px pens; only major
 grid lines are drawn. These dominate the paint time with 30 s of 32 channels.
+New data and mouse-driven range changes only mark the view dirty; it is
+redrawn from a timer at most ~30 times a second, and not at all while hidden.
+After a redraw the scene's deferred range / auto-range work is done at once,
+so the paint that follows changes nothing and Qt paints once, not twice.
+Axes (which also draw the grid lines across the plot) are cached as pixmaps,
+so an axis whose ticks did not move is blitted instead of re-rendered.
 """
 
 from __future__ import annotations
@@ -40,9 +48,9 @@ import math
 import time
 
 import numpy as np
-from PyQt6.QtCore import QPointF, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QAction, QFont, QFontMetricsF, QKeySequence
-from PyQt6.QtWidgets import QLabel, QSizePolicy, QStackedWidget, QToolBar
+from PyQt6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QAction, QFont, QFontMetricsF, QKeySequence, QPainter, QPixmapCache
+from PyQt6.QtWidgets import QGraphicsRectItem, QLabel, QStackedWidget, QToolBar
 
 import pyqtgraph as pg
 
@@ -60,6 +68,10 @@ _LABEL_PERIOD_S = 0.15          # absolute-value labels refresh at ~7 Hz
 _LABEL_AVG_S = 0.1              # ...showing the mean of the last 0.1 s
 _LABEL_FILL = pg.mkBrush(255, 255, 255, 225)
 _ZOOM_STEP = 1.25               # +/- keys
+_PAN_STEP = 0.1                 # arrow keys: fraction of the visible span
+_FRAME_S = 1 / 30               # redraw at most ~30 times a second
+_FOCUS_PEN = pg.mkPen((255, 150, 0), width=2)
+_PIXMAP_CACHE_KB = 128 * 1024
 
 
 def _add_gauge_legend(plot: pg.PlotItem) -> None:
@@ -73,6 +85,17 @@ def _show_grid(plot: pg.PlotItem) -> None:
     plot.showGrid(x=True, y=True, alpha=0.2)
     for ax in ("left", "bottom"):
         plot.getAxis(ax).setStyle(maxTickLevel=0)
+        _cache(plot.getAxis(ax))
+
+
+def _cache(item: pg.GraphicsObject) -> None:
+    """Blit ``item`` from a pixmap unless it changed. Axes with grid lines span the
+    whole plot, so every curve update would re-render them otherwise."""
+    item.setCacheMode(item.CacheMode.DeviceCoordinateCache)
+    # those pixmaps are plot-sized (~20 MB each on a 2x screen); the default 10 MB
+    # QPixmapCache would evict them every frame
+    if QPixmapCache.cacheLimit() < _PIXMAP_CACHE_KB:
+        QPixmapCache.setCacheLimit(_PIXMAP_CACHE_KB)
 
 
 def _peak_decimate(t: np.ndarray, y: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
@@ -114,6 +137,19 @@ _STACKED, _GRID, _SINGLE = 0, 1, 2              # pages of the QStackedWidget
 _TITLE = "Wavi - Line"
 
 
+class _ElidedLabel(QLabel):
+    """One line of text that shrinks to any width, dropping text from the left
+    (the error counters at the end of the status line are what matters)."""
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 — Qt naming
+        return QSize(0, super().minimumSizeHint().height())
+
+    def paintEvent(self, event) -> None:  # noqa: N802 — Qt naming
+        r = self.contentsRect()
+        text = self.fontMetrics().elidedText(self.text(), Qt.TextElideMode.ElideLeft, r.width())
+        QPainter(self).drawText(r, int(self.alignment()), text)
+
+
 class LineView(ViewWindow):
     pauseToggled = pyqtSignal(bool)
     resetRequested = pyqtSignal()
@@ -136,6 +172,12 @@ class LineView(ViewWindow):
         self._units = ""                           # absolute-value labels; see set_value_format
         self._open_level: float | None = None
         self._labels_t = 0.0
+        self._paused = False
+        self._focus_tile: int | None = None        # grid: target of Up/Down, framed
+        self._last_render = 0.0
+        self._render_timer = QTimer(self)
+        self._render_timer.setSingleShot(True)
+        self._render_timer.timeout.connect(self._render)
 
         # --- stacked: one axis, sensor i at Y-offset i
         self._stacked = pg.PlotWidget()
@@ -154,6 +196,8 @@ class LineView(ViewWindow):
         self._stacked.showAxis("right")
         self._value_axis = self._stacked.getAxis("right")
         self._value_axis.setStyle(showValues=False, tickLength=0)
+        self._value_axis.setGrid(False)        # showGrid gave it a second copy of the left grid
+        _cache(self._value_axis)
         self._stacked_labels = [_value_label() for _ in range(self._nsensor)]
         for label in self._stacked_labels:
             label.setAnchor((0, 0.5))
@@ -181,6 +225,7 @@ class LineView(ViewWindow):
                 name = _GAUGE_NAMES[g] if s == 0 else None
                 self._grid_curves.append(p.plot(pen=pg.mkPen(color=color, width=_PEN_W), name=name))
         self._tile_labels = [self._corner_label(p) for p in self._tiles]
+        self._focus_frames = [self._frame(p) for p in self._tiles]
 
         # --- single: one sensor filling the window (double-click to enter)
         self._single_plot = pg.PlotWidget()
@@ -214,12 +259,10 @@ class LineView(ViewWindow):
             p.getViewBox().sigRangeChangedManually.connect(self._on_manual_range)
 
         self._build_toolbar()
-        self._stream_status = QLabel()
+        self._stream_status = _ElidedLabel()
         self._stream_status.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        # don't let a long status line set the window's minimum width; it clips instead
-        self._stream_status.setMinimumWidth(1)
-        self._stream_status.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         self.statusBar().addPermanentWidget(self._stream_status)
+        self.statusBar().messageChanged.connect(self._fit_stream_status)
         self.set_value_format("", None)
         self._reset_view()
 
@@ -242,7 +285,8 @@ class LineView(ViewWindow):
         self._act_zoom.toggled.connect(self._on_zoom_toggled)
 
         act_reset = QAction("Reset view", self)
-        act_reset.setToolTip("Full range, and follow the newest data again [R]")
+        act_reset.setToolTip("Full range, and follow the newest data again [R]. "
+                             "Arrow keys pan; in the grid, Up/Down pan the framed tile.")
         act_reset.setShortcut(QKeySequence("R"))
         act_reset.triggered.connect(self._reset_view)
 
@@ -288,6 +332,12 @@ class LineView(ViewWindow):
         # Shortcuts are window-wide (QAction's default WindowShortcut context), so they
         # work whichever plot has focus. A shortcut beats a focused button's own Space
         # handling; the toolbar buttons also take no focus, so Space never clicks one.
+        for key, dx, dy in ((Qt.Key.Key_Left, -_PAN_STEP, 0), (Qt.Key.Key_Right, _PAN_STEP, 0),
+                            (Qt.Key.Key_Up, 0, _PAN_STEP), (Qt.Key.Key_Down, 0, -_PAN_STEP)):
+            act = QAction(self)
+            act.setShortcut(QKeySequence(key))
+            act.triggered.connect(lambda _=False, dx=dx, dy=dy: self._pan(dx, dy))
+            self.addAction(act)                    # window-wide, not on the toolbar
         for a in tb.actions():
             w = tb.widgetForAction(a)
             if w is not None:
@@ -306,16 +356,34 @@ class LineView(ViewWindow):
         self.pauseToggled.emit(on)
 
     def set_paused(self, on: bool) -> None:
-        """Show the pause state without emitting ``pauseToggled``."""
+        """Show the pause state without emitting ``pauseToggled``. Resuming also
+        resets the view (full range, follow the newest data)."""
         self._act_pause.blockSignals(True)
         self._act_pause.setChecked(on)
         self._act_pause.blockSignals(False)
         self._act_pause.setText("Resume" if on else "Pause")
+        if self._paused and not on:
+            self._reset_view()
+        self._paused = on
 
     def set_stream_status(self, text: str) -> None:
         """The control panel's stream status line, shown on the right of the status bar."""
         self._stream_status.setText(text)
         self._stream_status.setToolTip(text)
+
+    def _fit_stream_status(self, *_args) -> None:
+        """A transient message on the left gets the room it needs; the status line
+        on the right takes the rest."""
+        msg = self.statusBar().currentMessage()
+        if msg:
+            room = self.statusBar().width() - self.fontMetrics().horizontalAdvance(msg) - 40
+            self._stream_status.setMaximumWidth(max(0, room))
+        else:
+            self._stream_status.setMaximumWidth(16777215)          # QWIDGETSIZE_MAX
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 — Qt naming
+        super().resizeEvent(event)
+        self._fit_stream_status()
 
     def set_stream_controls_enabled(self, on: bool) -> None:
         """Pause / Re-zero only make sense while connected."""
@@ -328,6 +396,7 @@ class LineView(ViewWindow):
 
     def _on_grid_toggled(self, on: bool) -> None:
         self._leave_single()
+        self._set_focus_tile(None)
         self._pages.setCurrentIndex(_GRID if on else _STACKED)
         self._reset_view()
 
@@ -358,8 +427,7 @@ class LineView(ViewWindow):
         self._pages.setCurrentIndex(_SINGLE)
         self._single_plot.enableAutoRange(axis="y")
         self._show_x(x)
-        self._redraw()
-        self._update_labels()
+        self._render(labels=True)
 
     def _restore(self) -> None:
         if self._single is None:
@@ -368,8 +436,7 @@ class LineView(ViewWindow):
         self._leave_single()
         self._pages.setCurrentIndex(_GRID if self._act_grid.isChecked() else _STACKED)
         self._show_x(x)
-        self._redraw()
-        self._update_labels()
+        self._render(labels=True)
 
     def _leave_single(self) -> None:
         self._single = None
@@ -398,6 +465,47 @@ class LineView(ViewWindow):
             self._current_x_plot().getViewBox().scaleBy(x=f, y=f)
         self._on_manual_range()
 
+    def _pan(self, dx: float, dy: float) -> None:
+        """Shift the view by ``dx`` / ``dy`` visible spans. In the grid, X moves all
+        tiles (linked) and Y the focused tile (all tiles if none has been hovered)."""
+        def shift(p: pg.PlotItem, x: bool, y: bool) -> None:
+            vb = p.getViewBox()
+            (x0, x1), (y0, y1) = vb.viewRange()
+            vb.translateBy(x=dx * (x1 - x0) if x else None, y=dy * (y1 - y0) if y else None)
+        if self._pages.currentIndex() == _GRID:
+            if dx:
+                shift(self._tiles[0], True, False)
+            if dy:
+                tiles = self._tiles if self._focus_tile is None else [self._tiles[self._focus_tile]]
+                for p in tiles:
+                    shift(p, False, True)
+        else:
+            shift(self._current_x_plot(), bool(dx), bool(dy))
+        self._on_manual_range()
+
+    def _set_focus_tile(self, sensor: int | None) -> None:
+        if sensor == self._focus_tile:
+            return
+        if self._focus_tile is not None:
+            self._focus_frames[self._focus_tile].hide()
+        if sensor is not None:
+            self._focus_frames[sensor].show()
+        self._focus_tile = sensor
+
+    @staticmethod
+    def _frame(plot: pg.PlotItem) -> QGraphicsRectItem:
+        """A hidden frame around the whole tile (title and axes included)."""
+        frame = QGraphicsRectItem(plot)
+        frame.setPen(_FOCUS_PEN)
+        frame.setZValue(1000)
+        frame.hide()
+
+        def fit() -> None:
+            frame.setRect(QRectF(plot.boundingRect()).adjusted(1, 1, -1, -1))
+        plot.geometryChanged.connect(fit)
+        fit()
+        return frame
+
     def _on_zoom_toggled(self, on: bool) -> None:
         mode = pg.ViewBox.RectMode if on else pg.ViewBox.PanMode
         for p in self._all_plots():
@@ -412,7 +520,7 @@ class LineView(ViewWindow):
             self._follow = False
             self.statusBar().showMessage("Not following live data — Reset view to resume")
         # re-decimate for the new zoom (matters while paused); after the range lands
-        QTimer.singleShot(0, self._redraw)
+        self._request_render()
 
     def _reset_view(self) -> None:
         self._follow = True
@@ -420,9 +528,7 @@ class LineView(ViewWindow):
         self._stacked.setYRange(-0.5, self._nsensor)
         for p in (*self._tiles, self._single_plot.getPlotItem()):
             p.enableAutoRange(axis="y")
-        self._apply_x_range()
-        self._redraw()
-        self._update_labels()
+        self._render(labels=True)
 
     def _current_x_plot(self) -> pg.PlotItem:
         page = self._pages.currentIndex()
@@ -450,6 +556,11 @@ class LineView(ViewWindow):
                 "" if self._follow else "Not following live data — Reset view to resume")
 
     def _on_mouse_moved(self, pos) -> None:
+        if self._pages.currentIndex() == _GRID:
+            hit = next((i for i, p in enumerate(self._tiles)
+                        if p.sceneBoundingRect().contains(pos)), None)
+            if hit is not None:
+                self._set_focus_tile(hit)
         if not self._act_probe.isChecked() or self._t.size == 0:
             return
         page = self._pages.currentIndex()
@@ -521,12 +632,35 @@ class LineView(ViewWindow):
 
         if x_range is not None:
             self._x_range = x_range
-            if self._follow:
-                self._apply_x_range()
+        self._request_render()
+
+    # ------------------------------------------------------------------
+    # rendering: throttled, visible page only
+    # ------------------------------------------------------------------
+
+    def _request_render(self) -> None:
+        """Redraw soon, at most every ``_FRAME_S``; repeated requests coalesce."""
+        if not self._render_timer.isActive():
+            wait = self._last_render + _FRAME_S - time.monotonic()
+            self._render_timer.start(max(0, int(wait * 1000)))
+
+    def _render(self, labels: bool = False) -> None:
+        self._render_timer.stop()
+        self._last_render = time.monotonic()
+        if not self.isVisible():
+            return                                         # showEvent renders
+        if self._follow:
+            self._apply_x_range()
         self._redraw()
-        now = time.monotonic()
-        if now - self._labels_t >= _LABEL_PERIOD_S:
+        if labels or self._last_render - self._labels_t >= _LABEL_PERIOD_S:
             self._update_labels()
+        # do the deferred range / auto-range / transform updates now, not in paintEvent:
+        # changes made during a paint schedule a second paint
+        self._pages.currentWidget().scene().prepareForPaint()
+
+    def showEvent(self, event) -> None:  # noqa: N802 — Qt naming
+        super().showEvent(event)
+        self._request_render()
 
     def _decimated(self, plot: pg.PlotItem, cols: slice) -> tuple[np.ndarray, np.ndarray]:
         """``(t, (sig - v0) * scale)`` for ``cols``, ~2 points per pixel of ``plot``."""

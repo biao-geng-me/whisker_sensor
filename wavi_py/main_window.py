@@ -652,8 +652,11 @@ class MainWindow(QMainWindow):
         self._spec_data[:, :-1] = self._spec_data[:, 1:]
         self._spec_data[:, -1] = self._fft_map.reshape(-1, order="F")
 
-        self._fft_view.update_view(self._fft_map, self._fs)
-        self._spec_view.update_view(self._spec_data)
+        # the spectrogram history above is kept regardless; only redraw what is shown
+        if self._fft_view.isVisible():
+            self._fft_view.update_view(self._fft_map, self._fs)
+        if self._spec_view.isVisible():
+            self._spec_view.update_view(self._spec_data)
 
     def _write_record(self, cleaned: np.ndarray, new_seq: int) -> None:
         assert self._dat_writer is not None
