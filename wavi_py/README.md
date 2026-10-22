@@ -36,6 +36,14 @@ python -m wavi_py --transport esp32 --serial-port COM5
 
 wavi_py decodes the ESP32's binary frames itself (921600 baud, sends `B` to start streaming), so everything behaves as with `--transport server` except that there is no IMU and **Rec** writes only the local `.dat` + `.jsonl`. The status line shows the scan rate and the same error counters. Opening the port does not reset the ESP32.
 
+Without any hardware, against a simulated 16-whisker array (any OS; no server, no serial port):
+
+```bash
+python -m wavi_py --transport sim
+```
+
+or pick **Sim** in the transport list. It sends the same event stream as the ESP32, so the plots, V0 / Re-zero, the measured rate, the status line and **Rec** (`.dat` + `.jsonl`) all work as with the real array; there is no IMU. **Signals** (next to Connect) opens a panel that changes the signals live, also before connecting: per gauge live or open (railed), a sine (amplitude, frequency) and white noise (RMS; **Noise (all)** sets every gauge at once); scan rate (40 to 1000 Hz; the GUI adopts a new rate in one step unless recording), drift, and mains hum (amplitude at 50 or 60 Hz, picked up by each gauge with its own fixed coupling 0.3 to 1.5; evaluated at the scan times, so below 2× the mains frequency it aliases, e.g. 50 Hz at 80 Hz scans shows at 30 Hz); presets (demo, all live at 1 to 16 Hz by whisker, all live at 2 Hz, all open, noise floor with every gauge live at 0.05 to 0.5 mV of noise, noisy gauges, hum 50 Hz, hum 60 Hz, and bench: small sines, spread noise, 1 mV of 50 Hz hum and a slow drift; hover the preset list for details); taps, a decaying ring on one whisker (by hand or every few seconds; "any" picks a whisker with a live gauge); and faults (ADC recovered / CRC retry / stale / re-init, a sequence gap, a link CRC error, a 3 s dropout) that show up in the status line's counters. Switching a gauge from open to live mid-stream puts a step in its trace until **Re-zero**, as plugging in a real gauge would. Scripts can use it too: `WaviClient(transport="sim", nsensor=16)` and edit `client.sim` (a `SimSignals`: `preset()`, `set_channel()`, `tap()`, `fault()`, `rate_hz`, `noise_mv` (per gauge), `drift_mv_s`, `hum_mv`, `hum_hz`).
+
 Against an Arduino plugged directly into the PC:
 
 ```bash
@@ -47,6 +55,8 @@ Click **Connect**. Toggle **Line / FFT / Spec** to bring up plot windows. **Paus
 The **Line** window has its own **Pause** and **Re-zero** buttons, which are the control panel's Pause and Reset (re-capture the V0 baseline) and stay in sync with them. It opens in the **Grid** layout (one tile per whisker); untick Grid for the stacked layout (all whiskers on one axis). Double-click a tile (or, in the stacked layout, near a whisker's trace) to show that whisker alone, and double-click again, press Esc or click **All whiskers** to go back.
 
 Zoom and live: time (X) is always shared by all plots; Y is per tile unless **Link Y** gives all grid tiles one Y range. While live, the plots show the newest part of the buffer, and zooming time keeps them live (the right edge stays at now). Panning time or zooming / panning with the mouse leaves live; **Live** (L) goes back to live keeping the zoom (time span, Y ranges, gain), and so does Resume. **Reset view** (R) also restores the whole buffer, auto Y and gain 1. Keys (the **Keys** button lists them): **Space** pause / resume, **L** live, **R** reset view, **=** / **-** zoom time in / out (keypad + / - too), **+** / **_** zoom Y of the framed tile (the one last under the mouse, with an orange frame; all tiles if none), **.** / **,** zoom Y of all tiles, **arrows** pan (Left / Right all plots, Up / Down the framed tile), **Y** link Y, **Z** zoom box, **0** re-zero, **Esc** back to all whiskers. In the stacked layout the Y keys change the trace gain (shown on the axis label) instead, so small signals grow while all rows stay in view. The right side of its status bar shows the same stream status line as the control panel (scan rate, error counters), also while recording and when the control panel is hidden; when a message is shown on the left, the status line is shortened from its start.
+
+**Spectrum** opens a live amplitude spectrum per whisker in the same layouts and with the same keys (grid by default, Link Y, framed tile, double-click for one whisker, Pause in sync with the control panel); X is frequency, linear, 0 to fs/2. Each update takes the newest 1 s of every channel (W cycles 0.5 / 1 / 2 / 5 s; the bin spacing is 1 / window), removes the mean, applies a Hann window and scales the rFFT so a sine of amplitude a reads a, in the Line window's units (mV at the ADC times `--scale`). The mean is removed rather than a linear trend: with a 1 s window a 1 Hz sine is a single cycle, and a fitted line would take about 45 % of it. **dB** (D) shows dB re 1 unit, leaving out constant (railed) gauges. Each tile's corner shows the dominant frequency (largest bin above DC) and its amplitude per gauge; in the stacked layout the Y keys set a gain (in dB, one row spans -60 to +20 dB times the gain). It is computed only while the Spectrum window is shown and not paused, at the 20 Hz UI tick. The FFT window (heatmap of all channels) stays as it was.
 
 Each plot also shows the current absolute value of both gauges (raw mV at the ADC, before the V0 subtraction and the `--scale`; mean of the last 0.1 s, refreshed ~7 times a second) in its corner, or on the right of each row in the stacked layout; a railed gauge (nothing plugged in) reads **open**. With the TCP / Serial (Arduino) transports the values are shown without a unit and never as open. Curves are min/max decimated to about two points per pixel column and drawn with 1 px pens, so the redraw cost does not grow with the sample rate. The window redraws at most ~30 times a second (new data and mouse zoom / pan requests are merged) and not at all while hidden; the FFT and Spec windows likewise skip their redraw while hidden. On the cluster test (80 Hz, 16 whiskers, 1400×900, offscreen) this cut the main-thread load of the live line window from about 55 % to 13 % of a core (stacked), 65 % to 32 % (grid) and 17 % to 10 % (one whisker).
 
@@ -98,8 +108,13 @@ wavi_py/
     tcp_transport.py   socket-based, TCP_NODELAY, mirrors connection_manager.py
     serial_transport.py
                        pyserial-based, reuses hx711_array/arduino_reader.py defaults
+    esp32_transport.py ESP32 binary frames -> the server's event stream
+    sim_transport.py   simulated array (SimSignals) -> the same event stream
   views/
-    line_view.py       multi-channel offset plot
+    whisker_plots.py   shared base of the Line / Spectrum windows (layouts, keys)
+    line_view.py       per-whisker time series
+    spectrum_view.py   per-whisker live amplitude spectrum
+    sim_panel.py       signal panel for the sim transport
     fft_view.py        FFT heatmap + per-channel bar
     spectrogram_view.py
                        frequency-stacked-by-channel ImageItem
