@@ -129,6 +129,36 @@ def test_scan_rates(st):
     assert 72 < st["legacyRate"] < 80          # bench: ~76 scans/s with 8 selects
 
 
+def test_running_sum_sinc3_equals_direct_sum(st):
+    for n, r in st["sinc3Fast"].items():
+        assert r["dS"] == 0, (n, r)            # integer sums: exact
+        assert r["dA"] < 1e-12, (n, r)          # analog averages: rounding only
+
+
+def _perf(exe, preset, width):
+    env = dict(os.environ, APPIMAGE_EXTRACT_AND_RUN="1")
+    out = subprocess.run([exe, "--headless", "--no-sandbox", "--disable-gpu", f"--window-size={width},800",
+                          "--dump-dom", PAGE.as_uri() + f"#perf&preset={preset}&scroll=1500&pause"],
+                         capture_output=True, text=True, timeout=300, env=env).stdout
+    m = re.search(r'<pre id="selftest"[^>]*>(.*?)</pre>', out, re.S)
+    assert m, "no perf output"
+    return json.loads(m.group(1).replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">"))
+
+
+@pytest.mark.parametrize("width", [1400, 900])
+@pytest.mark.parametrize("preset", ["legacy", "quiet", "wide", "real", "teach"])
+def test_page_height_and_scroll_are_constant(preset, width):
+    """300 frames with every lane and every text node updated each frame: the document height and
+    the scroll position must not change (no layout jumps while the animation runs)."""
+    exe = find_chromium()
+    if not exe:
+        pytest.skip("no chromium")
+    r = _perf(exe, preset, width)
+    assert len(r["heights"]) == 1, r
+    assert r["scrollYs"] == [r["scrollTarget"]], r
+    assert r["scrollTarget"] > 0
+
+
 def test_adc_noise_per_bit_is_flat(st):
     # datasheet noise ~ 1/sqrt(OSR) at OSR >= 256 -> about the same per-bit noise
     a, b = st["sigmaBit"]["256"], st["sigmaBit"]["4096"]
