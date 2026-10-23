@@ -234,7 +234,8 @@ struct Adc {
     }
     void frameEnd() {
         inFrame = false;
-        if (pos >= 6 && fresh) { last = fifo.front(); fifo.pop_front(); }
+        // (a reset or lock-up during the frame may have emptied the FIFO)
+        if (pos >= 6 && fresh && !fifo.empty()) { last = fifo.front(); fifo.pop_front(); }
         uint16_t cmd = (uint16_t)(in[0] << 8 | in[1]);
         if (cmd == 0x0011) {
             if (pos >= 18) { reset(); resp = 0xFF24; haveResp = true; }
