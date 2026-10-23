@@ -393,6 +393,7 @@ adc_section = f"""
     </table></div>
     <p>Everything scales with CLKIN, which the ESP32 generates. At the datasheet’s nominal 8.192 MHz the same OSR 128 gives 31.25 µs per result (32 kSPS). The sinc3 shape is fixed; OSR and CLKIN are the only knobs.</p>
 
+    <p>To watch this happen, bit by bit and conversion by conversion, with the mux switch, the discards and the frame, open the <a href="signal_chain_anim.html">signal chain animation</a>; its modulator and sinc3 use the same definitions as this page.</p>
     <h3>Worked example, bit by bit</h3>
     <p>The simplest loop that shows the idea: a first-order modulator (one integrator) and a plain count of the 1s (a flat average over one conversion period, i.e. sinc1). Each row is one modulator clock. The comparator looks at the integrator <i>before</i> the step; the feedback is +1.2 V for a 1 and −1.2 V for a 0; the integrator adds input − feedback. The count estimate after n bits is 1.2 V × (2 × 1s / n − 1). OSR 32 and OSR 64 are the same bit stream, counted for 32 or 64 bits (highlighted rows). The chip itself never goes below OSR 128 (64 in turbo mode); 32 and 64 keep the tables short.</p>
     <div class="grid2">{walk_table(EX_IN[0])}{walk_table(EX_IN[1])}</div>
@@ -531,7 +532,7 @@ tr.mark td {{ background: color-mix(in srgb, var(--ref) 16%, transparent); font-
   <header>
     <div class="eyebrow">MSD P25937 · whisker PCB rev 2 · one whisker, end to end</div>
     <h1>Whisker signal chain</h1>
-    <p class="lede">How one whisker (W1, gauges A and B) travels through the board: quarter bridge, INA351 amplifier, RC filter, CD4097B mux and ADS131M04 ADC to the ESP32 and the host. The other 15 whiskers are identical copies on other mux inputs. For where things plug in, see the <a href="whisker_header_map.html">header map</a>.</p>
+    <p class="lede">How one whisker (W1, gauges A and B) travels through the board: quarter bridge, INA351 amplifier, RC filter, CD4097B mux and ADS131M04 ADC to the ESP32 and the host. The other 15 whiskers are identical copies on other mux inputs. For where things plug in, see the <a href="whisker_header_map.html">header map</a>; for one reading animated from mux switch to host frame (simulated, with tweakable settings), see the <a href="signal_chain_anim.html">signal chain animation</a>.</p>
   </header>
 
   <section class="card"><div class="scroll">{svg}</div></section>

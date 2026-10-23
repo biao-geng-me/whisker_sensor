@@ -1,0 +1,1073 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Whisker Signal Chain Animation</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@600&display=swap">
+<style>
+:root {
+  --bg: #f3f5f2; --panel: #ffffff; --fg: #18211c; --mut: #5d6a62; --line: #d5ddd7; --chip: #f4f6f8; --wire: #2a3530;
+  --ga: #d6402f; --gb: #2f63d6; --c2: #2e8f4e; --c3: #c46a12; --ref: #c2418f; --ok: #1f8a4c; --warn: #b8741a;
+  --s0: #d6402f; --s1: #1fa3b3; --s2: #8a5cd6; --s3: #c99a1e; --oth: #9aa59e;
+  --f-display: "IBM Plex Sans Condensed", "Arial Narrow", sans-serif;
+  --f-body: "IBM Plex Sans", system-ui, sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #121815; --panel: #1a221e; --fg: #e3ebe5; --mut: #93a299; --line: #2c3832; --chip: #222c27; --wire: #c9d4cd;
+  --ga: #f06a5a; --gb: #6b95f0; --c2: #5cc77f; --c3: #eb9a4a; --ref: #e27bb7; --ok: #4cc47e; --warn: #e0a24a;
+  --s0: #f06a5a; --s1: #45c9d8; --s2: #ad8cf0; --s3: #e3bd4f; --oth: #6d7a72; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #121815; --panel: #1a221e; --fg: #e3ebe5; --mut: #93a299; --line: #2c3832; --chip: #222c27; --wire: #c9d4cd;
+  --ga: #f06a5a; --gb: #6b95f0; --c2: #5cc77f; --c3: #eb9a4a; --ref: #e27bb7; --ok: #4cc47e; --warn: #e0a24a;
+  --s0: #f06a5a; --s1: #45c9d8; --s2: #ad8cf0; --s3: #e3bd4f; --oth: #6d7a72; color-scheme: dark }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.5 var(--f-body);
+  padding: 20px max(16px, env(safe-area-inset-right, 0px)) 48px max(16px, env(safe-area-inset-left, 0px)); }
+main { max-width: 1280px; margin: 0 auto; display: grid; gap: 16px; }
+h1 { font: 600 1.8rem/1.1 var(--f-display); margin: 0; }
+h2 { font: 600 1.1rem/1.2 var(--f-display); margin: 0; }
+p { margin: 0; max-width: 80ch; }
+a { color: var(--gb); }
+code { font: .9em var(--f-mono); }
+.eyebrow { font: 500 .72rem var(--f-mono); letter-spacing: .08em; text-transform: uppercase; color: var(--mut); }
+.lede { color: var(--mut); margin-top: 6px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 12px; min-width: 0; }
+.row { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; }
+.layout { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 16px; align-items: start; }
+@media (max-width: 900px) { .layout { grid-template-columns: minmax(0, 1fr); } }
+.lanes { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; min-width: 0; }
+.lanehead { display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; align-items: baseline; margin-bottom: 6px; }
+.hint { font-size: 12px; color: var(--mut); }
+canvas { width: 100%; max-width: 100%; display: block; }
+button, select, input { font: 13px var(--f-body); color: var(--fg); background: var(--chip); border: 1px solid var(--line); border-radius: 4px; }
+button { padding: 4px 10px; cursor: pointer; }
+button:hover { border-color: var(--mut); }
+button.on { background: var(--fg); color: var(--bg); }
+select, input[type=number] { padding: 3px 4px; }
+input[type=number] { width: 78px; font-family: var(--f-mono); }
+input[type=range] { accent-color: var(--gb); }
+.transport { position: sticky; top: 0; z-index: 5; }
+.readout { font: 500 13px var(--f-mono); }
+.badge { font: 600 11px var(--f-mono); padding: 2px 7px; border-radius: 10px; border: 1px solid var(--warn); color: var(--warn); }
+.badge.real { border-color: var(--ok); color: var(--ok); }
+.settings details { border-top: 1px solid var(--line); padding: 6px 0; }
+.settings details:first-of-type { border-top: 0; }
+.settings summary { font: 600 13px var(--f-display); cursor: pointer; padding: 2px 0; }
+.fld { display: grid; grid-template-columns: 1fr auto; gap: 6px; align-items: center; margin: 5px 0; font-size: 12.5px; }
+.fld .u { color: var(--mut); font: 11px var(--f-mono); margin-left: 3px; }
+.fld .help { grid-column: 1 / -1; color: var(--mut); font-size: 11.5px; margin-top: -3px; }
+.derived { font: 11.5px/1.45 var(--f-mono); color: var(--mut); background: var(--chip); border-radius: 4px; padding: 6px 8px; margin: 6px 0; display: grid; grid-template-columns: auto 1fr; gap: 1px 10px; }
+.derived b { color: var(--fg); font-weight: 500; } .derived .wide { grid-column: 1 / -1; }
+table { border-collapse: collapse; font: 12px/1.35 var(--f-mono); }
+th, td { border-bottom: 1px solid var(--line); padding: 3px 6px; text-align: right; white-space: nowrap; }
+th { color: var(--mut); font-weight: 600; }
+.gtab input[type=number] { width: 62px; }
+.scroll { overflow-x: auto; }
+svg.blk { width: 100%; height: auto; display: block; min-width: 760px; }
+.w { fill: none; stroke: var(--wire); stroke-width: 1.4; }
+.wdim { fill: none; stroke: var(--line); stroke-width: 1.4; }
+.box { fill: var(--chip); stroke: var(--wire); stroke-width: 1.4; }
+.t { font: 600 11px var(--f-mono); fill: var(--fg); }
+.v { font: 400 10.5px var(--f-mono); fill: var(--mut); }
+.n { font: 400 10.5px var(--f-body); fill: var(--mut); }
+.big { font: 600 12.5px var(--f-body); fill: var(--fg); }
+.conv { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+@media (max-width: 700px) { .conv { grid-template-columns: 1fr; } }
+.word { font: 500 12.5px/1.6 var(--f-mono); overflow-wrap: anywhere; }
+.word .b1 { color: var(--gb); } .word .b0 { color: var(--mut); }
+.kv { font: 12px/1.6 var(--f-mono); color: var(--mut); }
+.kv b { color: var(--fg); font-weight: 600; }
+.keep { color: var(--ok); font-weight: 600; } .drop { color: var(--mut); text-decoration: line-through; }
+.note ul { margin: 6px 0 0; padding-left: 1.1em; display: grid; gap: 5px; }
+.note li { max-width: 95ch; }
+.src { font-size: .8rem; color: var(--mut); }
+#selftest { white-space: pre-wrap; font: 12px var(--f-mono); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="eyebrow">MSD P25937 · whisker DAQ · one reading, end to end · simulated in this page</div>
+    <div class="row" style="justify-content:space-between">
+      <h1>Whisker signal chain, animated</h1>
+      <div class="row"><span id="badge" class="badge"></span><button id="theme" title="toggle light/dark">◐ theme</button></div>
+    </div>
+    <p class="lede">By default a simplified board: 4 whiskers × 2 gauges on a 4×2 mux, feeding a 2-channel delta-sigma ADC (gauge A → AIN0, gauge B → AIN1), read by the MCU and framed to the host. The mux size and channel count are settings; the “real board 8×4” preset has all 32 gauges. Every curve, bit and number below comes from the simulation running in this page; change a setting and it is rebuilt. Static schematic and worked examples: <a href="whisker_signal_chain.html">whisker signal chain</a>.</p>
+  </header>
+
+  <div class="card transport">
+    <div class="row">
+      <button id="play" class="on">❚❚ pause</button>
+      <span class="hint">step</span>
+      <button data-step="bit">bit</button><button data-step="conv">conversion</button><button data-step="slot">slot</button><button data-step="scan">scan</button>
+      <label class="row" style="gap:6px"><span class="hint">speed</span><input id="speed" type="range" min="0" max="4.7" step="0.01" value="2.3" style="width:140px"></label>
+      <span id="speedlbl" class="readout"></span>
+      <label class="row" style="gap:6px"><span class="hint">preset</span><select id="preset"></select></label>
+      <label class="row" style="gap:6px"><span class="hint">zoom channel</span><select id="zch"></select></label>
+    </div>
+    <div class="row" style="margin-top:6px"><span id="clock" class="readout"></span></div>
+  </div>
+
+  <div class="layout">
+    <aside class="card settings" id="settings"></aside>
+    <div class="lanes">
+      <section class="card">
+        <div class="lanehead"><h2>1 · Board, live</h2><span class="hint" id="blkhint"></span></div>
+        <div class="scroll"><svg class="blk" id="blk" viewBox="0 0 1000 330"></svg></div>
+      </section>
+      <section class="card">
+        <div class="lanehead"><h2>2 · Scan timeline: mux slots, ADC inputs, conversions</h2><span class="hint" id="l1hint"></span></div>
+        <canvas id="c1" height="200"></canvas>
+      </section>
+      <section class="card">
+        <div class="lanehead"><h2>3 · At the switch: settle tail and which conversions are kept</h2><span class="hint" id="l2hint"></span></div>
+        <canvas id="c2" height="236"></canvas>
+      </section>
+      <section class="card">
+        <div class="lanehead"><h2>4 · Bit level: pin voltage → modulator bits → sinc3 windows</h2><span class="hint" id="l3hint"></span></div>
+        <div class="row" style="margin-bottom:6px"><label class="row" style="gap:6px"><span class="hint">bits shown</span><input id="zoom" type="range" min="0" max="1" step="0.001" value="0.35" style="width:160px"></label><span id="zoomlbl" class="readout"></span></div>
+        <canvas id="c3" height="250"></canvas>
+      </section>
+      <section class="card">
+        <div class="lanehead"><h2>5 · sinc3 result → 24-bit word → DRDY → SPI → MCU</h2><span class="hint" id="l4hint"></span></div>
+        <div class="conv" id="convbox"></div>
+        <canvas id="c4" height="150" style="margin-top:8px"></canvas>
+      </section>
+      <section class="card">
+        <div class="lanehead"><h2>6 · Frame to the host, error vs the true input</h2><span class="hint" id="l5hint"></span></div>
+        <div class="scroll"><table id="frame"></table></div>
+        <canvas id="c5" height="220" style="margin-top:8px"></canvas>
+      </section>
+      <section class="card note">
+        <h2>Model: what is simulated, what is simplified</h2>
+        <ul id="modelnote"></ul>
+      </section>
+      <pre id="selftest" hidden></pre>
+    </div>
+  </div>
+  <p class="src">Hand-written page, <code>msd/pcb_map/signal_chain_anim.html</code>; test: <code>msd/pcb_map/test_signal_chain_anim.py</code>. Sources: chain and component values from <code>make_signal_chain.py</code>; scan logic from <code>msd/esp32/whisker_daq/whisker_daq.ino</code> (legacy sweep, locked scan); settle tail from the bench fits (<code>adc_diag.py settle</code>, 2026-10-22); ADC noise from the ADS131M04 datasheet (SBAS890D) Table 7-1, gain 1.</p>
+</main>
+
+<script>
+"use strict";
+// ───────────────────────────── constants (board facts) ─────────────────────────────
+const VR = 1.2;            // ADC full scale (V) = 1-bit DAC level
+const REF = 0.294;         // INA351 REF as measured 2026-10-21 (V)
+const RAIL = 3.3;          // a railed / open gauge: INA output at the 3V3 rail (V)
+const R_RC = 1e3, C_RC = 0.1e-6;           // RC on each INA output
+const FC_RC = 1 / (2 * Math.PI * R_RC * C_RC);   // 1592 Hz
+const TAU_RC_US = R_RC * C_RC * 1e6;       // 100 us
+// topology is a parameter (p.nsel mux positions × p.nch ADC channels); gauge g = sel · nch + c
+const MAXSEL = 8, MAXCH = 4;
+// real board (whisker_daq.ino OUT_OF): (ADC channel, select) -> OUT n; whisker W = ceil(n/2), A odd / B even
+const OUT_OF = [[32, 30, 28, 26, 31, 29, 27, 25], [18, 20, 22, 24, 23, 21, 19, 17], [5, 7, 3, 1, 2, 4, 6, 8], [15, 13, 11, 9, 10, 12, 16, 14]];
+const NG = p => p.nsel * p.nch;
+function gaugeLabel(p, g) {
+  const sel = Math.floor(g / p.nch), c = g % p.nch;
+  if (p.nsel === 8 && p.nch === 4) { const o = OUT_OF[c][sel]; return `W${Math.ceil(o / 2)}${o % 2 ? "A" : "B"}`; }
+  if (p.nch <= 2) return `W${sel + 1}${"AB"[c]}`;
+  return `s${sel}·ch${c}`;
+}
+const FS_CODE = 8388608;   // 2^23
+const LK_LAT_ALLOW_US = 10;   // firmware: switch latency allowed in the discard count
+const SPI_FRAME_BITS = 6 * 24; // ADS131M04 frame: STATUS + 4 channels + CRC, 24-bit words
+const READ_OVH_US = 10;    // ISR + driver overhead per read (bench, fw brief)
+const HUM_HZ = 845, COMB_HZ = 62.5, COMB_N = 16;
+// ADS131M04 noise, uVrms at gain 1, by OSR (SBAS890D Table 7-1, fCLKIN 8.192 MHz)
+const NOISE_TABLE = [[64, 75.34], [128, 21.31], [256, 10.68], [512, 7.56], [1024, 5.35], [2048, 4.25], [4096, 3.38], [8192, 2.39], [16384, 1.90]];
+
+// ───────────────────────────── settings ─────────────────────────────
+const GDEF8 = () => [
+  { off: 120, bend: 40, rail: false }, { off: 60, bend: 25, rail: false },
+  { off: 300, bend: 60, rail: false }, { off: -40, bend: 30, rail: false },
+  { off: 30, bend: 15, rail: false }, { off: 0, bend: 0, rail: true },
+  { off: 200, bend: 80, rail: false }, { off: 90, bend: 20, rail: false }];
+function GDEF(n = 8) {
+  if (n === 8) return GDEF8();
+  const r = mulberry32(4242), out = [];
+  for (let g = 0; g < n; g++) out.push({ off: Math.round((r() * 420 - 80) / 10) * 10, bend: Math.round(r() * 12) * 5, rail: false });
+  return out;
+}
+const BASE = {
+  nsel: 4, nch: 2, sels: "", clkin: 8, osr: 256, order: 2, adcNoise: true, policy: "locked", N: 250, settle: 200, discard: 3, spi: 8,
+  extra: 3, other: 0.35, swLat: 5, tailFrac: 0.0136, tau: 80, tauFast: 4, ovUs: 25, tail2: 0, tau2: 300,
+  rc: true, enoise: 0.4, bendHz: 5, humK: 0.65, comb: 15, scans: 24, seed: 1, gauges: GDEF(), teaching: false };
+const PRESETS = {
+  legacy: { name: "board legacy 76 Hz", clkin: 0.8, osr: 128, policy: "legacy", settle: 250, discard: 3, spi: 0.6, extra: 4, scans: 16, speed: 2.9 },
+  quiet: { name: "quiet 62.5 Hz OSR 256", clkin: 8, osr: 256, policy: "locked", N: 250, settle: 200, spi: 8, extra: 3, scans: 24, speed: 2.6 },
+  wide: { name: "wide 250 Hz OSR 128", clkin: 8, osr: 128, policy: "locked", N: 125, settle: 200, spi: 12, extra: 3, scans: 48, speed: 2.3 },
+  real: { name: "real board 8×4, quiet 62.5 Hz", nsel: 8, nch: 4, sels: "0123457", clkin: 8, osr: 256, policy: "locked", N: 250, settle: 200, spi: 8, extra: 0, scans: 12, speed: 2.6 },
+  teach: { name: "teaching: tiny OSR 16, slow", clkin: 0.8, osr: 16, policy: "locked", N: 48, settle: 100, spi: 8, extra: 0, scans: 24, speed: 1.0, teaching: true },
+};
+const FIELDS = [
+  ["Topology (mux positions × ADC channels)", [
+    { k: "nsel", l: "mux select positions", t: "num", min: 1, max: MAXSEL, step: 1, h: "board: 8 (CD4097B, dual 8:1)" },
+    { k: "nch", l: "ADC channels", t: "num", min: 1, max: MAXCH, step: 1, h: "board: 4 (ADS131M04); 4×2 is the uncluttered default" },
+    { k: "sels", l: "selects scanned, in order", t: "txt", h: "digits, e.g. 0123457 (the firmware's S command); empty = all" },
+  ]],
+  ["ADC (ADS131M04, 2 of 4 channels)", [
+    { k: "clkin", l: "CLKIN", u: "MHz", t: "sel", o: [0.8, 4, 8, 8.192] },
+    { k: "osr", l: "OSR", t: "sel", o: [16, 32, 64, 128, 256, 512, 1024, 2048, 4096], h: "16/32: teaching only (the chip does 128…16384, 64 in turbo)" },
+    { k: "order", l: "modulator order", t: "sel", o: [[2, "2nd (stand-in for the chip)"], [1, "1st (teaching)"]] },
+    { k: "adcNoise", l: "ADC thermal noise (datasheet)", t: "chk" },
+  ]],
+  ["Scan and firmware policy", [
+    { k: "policy", l: "policy", t: "sel", o: [["legacy", "legacy: settle, discard N, keep 1"], ["locked", "locked: N conv/scan, average"]] },
+    { k: "N", l: "conversions per scan", t: "num", min: 8, max: 1000, step: 1, only: "locked", h: "scan period = N × conversion period" },
+    { k: "settle", l: "settle", u: "µs", t: "num", min: 0, max: 5000, step: 10 },
+    { k: "discard", l: "discard N", t: "num", min: 0, max: 20, step: 1, only: "legacy" },
+    { k: "spi", l: "SPI clock", u: "MHz", t: "num", min: 0.1, max: 25, step: 0.1 },
+    { k: "swLat", l: "switch latency after DRDY", u: "µs", t: "num", min: 0, max: 10, step: 1, only: "locked" },
+    { k: "extra", l: "extra selects (not modelled)", t: "num", min: 0, max: 4, step: 1, h: "the real board scans 8 (legacy) or 7 (locked) selects; these pad the scan to the board's timing" },
+    { k: "other", l: "level of unmodelled inputs", u: "V", t: "num", min: 0, max: 3.3, step: 0.01 },
+    { k: "scans", l: "scans simulated", t: "num", min: 2, max: 200, step: 1 },
+  ]],
+  ["Mux switch disturbance", [
+    { k: "tailFrac", l: "tail fraction at the switch", t: "num", min: 0, max: 0.2, step: 0.0001, h: "residual = fraction × (old pin − new input)" },
+    { k: "tau", l: "tail τ", u: "µs", t: "num", min: 1, max: 1000, step: 1 },
+    { k: "tauFast", l: "fast part τ", u: "µs", t: "num", min: 0.1, max: 50, step: 0.1 },
+    { k: "ovUs", l: "railed source: extra delay", u: "µs", t: "num", min: 0, max: 200, step: 1 },
+    { k: "tail2", l: "2nd tail fraction", t: "num", min: 0, max: 0.05, step: 0.0001 },
+    { k: "tau2", l: "2nd tail τ", u: "µs", t: "num", min: 1, max: 5000, step: 1 },
+  ]],
+  ["Analog front end and interference", [
+    { k: "rc", l: "RC 1 kΩ / 0.1 µF on each output", t: "chk" },
+    { k: "enoise", l: "gauge noise density", u: "µV/√Hz", t: "num", min: 0, max: 20, step: 0.1 },
+    { k: "bendHz", l: "bend sine frequency", u: "Hz", t: "num", min: 0, max: 200, step: 0.5 },
+    { k: "humK", l: "845 Hz ripple tone", u: "mV/V offset", t: "num", min: 0, max: 5, step: 0.01, h: "bench: 0.63–0.66 mV per V of OUT − REF" },
+    { k: "comb", l: "62.5 Hz comb, per line", u: "µV", t: "num", min: 0, max: 500, step: 1, h: "16 lines at k × 62.5 Hz, added at the ADC pins" },
+    { k: "seed", l: "random seed", t: "num", min: 1, max: 9999, step: 1 },
+  ]],
+];
+
+let P = structuredClone(BASE);
+Object.assign(P, PRESETS.quiet); delete P.name; delete P.speed;
+
+// ───────────────────────────── small helpers ─────────────────────────────
+function mulberry32(a) { return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+function gaussGen(rnd) { let spare = null; return () => { if (spare !== null) { const s = spare; spare = null; return s; } let u, v, s; do { u = rnd() * 2 - 1; v = rnd() * 2 - 1; s = u * u + v * v; } while (s >= 1 || s === 0); const m = Math.sqrt(-2 * Math.log(s) / s); spare = v * m; return u * m; }; }
+const clamp = (x, a, b) => x < a ? a : x > b ? b : x;
+const fmtV = (v, d = 3) => (v < 0 ? "−" : "+") + Math.abs(v).toFixed(d);
+function fmtT(us) { const a = Math.abs(us); if (a >= 1e6) return (us / 1e6).toFixed(3) + " s"; if (a >= 1e3) return (us / 1e3).toFixed(a >= 1e4 ? 2 : 3) + " ms"; return us.toFixed(a >= 100 ? 0 : a >= 10 ? 1 : 2) + " µs"; }
+function fmtUV(v) { const a = Math.abs(v) * 1e6; const s = v < 0 ? "−" : "+"; if (a >= 1000) return s + (a / 1000).toFixed(2) + " mV"; if (a >= 10) return s + a.toFixed(1) + " µV"; return s + a.toFixed(2) + " µV"; }
+const cssv = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+function rcH(f, on) { if (!on) return [1, 0]; const x = f / FC_RC; return [1 / Math.sqrt(1 + x * x), -Math.atan(x)]; }
+
+// sinc3 weights over 3·OSR − 2 bits: three boxcars of length OSR convolved (integers, sum OSR^3)
+function sinc3Weights(n) {
+  let h = new Float64Array(n).fill(1);
+  for (let r = 0; r < 2; r++) {
+    const o = new Float64Array(h.length + n - 1);
+    let acc = 0;
+    for (let i = 0; i < o.length; i++) { acc += (i < h.length ? h[i] : 0) - (i - n >= 0 && i - n < h.length ? h[i - n] : 0); o[i] = acc; }
+    h = o;
+  }
+  return h;
+}
+// Modulator, normalized to ±1 (u = v / 1.2 V), same loop as make_signal_chain.py mod_bits:
+// y = sign(state before the step); x1 += u − y; (2nd order) x2 += x1 − y. Integrators clamp
+// (±4, ±16) like a real loop's saturation; never reached for |u| < ~0.9.
+function makeModulator(order) {
+  let x1 = 0, x2 = 0;
+  return {
+    step(u) {
+      const y = (order === 1 ? x1 : x2) >= 0 ? 1 : -1;
+      x1 = clamp(x1 + u - y, -4, 4);
+      if (order === 2) x2 = clamp(x2 + x1 - y, -16, 16);
+      return y;
+    },
+    state() { return order === 1 ? x1 : x2; },
+  };
+}
+function adcNoiseSigmaBit(osr) {
+  // per-bit input noise such that sinc3 output noise = table value; thermal part only
+  // (OSR >= 256; at 64/128 the table also holds the real modulator's quantization noise,
+  // which this page's modulator adds by itself)
+  const pick = Math.max(256, Math.min(16384, osr));
+  let uv = NOISE_TABLE[NOISE_TABLE.length - 1][1];
+  for (let i = 0; i < NOISE_TABLE.length - 1; i++) {
+    const [o0, n0] = NOISE_TABLE[i], [o1, n1] = NOISE_TABLE[i + 1];
+    if (pick >= o0 && pick <= o1) { const f = Math.log(pick / o0) / Math.log(o1 / o0); uv = n0 * Math.pow(n1 / n0, f); break; }
+  }
+  const h = sinc3Weights(pick); let s2 = 0; for (const w of h) s2 += w * w;
+  const g = Math.sqrt(s2) / Math.pow(pick, 3);   // output rms per unit per-bit rms
+  return uv * 1e-6 / g;
+}
+function crc16ccitt(bytes) { let c = 0xFFFF; for (const b of bytes) { c ^= b << 8; for (let i = 0; i < 8; i++) c = c & 0x8000 ? ((c << 1) ^ 0x1021) & 0xFFFF : (c << 1) & 0xFFFF; } return c; }
+
+// ───────────────────────────── simulation ─────────────────────────────
+function derive(p) {
+  const fmod = p.clkin * 1e6 / 2, tb = 1e6 / fmod, T = p.osr * tb;   // us
+  const order = scanOrder(p), nsel = order.length;
+  const readUs = SPI_FRAME_BITS / p.spi + READ_OVH_US;
+  const D = Math.ceil(3 + (p.settle + LK_LAT_ALLOW_US) / T) - 1;
+  return { fmod, tb, T, nsel, order, nmod: nsel - p.extra, readUs, D, win: 3 * T };
+}
+// slot order: the scanned modelled selects (p.sels digits, default all), then p.extra unmodelled ones (-1)
+function scanOrder(p) {
+  let sel = [...String(p.sels || "")].map(Number).filter(x => Number.isInteger(x) && x >= 0 && x < p.nsel);
+  sel = [...new Set(sel)]; if (!sel.length) for (let q = 0; q < p.nsel; q++) sel.push(q);
+  for (let e = 0; e < p.extra; e++) sel.push(-1);
+  return sel;
+}
+
+function buildSchedule(p, d) {
+  // slots: {scan, j, sel (0..3 modelled, -1 other), tSw, convs:[k...], keep:[k...]}
+  const slots = [], T = d.T, tD = k => (k + 1) * T;
+  const order = d.order;
+  const k0 = 4;
+  if (p.policy === "locked") {
+    const base = Math.floor(p.N / d.nsel), rem = p.N % d.nsel;
+    const lens = order.map((_, j) => base + (j < rem ? 1 : 0)), starts = [];
+    let a = 0; for (const L of lens) { starts.push(a); a += L; }
+    for (let s = 0; s < p.scans; s++) for (let j = 0; j < d.nsel; j++) {
+      const c0 = k0 + s * p.N + starts[j], convs = [], keep = [];
+      for (let q = 0; q < lens[j]; q++) { convs.push(c0 + q); if (q >= d.D) keep.push(c0 + q); }
+      slots.push({ scan: s, j, sel: order[j], tSw: tD(c0 - 1) + p.swLat, convs, keep });
+    }
+  } else {
+    let t = tD(k0 - 1);
+    for (let s = 0; s < p.scans; s++) for (let j = 0; j < d.nsel; j++) {
+      const tSw = t, settleEnd = tSw + p.settle;
+      const mark = Math.floor(settleEnd / T + 1e-9) - 1;        // last conversion done by the settle end
+      const kk = mark + p.discard + 1;                             // keep the (discard+1)-th after it
+      const first = Math.floor(tSw / T + 1e-9);                   // first conversion ending after tSw
+      const convs = []; for (let k = first; k <= kk; k++) convs.push(k);
+      slots.push({ scan: s, j, sel: order[j], tSw, convs, keep: [kk] });
+      t = tD(kk) + d.readUs;                                       // switch after the kept read
+    }
+  }
+  for (let i = 0; i < slots.length; i++) slots[i].tEnd = i + 1 < slots.length ? slots[i + 1].tSw : tD(slots[i].convs[slots[i].convs.length - 1]) + d.readUs;
+  return slots;
+}
+
+function fitGauges(p) { if (!p.gauges || p.gauges.length !== NG(p)) p.gauges = GDEF(NG(p)); }
+function simulate(p) {
+  fitGauges(p);
+  const d = derive(p);
+  let warn = "";
+  // size guard: at most ~4.5 M bits per channel
+  const scanEst = () => { const s = buildSchedule(Object.assign({}, p, { scans: 2 }), d); return s[s.length - 1].tEnd - s[d.nsel - 1].tEnd; };
+  const per = scanEst(), maxBits = 4.5e6;
+  if ((p.scans + 1) * per / d.tb > maxBits) { const n = Math.max(2, Math.floor(maxBits * d.tb / per) - 1); warn = `simulating ${n} scans (of ${p.scans}) to keep it under ${maxBits / 1e6} M bits per channel`; p = Object.assign({}, p, { scans: n }); }
+  const slots = buildSchedule(p, d);
+  const lastK = slots[slots.length - 1].convs.at(-1) + 2;
+  const nb = (lastK + 1) * p.osr + 2, tEnd = nb * d.tb;
+  const rnd = mulberry32(p.seed * 7919), gauss = gaussGen(rnd);
+
+  // gauges: noiseless parts (through the RC), noise process on a 5 us grid (RC filtered)
+  const [Hb, Pb] = rcH(p.bendHz, p.rc), [Hh, Ph] = rcH(HUM_HZ, p.rc);
+  const G = p.gauges.map((g, i) => ({ ...g, phB: rnd() * 2 * Math.PI, phH: rnd() * 2 * Math.PI, humA: p.humK * 1e-3 * (g.off * 1e-3) }));
+  const wB = 2 * Math.PI * p.bendHz * 1e-6, wH = 2 * Math.PI * HUM_HZ * 1e-6;
+  const xClean = (g, t) => G[g].rail ? RAIL : REF + G[g].off * 1e-3 + G[g].bend * 1e-3 * Hb * Math.sin(wB * t + G[g].phB + Pb) + G[g].humA * Hh * Math.sin(wH * t + G[g].phH + Ph);
+  // "true" = the noiseless gauge signal after the RC (its 100 us lag is part of the board, not an error)
+  const xTrue = (g, t) => G[g].rail ? RAIL : REF + G[g].off * 1e-3 + G[g].bend * 1e-3 * Hb * Math.sin(wB * t + G[g].phB + Pb);
+  const dtN = 5, nN = Math.ceil(tEnd / dtN) + 2, sigN = p.enoise * 1e-6 * Math.sqrt(1 / (2 * dtN * 1e-6)), aN = Math.exp(-dtN / TAU_RC_US);
+  const noise = [];
+  for (let g = 0; g < NG(p); g++) {
+    const a = new Float32Array(nN);
+    if (!G[g].rail && sigN > 0) { let y = 0; for (let i = 0; i < nN; i++) { const w = gauss() * sigN; y = p.rc ? y + (1 - aN) * (w - y) : w; a[i] = y; } }
+    noise.push(a);
+  }
+  const nAt = (g, t) => noise[g][Math.min(nN - 1, Math.floor(t / dtN))];
+  // 62.5 Hz comb: one 16 ms period tabulated at 1 us
+  const combT = new Float32Array(16000 + 1);
+  if (p.comb > 0) { const ph = []; for (let k = 1; k <= COMB_N; k++) ph.push(rnd() * 2 * Math.PI); for (let i = 0; i <= 16000; i++) { let s = 0; for (let k = 1; k <= COMB_N; k++) s += Math.sin(2 * Math.PI * COMB_HZ * k * i * 1e-6 + ph[k - 1]); combT[i] = s * p.comb * 1e-6; } }
+  const combAt = t => { const x = t % 16000, i = Math.floor(x); return combT[i] + (combT[i + 1] - combT[i]) * (x - i); };
+
+  const sigBit = p.adcNoise ? adcNoiseSigmaBit(p.osr) : 0;
+  const gaugeOf = (sel, c) => sel < 0 ? -1 : sel * p.nch + c;
+  const srcClean = (g, t) => g < 0 ? p.other : xClean(g, t);
+  const srcAt = (g, t) => g < 0 ? p.other : xClean(g, t) + nAt(g, t);
+  const ch = [];
+  const h = sinc3Weights(p.osr), n3 = Math.pow(p.osr, 3), L = h.length;
+  for (let c = 0; c < p.nch; c++) {
+    const v = new Float32Array(nb), dist = new Float32Array(nb), bits = new Int8Array(nb), integ = new Float32Array(nb);
+    const mod = makeModulator(p.order);
+    let si = -1, gCur = gaugeOf(slots[slots.length - 1].sel, c), gOld = gCur, tSw = -1e9, delta = 0, hold = 0, oldPin = 0;
+    for (let n = 0; n < nb; n++) {
+      const t = n * d.tb;
+      while (si + 1 < slots.length && slots[si + 1].tSw <= t) {
+        si++; const s = slots[si];
+        const gNew = gaugeOf(s.sel, c);
+        // pin voltage just before the switch (incl. any residual of the previous switch)
+        const tt = s.tSw; let pinBefore;
+        const uPrev = tt - tSw - hold;
+        if (uPrev < 0) pinBefore = oldPin; else pinBefore = srcAt(gCur, tt) + delta * ((1 - p.tailFrac - p.tail2) * Math.exp(-uPrev / p.tauFast) + p.tailFrac * Math.exp(-uPrev / p.tau) + p.tail2 * Math.exp(-uPrev / p.tau2));
+        gOld = gCur; gCur = gNew; tSw = tt;
+        delta = pinBefore - srcAt(gNew, tt);
+        oldPin = pinBefore;
+        hold = (gOld >= 0 && G[gOld].rail) ? p.ovUs : 0;   // overload recovery of a railed source, as a delay
+      }
+      const u = t - tSw - hold;
+      let dv;
+      if (u < 0) dv = oldPin - srcAt(gCur, t);
+      else dv = delta * ((1 - p.tailFrac - p.tail2) * Math.exp(-u / p.tauFast) + p.tailFrac * Math.exp(-u / p.tau) + p.tail2 * Math.exp(-u / p.tau2));
+      const pin = srcAt(gCur, t) + dv + combAt(t);
+      v[n] = pin; dist[n] = dv;
+      const un = clamp((pin + (sigBit ? gauss() * sigBit : 0)) / VR, -1, 1);
+      bits[n] = mod.step(un) > 0 ? 1 : 0;
+      integ[n] = mod.state();
+    }
+    // conversions: k ends at DRDY (k+1)·T; window bits [(k−2)·OSR, (k−2)·OSR + L)
+    const nConv = Math.floor(nb / p.osr) - 1;
+    const code = new Int32Array(nConv), S = new Float64Array(nConv), A = new Float64Array(nConv), Dd = new Float64Array(nConv);
+    for (let k = 2; k < nConv; k++) {
+      const b0 = (k - 2) * p.osr; if (b0 + L > nb) break;
+      let s = 0, a = 0, dd = 0;
+      for (let j = 0; j < L; j++) { const w = h[j], n = b0 + j; s += bits[n] ? w : -w; a += w * v[n]; dd += w * dist[n]; }
+      S[k] = s; A[k] = a / n3 * 1; Dd[k] = dd / n3;
+      code[k] = clamp(Math.round(s / n3 * FS_CODE), -FS_CODE, FS_CODE - 1);
+    }
+    ch.push({ v, dist, bits, integ, code, S, A, Dd, nConv });
+  }
+  // per-conversion status and slot lookup
+  const nConv = ch[0].nConv;
+  const status = new Int8Array(nConv);   // 0 none/warm-up, 1 discard, 2 keep
+  const slotOf = new Int32Array(nConv).fill(-1);
+  slots.forEach((s, i) => { for (const k of s.convs) { slotOf[k] = i; status[k] = 1; } for (const k of s.keep) status[k] = 2; });
+  // frames: per scan, per modelled gauge
+  const frames = [];
+  for (let sc = 0; sc < p.scans; sc++) frames.push({ scan: sc, t: 0, g: new Array(NG(p)).fill(null) });
+  for (const s of slots) {
+    if (s.sel < 0) continue;
+    const fr = frames[s.scan];
+    fr.t = Math.max(fr.t, (s.keep.at(-1) + 1) * d.T);
+    for (let c = 0; c < p.nch; c++) {
+      const g = s.sel * p.nch + c, C = ch[c];
+      let sc = 0, st = 0, sd = 0, sa = 0;
+      for (const k of s.keep) { sc += C.code[k]; st += xTrue(g, (k + 1) * d.T - 1.5 * d.T + d.tb); sd += C.Dd[k]; sa += C.A[k]; }
+      const nk = s.keep.length;
+      const codeAvg = nk ? Math.round(sc / nk) : 0;
+      const out = codeAvg * VR / FS_CODE, tru = st / nk;
+      const rail = G[g].rail;   // railed: no meaningful error (the code pins at full scale)
+      fr.g[g] = { code: codeAvg, n: nk, out, tru, rail, err: rail ? NaN : out - tru, tail: rail ? NaN : sd / nk, adc: out - sa / nk, slot: s };
+    }
+  }
+  const lastScan0 = slots[(p.scans - 1) * d.nsel].tSw;   // period between scan starts
+  const scanPeriod = p.scans > 1 ? (lastScan0 - slots[0].tSw) / (p.scans - 1) : slots[slots.length - 1].tEnd - slots[0].tSw;
+  return { p, d, slots, ch, status, slotOf, frames, nb, tEnd, tStart: slots[0].tSw - 2 * d.T, scanPeriod, warn, h, G, xTrue, sigBit };
+}
+
+// ───────────────────────────── self test (#selftest) ─────────────────────────────
+function selftest() {
+  const R = {};
+  // 1. first-order walk, as in the signal chain page's worked example
+  R.walk = {};
+  for (const v of [0.5674, -0.314567]) {
+    const m = makeModulator(1); let ones = 0; const out = {};
+    for (let k = 1; k <= 64; k++) { const y = m.step(v / VR); ones += y > 0 ? 1 : 0; if (k === 32 || k === 64) out[k] = { ones, est: VR * (2 * ones / k - 1) }; }
+    R.walk[v] = out;
+  }
+  // 2. DC accuracy, same as the page's worst_err(v, n, order, "sinc3"/"count")
+  R.worst = {};
+  for (const v of [0.5674, -0.314567]) for (const n of [32, 64, 128, 256]) for (const order of [1, 2]) {
+    const m = makeModulator(order), Lb = 16000, skip = 2000, y = [];
+    for (let i = 0; i < Lb; i++) y.push(m.step(v / VR));
+    const yy = y.slice(skip), h = sinc3Weights(n);
+    let worst = 0, cw = 0;
+    for (let i = 0; i + h.length <= yy.length; i += n) { let s = 0; for (let j = 0; j < h.length; j++) s += h[j] * yy[i + j]; worst = Math.max(worst, Math.abs(VR * s / n ** 3 - v)); }
+    for (let i = 0; i + n <= yy.length; i += n) { let s = 0; for (let j = 0; j < n; j++) s += yy[i + j]; cw = Math.max(cw, Math.abs(VR * s / n - v)); }
+    R.worst[`${v}|${n}|${order}|sinc3`] = worst; R.worst[`${v}|${n}|${order}|count`] = cw;
+  }
+  // 3. DC code through the full page pipeline (noise off): code ≈ V / 1.2 · 2^23
+  const quiet = Object.assign(structuredClone(BASE), PRESETS.quiet, { adcNoise: false, enoise: 0, humK: 0, comb: 0, tailFrac: 0, tail2: 0, tauFast: 0.1, ovUs: 0, scans: 3 });
+  quiet.gauges = GDEF().map(g => ({ off: g.off, bend: 0, rail: g.rail }));
+  let sim = simulate(quiet);
+  R.dc = sim.frames[1].g.map((f, gi) => f && ({ g: gi, code: f.code, expect: Math.round((quiet.gauges[gi].rail ? Math.min(RAIL, VR) : REF + quiet.gauges[gi].off * 1e-3) / VR * FS_CODE), rail: quiet.gauges[gi].rail }));
+  // 4. settle tail: pin − new input after a switch = Δ·(fast + frac·e^(−u/τ)), sampled from the bits' pin array
+  const st = Object.assign(structuredClone(quiet), { tailFrac: 0.0136, tau: 80, tauFast: 4, ovUs: 25 });
+  sim = simulate(st);
+  const sl = sim.slots.find(s => s.scan === 1 && s.sel === 1), c = 0;
+  const prev = sim.slots[sim.slots.indexOf(sl) - 1];
+  const pinOld = REF + st.gauges[prev.sel * st.nch].off * 1e-3, pinNew = REF + st.gauges[sl.sel * st.nch].off * 1e-3, Dl = pinOld - pinNew;
+  R.tail = [];
+  for (const u of [20, 50, 100, 200, 400]) {
+    const n = Math.round((sl.tSw + u) / sim.d.tb), uu = n * sim.d.tb - sl.tSw;
+    const model = Dl * ((1 - 0.0136) * Math.exp(-uu / 4) + 0.0136 * Math.exp(-uu / 80));
+    R.tail.push({ u: uu, sim: sim.ch[c].dist[n], model });
+  }
+  // railed source: pin held for ovUs, then the step
+  const slR = sim.slots.find(s => s.scan === 1 && s.sel === 3);   // previous select 2 → gauge B of W3 is railed (gauge 5)
+  const nR = Math.round((slR.tSw + 10) / sim.d.tb);
+  R.railHold = { pin: sim.ch[1].v[nR], rail: RAIL };
+  // 5. discard / keep logic
+  const chk = (sim) => {
+    let bad = 0, nk = 0;
+    for (const s of sim.slots) {
+      for (const k of s.convs) {
+        const ws = (k + 1) * sim.d.T - sim.d.win, kept = s.keep.includes(k);
+        if (kept) { nk++; if (ws < s.tSw + sim.p.settle - 1e-9) bad++; }
+        if (sim.p.policy === "locked" && !kept && ws >= s.tSw + sim.p.settle + LK_LAT_ALLOW_US) bad++;   // a usable one was dropped
+      }
+      if (sim.p.policy === "legacy") {
+        const after = s.convs.filter(k => (k + 1) * sim.d.T > s.tSw + sim.p.settle);
+        if (after.length !== sim.p.discard + 1 || after.at(-1) !== s.keep[0]) bad++;
+      }
+    }
+    return { bad, kept: nk, D: sim.d.D };
+  };
+  R.keep = {};
+  for (const name of ["legacy", "quiet", "wide", "teach"]) R.keep[name] = chk(simulate(Object.assign(structuredClone(quiet), PRESETS[name], { scans: 3 })));
+  R.keep.real = chk(simulate(Object.assign(structuredClone(BASE), PRESETS.real, { scans: 3, gauges: null })));
+  const rq = Object.assign(structuredClone(quiet), PRESETS.real, { scans: 3, gauges: null }); fitGauges(rq); rq.gauges.forEach(g => { g.bend = 0; });
+  const rs = simulate(rq);
+  R.dcReal = rs.frames[1].g.map((f, gi) => f && { g: gi, code: f.code, expect: Math.round((REF + rq.gauges[gi].off * 1e-3) / VR * FS_CODE), rail: rq.gauges[gi].rail });
+  R.realShape = { nch: rs.ch.length, ng: rs.frames[1].g.length, scanned: rs.frames[1].g.filter(Boolean).length, rate: 1e6 / rs.scanPeriod };
+  // legacy scan rate with the board's 8 selects
+  const lg = simulate(Object.assign(structuredClone(BASE), PRESETS.legacy, { scans: 4 }));
+  R.legacyRate = 1e6 / lg.scanPeriod;
+  const qq = simulate(Object.assign(structuredClone(BASE), PRESETS.quiet, { scans: 3 }));
+  R.quietRate = 1e6 / qq.scanPeriod;
+  R.sigmaBit = { 256: adcNoiseSigmaBit(256), 4096: adcNoiseSigmaBit(4096) };
+  return R;
+}
+
+// ───────────────────────────── UI state ─────────────────────────────
+let SIM = null, playing = true, tNow = 0, speedLog = 2.3, lastFrame = null, zoomF = 0.35, zch = 0;
+const $ = id => document.getElementById(id);
+
+function buildSettings() {
+  const box = $("settings"); box.innerHTML = "";
+  FIELDS.forEach(([title, fl], gi) => {
+    const det = document.createElement("details"); if (gi < 3) det.open = true;
+    det.innerHTML = `<summary>${title}</summary>`;
+    for (const f of fl) {
+      const row = document.createElement("div"); row.className = "fld"; row.dataset.only = f.only || "";
+      let inp;
+      if (f.t === "sel") { inp = document.createElement("select"); for (const o of f.o) { const [val, lab] = Array.isArray(o) ? o : [o, String(o)]; const op = document.createElement("option"); op.value = val; op.textContent = lab; inp.appendChild(op); } }
+      else if (f.t === "chk") { inp = document.createElement("input"); inp.type = "checkbox"; }
+      else if (f.t === "txt") { inp = document.createElement("input"); inp.type = "text"; inp.size = 9; inp.style.fontFamily = "var(--f-mono)"; }
+      else { inp = document.createElement("input"); inp.type = "number"; inp.min = f.min; inp.max = f.max; inp.step = f.step; }
+      inp.id = "f_" + f.k;
+      inp.addEventListener(f.t === "txt" ? "change" : "input", () => { const old = P[f.k]; P[f.k] = f.t === "chk" ? inp.checked : (typeof BASE[f.k] === "string" ? inp.value : Number(inp.value)); if (P[f.k] !== old) { $("preset").value = "custom"; P.teaching = P.osr < 64; scheduleRebuild(); } });
+      const lab = document.createElement("label"); lab.htmlFor = inp.id; lab.innerHTML = f.l + (f.u ? `<span class="u">${f.u}</span>` : "");
+      const right = document.createElement("span"); right.appendChild(inp);
+      row.append(lab, right);
+      if (f.h) { const hh = document.createElement("div"); hh.className = "help"; hh.textContent = f.h; row.appendChild(hh); }
+      det.appendChild(row);
+    }
+    if (gi === 2) { const dv = document.createElement("div"); dv.className = "derived"; dv.id = "derived"; det.appendChild(dv); }
+    box.appendChild(det);
+  });
+  const det = document.createElement("details"); det.open = true;
+  det.innerHTML = `<summary>Gauges (INA output = REF + offset)</summary><table class="gtab"><thead><tr><th>gauge</th><th>offset<br>mV</th><th>bend<br>mV</th><th>railed</th></tr></thead><tbody id="gbody"></tbody></table><div class="help hint">REF = ${REF * 1000} mV (bench). Railed = open / unconnected: output at the 3.3 V rail, the ADC code pins at 0x7FFFFF.</div>`;
+  box.appendChild(det);
+  const gb = det.querySelector("#gbody");
+  gb.addEventListener("input", e => { const el = e.target, g = +el.dataset.g, k = el.dataset.k; P.gauges[g][k] = k === "rail" ? el.checked : Number(el.value); $("preset").value = "custom"; scheduleRebuild(); });
+}
+function buildGaugeRows() {
+  const gb = $("gbody"); if (gb.childElementCount === NG(P) && gb.dataset.shape === `${P.nsel}x${P.nch}`) return;
+  gb.innerHTML = ""; gb.dataset.shape = `${P.nsel}x${P.nch}`;
+  for (let g = 0; g < NG(P); g++) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td style="color:${chVar(g % P.nch)}">${gaugeLabel(P, g)}<span class="u"> s${Math.floor(g / P.nch)}·${g % P.nch}</span></td><td><input type="number" step="10" min="-290" max="900" data-g="${g}" data-k="off"></td><td><input type="number" step="5" min="0" max="500" data-g="${g}" data-k="bend"></td><td><input type="checkbox" data-g="${g}" data-k="rail"></td>`;
+    gb.appendChild(tr);
+  }
+}
+function syncSettings() {
+  fitGauges(P); buildGaugeRows();
+  const zs = $("zch"); if (zs.options.length !== P.nch) { zs.innerHTML = [...Array(P.nch).keys()].map(c => `<option value="${c}">AIN${c}</option>`).join(""); }
+  zch = Math.min(zch, P.nch - 1); zs.value = zch;
+  for (const [, fl] of FIELDS) for (const f of fl) { const el = $("f_" + f.k); if (f.t === "chk") el.checked = !!P[f.k]; else el.value = P[f.k]; const row = el.closest(".fld"); row.style.display = !row.dataset.only || row.dataset.only === P.policy ? "" : "none"; }
+  document.querySelectorAll("#gbody input").forEach(el => { const g = +el.dataset.g, k = el.dataset.k; if (k === "rail") el.checked = P.gauges[g].rail; else el.value = P.gauges[g][k]; });
+}
+let rebuildTimer = null;
+function scheduleRebuild() { clearTimeout(rebuildTimer); rebuildTimer = setTimeout(rebuild, 150); }
+function applyPreset(name) {
+  const pr = PRESETS[name]; if (!pr) return;
+  const keepG = P.gauges;
+  P = Object.assign(structuredClone(BASE), pr); P.gauges = keepG; fitGauges(P); delete P.name; P.teaching = !!pr.teaching;
+  speedLog = pr.speed; $("speed").value = speedLog; delete P.speed;
+}
+function rebuild() {
+  const frac = SIM ? (tNow - SIM.tStart) / (SIM.tEnd - SIM.tStart) : 0;
+  SIM = simulate(P);
+  tNow = SIM.slots[0].tSw + SIM.scanPeriod * 1.02;   // start just inside scan 1
+  if (frac > 0 && frac < 1 && lastFrame) tNow = clamp(SIM.tStart + frac * (SIM.tEnd - SIM.tStart), SIM.tStart, simEnd());
+  zoomDefault(); syncSettings(); updateDerived(); buildBlock(); updateNote(); draw(true);
+}
+function simEnd() { return SIM.slots[SIM.slots.length - 1].tEnd; }
+function updateDerived() {
+  const { p, d } = SIM;
+  const real = !p.teaching && p.osr >= 64 && p.order === 2;
+  const b = $("badge"); b.className = "badge" + (real ? " real" : "");
+  b.textContent = real ? "board settings" : "teaching settings: not the real board";
+  const rows = [
+    ["bit (mod. sample)", `${fmtT(d.tb)} · fMOD ${(d.fmod / 1e3).toFixed(1)} kHz`],
+    ["conversion T", `${fmtT(d.T)} · ${(1e6 / d.T).toFixed(1)} SPS`],
+    ["sinc3 window", fmtT(d.win)],
+    ["topology", `${p.nsel} sel × ${p.nch} ch = ${NG(p)} gauges`],
+    ["selects / scan", `${d.nsel}: ${d.order.filter(x => x >= 0).join("")}${p.extra ? " + " + p.extra + " other" : ""}`],
+    ["scan period", `${fmtT(SIM.scanPeriod)} · ${(1e6 / SIM.scanPeriod).toFixed(2)} /s`],
+    ["SPI read", `${fmtT(d.readUs)} (6 words + ${READ_OVH_US} µs)`],
+    ...(p.policy === "locked" ? [["discard D", `${d.D} per slot`], ["conv. / slot", `${Math.min(...SIM.slots.slice(0, d.nsel).map(s => s.convs.length))}–${Math.max(...SIM.slots.slice(0, d.nsel).map(s => s.convs.length))}, kept ${SIM.slots[0].keep.length}+`]] : [["slot (mean)", fmtT(SIM.scanPeriod / d.nsel)]]),
+    ["ADC noise / bit", p.adcNoise ? (SIM.sigBit * 1e3).toFixed(3) + " mV rms" : "off"],
+  ];
+  $("derived").innerHTML = rows.map(([k, v]) => `<span>${k}</span><b>${v}</b>`).join("") + (SIM.warn ? `<span class="wide">note: ${SIM.warn}</span>` : "");
+
+}
+
+// ───────────────────────────── canvas helpers ─────────────────────────────
+function prep(cv) {
+  const dpr = window.devicePixelRatio || 1, w = cv.clientWidth, h = +cv.getAttribute("height");
+  if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) { cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr); cv.style.height = h + "px"; }
+  const g = cv.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, w, h);
+  g.font = "11px " + cssv("--f-mono"); g.textBaseline = "middle";
+  return [g, w, h];
+}
+function selName(sel, long) {
+  if (sel < 0) return long ? "other (not modelled)" : "other";
+  const p = SIM.p, w = p.nch <= 2 && !(p.nsel === 8 && p.nch === 4);
+  return w ? (long ? `sel ${sel} · W${sel + 1}` : `W${sel + 1}`) : `sel ${sel}`;
+}
+const SELC = s => s < 0 ? cssv("--oth") : cssv("--s" + (s % 4));
+const CHVARS = ["--ga", "--gb", "--c2", "--c3"];
+const chVar = c => `var(${CHVARS[c % 4]})`;
+const CHC = c => cssv(CHVARS[c % 4]);
+function alpha(col, a) { const c = document.createElement("canvas").getContext("2d"); c.fillStyle = col; const v = c.fillStyle; if (v.startsWith("#")) { const n = parseInt(v.slice(1), 16); return `rgba(${n >> 16},${n >> 8 & 255},${n & 255},${a})`; } return v.replace("rgb(", "rgba(").replace(")", `,${a})`); }
+const alphaCache = new Map();
+function A(col, a) { const k = col + a; if (!alphaCache.has(k)) alphaCache.set(k, alpha(col, a)); return alphaCache.get(k); }
+function slotAt(t) { const S = SIM.slots; let lo = 0, hi = S.length - 1; if (t < S[0].tSw) return -1; while (lo < hi) { const m = (lo + hi + 1) >> 1; if (S[m].tSw <= t) lo = m; else hi = m - 1; } return lo; }
+function convDoneAt(t) { return Math.floor(t / SIM.d.T + 1e-9) - 1; }   // last conversion with DRDY <= t
+
+// ───────────────────────────── lane 2: scan timeline ─────────────────────────────
+function drawScan() {
+  const [g, W, H] = prep($("c1")), { slots, d, ch, status, p } = SIM;
+  const si = Math.max(0, slotAt(tNow)), sc = slots[si].scan;
+  const s0 = slots.findIndex(s => s.scan === sc), s1 = s0 + d.nsel - 1;
+  const t0 = slots[s0].tSw - 0.03 * SIM.scanPeriod, t1 = slots[s1].tEnd + 0.03 * SIM.scanPeriod;
+  const L = 52, R = W - 8, X = t => L + (t - t0) / (t1 - t0) * (R - L);
+  const top = 18, bot = H - 52;
+  // y range from modelled, non-railed inputs
+  let lo = Infinity, hi = -Infinity;
+  for (const G of SIM.G) if (!G.rail) { lo = Math.min(lo, REF + (G.off - G.bend) * 1e-3); hi = Math.max(hi, REF + (G.off + G.bend) * 1e-3); }
+  lo = Math.min(lo, SIM.p.other); hi = Math.max(hi, SIM.p.other); if (!isFinite(lo)) { lo = 0; hi = 1; }
+  const pad = (hi - lo) * 0.12 + 0.005; lo -= pad; hi += pad;
+  const Y = v => clamp(bot - (v - lo) / (hi - lo) * (bot - top), top - 6, bot);
+  for (let i = s0; i <= s1; i++) {
+    const s = slots[i]; g.fillStyle = A(SELC(s.sel), 0.13); g.fillRect(X(s.tSw), top - 14, X(s.tEnd) - X(s.tSw), bot - top + 14);
+    g.fillStyle = SELC(s.sel); g.textAlign = "left"; g.fillText(X(s.tEnd) - X(s.tSw) > 110 ? selName(s.sel, true).replace(" (not modelled)", "") : selName(s.sel), X(s.tSw) + 3, top - 7);
+    g.strokeStyle = cssv("--mut"); g.setLineDash([3, 3]); g.beginPath(); g.moveTo(X(s.tSw), top - 14); g.lineTo(X(s.tSw), H - 6); g.stroke(); g.setLineDash([]);
+  }
+  // axis
+  g.fillStyle = cssv("--mut"); g.textAlign = "right";
+  for (const v of [lo + pad, (lo + hi) / 2, hi - pad]) { g.fillText((v * 1000).toFixed(0), L - 6, Y(v)); }
+  g.save(); g.translate(10, (top + bot) / 2); g.rotate(-Math.PI / 2); g.textAlign = "center"; g.fillText("pin mV", 0, 0); g.restore();
+  // pin voltage, min/max per pixel
+  for (let c = 0; c < p.nch; c++) {
+    const v = ch[c].v; g.strokeStyle = CHC(c); g.lineWidth = 1.3; g.beginPath();
+    for (let px = Math.floor(L); px < R; px++) {
+      const ta = t0 + (px - L) / (R - L) * (t1 - t0), tb2 = ta + (t1 - t0) / (R - L);
+      let na = Math.max(0, Math.floor(ta / d.tb)), nb2 = Math.min(SIM.nb - 1, Math.ceil(tb2 / d.tb));
+      if (nb2 < na) continue; let mn = Infinity, mx = -Infinity; for (let n = na; n <= nb2; n++) { const x = v[n]; if (x < mn) mn = x; if (x > mx) mx = x; }
+      g.moveTo(px + 0.5, Y(mx)); g.lineTo(px + 0.5, Y(mn) + 0.5);
+    }
+    g.stroke();
+  }
+  // conversions: two rows (AIN0 decides nothing different; status is per slot) → one row of DRDY ticks
+  const ky = H - 30, kh = 12; const kA = Math.max(0, Math.floor(t0 / d.T)), kB = Math.floor(t1 / d.T);
+  const cw = Math.max(1, (R - L) / ((t1 - t0) / d.T) - 1);
+  for (let k = kA; k <= kB; k++) {
+    const x = X((k + 1) * d.T); if (x < L || x > R) continue;
+    const st = status[k];
+    if (st === 2) { g.fillStyle = cssv("--ok"); g.fillRect(x - cw, ky, cw, kh); }
+    else if (st === 1) { g.strokeStyle = cssv("--mut"); g.lineWidth = 1; g.strokeRect(x - cw + 0.5, ky + 0.5, Math.max(1, cw - 1), kh - 1); if (cw > 4) { g.beginPath(); g.moveTo(x - cw, ky); g.lineTo(x, ky + kh); g.stroke(); } }
+  }
+  g.fillStyle = cssv("--fg"); g.textAlign = "left"; g.fillText("conversions (DRDY):", L, ky - 9);
+  g.fillStyle = cssv("--ok"); g.fillRect(L + 140, ky - 14, 10, 10); g.fillStyle = cssv("--mut"); g.fillText("kept", L + 154, ky - 9); g.strokeStyle = cssv("--mut"); g.strokeRect(L + 190.5, ky - 13.5, 9, 9); g.fillText("read and discarded", L + 204, ky - 9);
+  // zoom bracket and playhead
+  const zw = zoomBits() * d.tb, za = tNow - zw * 0.75;
+  g.fillStyle = A(cssv("--fg"), 0.08); g.fillRect(X(za), top - 14, Math.max(2, X(za + zw) - X(za)), bot - top + 14);
+  g.strokeStyle = cssv("--fg"); g.lineWidth = 1.5; g.beginPath(); g.moveTo(X(tNow), top - 14); g.lineTo(X(tNow), H - 4); g.stroke();
+  $("l1hint").textContent = `scan ${sc + 1} of ${SIM.p.scans} · ${fmtT(SIM.scanPeriod)} · ${[...Array(p.nch).keys()].map(c => ["red", "blue", "green", "orange"][c] + " AIN" + c).join(", ")} · shaded: bit-level zoom · railed inputs (3.3 V) clip at the top`;
+}
+
+// ───────────────────────────── lane 3: settle and keep ─────────────────────────────
+function drawSettle() {
+  const [g, W, H] = prep($("c2")), { slots, d, ch, p } = SIM;
+  const si = Math.max(1, slotAt(tNow)), s = slots[si], C = ch[zch];
+  const span = Math.max(s.tEnd - s.tSw, 1);
+  const L = 74, R = W - 10, X = u => L + u / span * (R - L);
+  const top = 16, bot = 120, nEnd = Math.ceil(s.tEnd / d.tb) - 1;
+  const n0 = Math.ceil(s.tSw / d.tb);
+  const d0 = Math.abs(C.dist[Math.min(SIM.nb - 1, n0 + 1)]) || 1e-3;
+  const yHi = Math.log10(Math.max(Math.abs(d0), 1e-6)) + 0.3, yLo = yHi - 7;
+  const Y = v => { const l = Math.log10(Math.max(Math.abs(v), 1e-12)); return clamp(bot - (l - yLo) / (yHi - yLo) * (bot - top), top, bot); };
+  // grid
+  g.fillStyle = cssv("--mut"); g.textAlign = "right"; g.strokeStyle = cssv("--line"); g.lineWidth = 1;
+  for (let e = Math.ceil(yLo); e <= Math.floor(yHi); e++) { const y = bot - (e - yLo) / (yHi - yLo) * (bot - top); g.beginPath(); g.moveTo(L, y); g.lineTo(R, y); g.stroke(); g.fillText(e >= -3 ? `${Math.round(Math.pow(10, e + 3) * 1e3) / 1e3} mV` : e >= -6 ? `${Math.round(Math.pow(10, e + 6) * 1e3) / 1e3} µV` : `${Math.round(Math.pow(10, e + 9) * 1e3) / 1e3} nV`, L - 4, y); }
+  // settle line
+  g.strokeStyle = cssv("--warn"); g.setLineDash([4, 3]); g.beginPath(); g.moveTo(X(p.settle), top); g.lineTo(X(p.settle), H - 4); g.stroke(); g.setLineDash([]);
+  g.fillStyle = cssv("--warn"); g.textAlign = "left"; g.fillText(`settle ${p.settle} µs`, X(p.settle) + 4, top + 4);
+  // |pin − new input| from the model (the disturbance), per pixel max
+  g.strokeStyle = CHC(zch); g.lineWidth = 1.5; g.beginPath(); let first = true;
+  for (let px = L; px < R; px++) {
+    const ua = (px - L) / (R - L) * span, ub = ua + span / (R - L);
+    const na = Math.ceil((s.tSw + ua) / d.tb), nb2 = Math.min(SIM.nb - 1, nEnd, Math.floor((s.tSw + ub) / d.tb));
+    if (na > nEnd) break;
+    let mx = 0; for (let n = na; n <= nb2; n++) mx = Math.max(mx, Math.abs(C.dist[n]));
+    if (nb2 < na) mx = Math.abs(C.dist[Math.min(SIM.nb - 1, na)]);
+    const y = Y(mx); if (first) { g.moveTo(px, y); first = false; } else g.lineTo(px, y);
+  }
+  g.stroke();
+  // conversions in the slot: sinc3-filtered disturbance (dots) and windows (bars)
+  const ks = s.convs, rowH = Math.min(9, (H - bot - 24) / Math.max(1, Math.min(ks.length, 12)));
+  let shown = 0;
+  for (const k of ks) {
+    const tD = (k + 1) * d.T, ws = tD - d.win, kept = s.keep.includes(k);
+    const x = X(tD - s.tSw); const col = kept ? cssv("--ok") : cssv("--mut");
+    g.fillStyle = col; g.beginPath(); g.arc(x, Y(C.Dd[k]), kept ? 3.2 : 2.6, 0, 7); g.fill();
+    if (shown < 12) {
+      const y = bot + 18 + shown * rowH;
+      g.fillStyle = A(col, kept ? 0.55 : 0.28); g.fillRect(X(Math.max(-0.05 * span, ws - s.tSw)), y, X(tD - s.tSw) - X(Math.max(-0.05 * span, ws - s.tSw)), rowH - 2);
+      shown++;
+    }
+  }
+  g.fillStyle = cssv("--mut"); g.textAlign = "left";
+  g.fillText("line: |pin − new input| (switch disturbance) · dots: that disturbance through each conversion's sinc3 (green kept)", L, bot + 8);
+  if (ks.length > 12) g.fillText(`(first 12 of ${ks.length} windows shown)`, R - 200, H - 6);
+  g.textAlign = "right"; g.fillText("windows", L - 4, bot + 22);
+  g.textAlign = "left"; g.fillText("|residual|", 4, 6);
+  // stats
+  const sel = s.sel, prev = slots[si - 1];
+  const keptTail = s.keep.reduce((a, k) => a + C.Dd[k], 0) / Math.max(1, s.keep.length);
+  const delta = C.dist[Math.min(SIM.nb - 1, n0 + 1)];
+  $("l2hint").textContent = `slot ${selName(sel)} on AIN${zch}, from ${selName(prev.sel)} · step ≈ ${fmtUV(delta)} · tail left in the reading ${fmtUV(keptTail)} (${(keptTail / (delta || 1)).toExponential(1)} of the step) · ${s.keep.length} of ${ks.length} kept`;
+}
+
+// ───────────────────────────── lane 4: bits ─────────────────────────────
+const ZLO = 24, zoomHi = () => Math.max(ZLO * 2, Math.min(SIM.nb, 16 * SIM.p.osr));
+function zoomBits() { return Math.round(ZLO * Math.pow(zoomHi() / ZLO, zoomF)); }
+let zoomUser = false;
+function zoomDefault() { if (zoomUser) return; zoomF = clamp(Math.log(4 * SIM.p.osr / ZLO) / Math.log(zoomHi() / ZLO), 0, 1); $("zoom").value = zoomF; }   // ~4·OSR bits: all windows in progress
+function drawBits() {
+  const [g, W, H] = prep($("c3")), { d, ch, p, h } = SIM, C = ch[zch];
+  const nW = zoomBits(), nCur = Math.floor(tNow / d.tb), nA = nCur - Math.floor(nW * 0.75), nB = nA + nW;
+  const L = 58, R = W - 10, X = n => L + (n - nA) / nW * (R - L), bw = (R - L) / nW;
+  $("zoomlbl").textContent = `${nW} bits = ${fmtT(nW * d.tb)}`;
+  // rows
+  const yV0 = 10, yV1 = 70, yI0 = 82, yI1 = 120, yB0 = 132, yB1 = 152, yH0 = 162, yH1 = 222;
+  // pin voltage in the window
+  let mn = Infinity, mx = -Infinity;
+  for (let n = Math.max(0, nA); n < Math.min(SIM.nb, nB); n++) { mn = Math.min(mn, C.v[n]); mx = Math.max(mx, C.v[n]); }
+  if (!isFinite(mn)) { mn = 0; mx = 1; } if (mx - mn < 1e-5) { mn -= 5e-6; mx += 5e-6; }
+  const YV = v => yV1 - (v - mn) / (mx - mn) * (yV1 - yV0);
+  g.fillStyle = cssv("--mut"); g.textAlign = "right";
+  g.fillText((mx * 1000).toFixed(3), L - 4, yV0 + 2); g.fillText((mn * 1000).toFixed(3), L - 4, yV1 - 2); g.fillText("pin mV", L - 4, (yV0 + yV1) / 2);
+  g.fillText(p.order === 1 ? "x1" : "x2", L - 4, (yI0 + yI1) / 2); g.fillText("bits", L - 4, (yB0 + yB1) / 2); g.fillText("sinc3", L - 4, (yH0 + yH1) / 2 - 7); g.fillText("weights", L - 4, (yH0 + yH1) / 2 + 7);
+  const step = Math.max(1, Math.floor(nW / (R - L)));
+  g.strokeStyle = CHC(zch); g.lineWidth = 1.4; g.beginPath();
+  for (let n = Math.max(0, nA); n < Math.min(SIM.nb, nB); n += step) { const x = X(n + 0.5); if (n === Math.max(0, nA)) g.moveTo(x, YV(C.v[n])); else g.lineTo(x, YV(C.v[n])); }
+  g.stroke();
+  // integrator state
+  let im = 1; for (let n = Math.max(0, nA); n < Math.min(SIM.nb, nB); n += step) im = Math.max(im, Math.abs(C.integ[n]));
+  const YI = v => (yI0 + yI1) / 2 - v / im * (yI1 - yI0) / 2;
+  g.strokeStyle = cssv("--line"); g.beginPath(); g.moveTo(L, YI(0)); g.lineTo(R, YI(0)); g.stroke();
+  g.strokeStyle = cssv("--mut"); g.lineWidth = 1; g.beginPath();
+  for (let n = Math.max(0, nA); n < Math.min(SIM.nb, nB); n += step) { const x = X(n + 0.5); if (n === Math.max(0, nA)) g.moveTo(x, YI(C.integ[n])); else g.lineTo(x, YI(C.integ[n])); }
+  g.stroke();
+  // bits
+  const dense = bw < 2;
+  if (!dense) {
+    for (let n = Math.max(0, nA); n < Math.min(SIM.nb, nB) && n <= nCur; n++) { g.fillStyle = C.bits[n] ? CHC(zch) : cssv("--line"); g.fillRect(X(n) + (bw > 4 ? 0.5 : 0), yB0, Math.max(1, bw - (bw > 4 ? 1 : 0)), yB1 - yB0); }
+    if (bw > 9) { g.textAlign = "center"; g.font = "10px " + cssv("--f-mono"); for (let n = Math.max(0, nA); n < Math.min(SIM.nb, nB) && n <= nCur; n++) { g.fillStyle = C.bits[n] ? cssv("--panel") : cssv("--mut"); g.fillText(C.bits[n], X(n + 0.5), (yB0 + yB1) / 2); } g.font = "11px " + cssv("--f-mono"); }
+  } else {
+    for (let px = L; px < R; px++) {
+      const a = Math.floor(nA + (px - L) / (R - L) * nW), b = Math.floor(nA + (px + 1 - L) / (R - L) * nW);
+      if (a > nCur) break; let s = 0, c = 0; for (let n = Math.max(0, a); n < Math.min(SIM.nb, Math.max(b, a + 1)); n++) { s += C.bits[n]; c++; }
+      g.fillStyle = A(CHC(zch), c ? 0.1 + 0.9 * s / c : 0); g.fillRect(px, yB0, 1, yB1 - yB0);
+    }
+  }
+  // DRDY ticks and windows: the three conversions in progress at tNow, plus the latest done
+  const kDone = convDoneAt(tNow);
+  const kList = [kDone, kDone + 1, kDone + 2, kDone + 3];
+  const hm = h[Math.floor(h.length / 2)];
+  kList.forEach((k, i) => {
+    if (k < 2) return;
+    const b0 = (k - 2) * p.osr, st = SIM.status[k];
+    const col = st === 2 ? cssv("--ok") : st === 1 ? cssv("--mut") : cssv("--oth");
+    const op = i === 0 ? 0.9 : i === 1 ? 0.6 : 0.3;
+    g.strokeStyle = A(col, op); g.fillStyle = A(col, op * 0.18); g.lineWidth = i === 0 ? 2 : 1.2;
+    g.beginPath(); let started = false;
+    const sstep = Math.max(1, Math.floor(h.length / 600));
+    for (let j = 0; j < h.length; j += sstep) { const n = b0 + j; if (n < nA - 1 || n > nB + 1) continue; const x = X(n + 0.5), y = yH1 - h[j] / hm * (yH1 - yH0); if (!started) { g.moveTo(x, yH1); g.lineTo(x, y); started = true; } else g.lineTo(x, y); }
+    if (started) { g.lineTo(Math.min(R, X(b0 + h.length)), yH1); g.fill(); g.stroke(); }
+    // DRDY tick at the window end
+    const xe = X((k + 1) * p.osr);
+    if (xe >= L && xe <= R) { g.strokeStyle = A(cssv("--fg"), 0.6); g.setLineDash([2, 3]); g.lineWidth = 1; g.beginPath(); g.moveTo(xe, yV0); g.lineTo(xe, H - 14); g.stroke(); g.setLineDash([]); g.fillStyle = cssv("--fg"); g.textAlign = "center"; g.fillText(`DRDY #${k}${st === 2 ? " keep" : st === 1 ? " drop" : ""}`, xe, H - 6); }
+  });
+  // mux switch markers
+  for (const s of SIM.slots) { const xs = X(s.tSw / d.tb); if (xs >= L && xs <= R) { g.strokeStyle = SELC(s.sel); g.lineWidth = 2; g.beginPath(); g.moveTo(xs, yV0 - 6); g.lineTo(xs, yB1); g.stroke(); g.fillStyle = SELC(s.sel); g.textAlign = "left"; g.fillText(`switch → ${selName(s.sel)}`, xs + 3, yV0 - 2); } }
+  // playhead
+  g.strokeStyle = cssv("--fg"); g.lineWidth = 1.5; g.beginPath(); g.moveTo(X(nCur + 1), yV0 - 8); g.lineTo(X(nCur + 1), yH1 + 2); g.stroke();
+  // running fraction of ones in the latest window
+  let ones = 0; const bw0 = Math.max(0, nCur - 3 * p.osr + 1); for (let n = bw0; n <= nCur; n++) ones += C.bits[n];
+  $("l3hint").textContent = `AIN${zch} · bit ${fmtT(d.tb)} · ${dense ? "bits denser than 2 px: shading = fraction of 1s per pixel · " : ""}last 3·OSR bits: ${(ones / (nCur - bw0 + 1) * 100).toFixed(1)} % ones ↔ ${fmtV(VR * (2 * ones / (nCur - bw0 + 1) - 1), 4)} V · humps: windows of the conversions in progress (the next DRDY solid)`;
+}
+
+// ───────────────────────────── lane 5: conversion word, SPI, MCU ─────────────────────────────
+function bin24(code) { const u = (code + 0x1000000) & 0xFFFFFF; let s = ""; for (let i = 23; i >= 0; i--) { const b = (u >> i) & 1; s += `<span class="b${b}">${b}</span>` + (i % 4 === 0 && i ? " " : ""); } return [s, u]; }
+function drawConv() {
+  const { d, ch, p, slots, status } = SIM, k = convDoneAt(tNow);
+  const si = SIM.slotOf[k], s = si >= 0 ? slots[si] : null, st = status[k];
+  let html = "";
+  const words = [];
+  for (let c = 0; c < p.nch; c++) {
+    const C = ch[c], code = C.code[k] || 0, [b, u] = bin24(code); words.push(u);
+    const r = C.S[k] / Math.pow(p.osr, 3);
+    html += `<div><div class="kv">AIN${c} · conversion #${k} · DRDY at ${fmtT((k + 1) * d.T)}</div>
+      <div class="word">${b}</div>
+      <div class="kv">hex <b>0x${u.toString(16).toUpperCase().padStart(6, "0")}</b> · dec <b>${code}</b> · <b>${fmtV(code * VR / FS_CODE * 1000, 4)} mV</b></div>
+      <div class="kv">Σ w·(±1) = ${C.S[k]} over ${SIM.h.length} bits; ÷ OSR³ (${p.osr}³) = ${r.toFixed(7)}; × 2²³ → code. Pin, sinc3-averaged: ${fmtV(C.A[k] * 1000, 4)} mV → ${Math.abs(C.A[k]) < VR ? `quantization + ADC noise ${fmtUV(code * VR / FS_CODE - C.A[k])}` : "beyond ±1.2 V full scale: the code saturates"}</div></div>`;
+  }
+  const bytes = []; for (const w of words) bytes.push(w >> 16 & 255, w >> 8 & 255, w & 255);
+  const crc = crc16ccitt(bytes);
+  const pol = p.policy === "locked" ? `locked: keep conversions whose window starts ≥ ${p.settle} µs after the switch (position ≥ D = ${d.D} in the slot), average them` : `legacy: wait ${p.settle} µs, count conversions that end after it, drop ${p.discard}, keep the next`;
+  const pos = s ? s.convs.indexOf(k) : -1;
+  const verdict = st === 2 ? `<span class="keep">KEEP</span>` : st === 1 ? `<span class="drop">DROP</span>` : `<span class="hint">before the scan</span>`;
+  const keptSoFar = s ? s.keep.filter(q => q <= k).length : 0;
+  html += `<div style="grid-column:1/-1" class="kv">SPI frame (${fmtT(d.readUs)} at ${p.spi} MHz): <b>STATUS</b> · ${words.map((w, c) => `<b>CH${c} ${w.toString(16).toUpperCase().padStart(6, "0")}</b>`).join(" · ")} · ${p.nch < 4 ? `(CH${p.nch}${p.nch < 3 ? "–CH3" : ""} not modelled) · ` : ""}<b>CRC</b> (CRC-16-CCITT of the ${p.nch} shown word${p.nch > 1 ? "s" : ""}: 0x${crc.toString(16).toUpperCase().padStart(4, "0")})<br>
+    MCU: ${s ? `slot ${selName(s.sel)}, conversion ${pos + 1} of ${s.convs.length} → ${verdict}; kept so far ${keptSoFar} of ${s.keep.length}` : "—"} · policy ${pol}</div>`;
+  $("convbox").innerHTML = html;
+  // the current slot's conversions so far, on a scale set by its kept ones (dropped ones clip)
+  const [g, W, H] = prep($("c4")), C = ch[zch];
+  if (!s) return;
+  const kA = s.convs[0], kB = s.convs.at(-1), kv = s.keep.map(q => C.code[q] * VR / FS_CODE);
+  const mean = kv.reduce((a, b) => a + b, 0) / Math.max(1, kv.length);
+  let half = 20e-6; for (const v of kv) half = Math.max(half, Math.abs(v - mean) * 1.25);
+  const lo = mean - half, hi = mean + half;
+  const L = 104, R = W - 10, X = q => L + (q - kA + 0.5) / (kB - kA + 1) * (R - L), Y = v => clamp(H - 22 - (v - lo) / (hi - lo) * (H - 40), 8, H - 22);
+  g.fillStyle = cssv("--mut"); g.textAlign = "right";
+  g.fillText(`${fmtV(hi * 1000, 4)} mV`, L - 6, Y(hi)); g.fillText(`${fmtV(lo * 1000, 4)} mV`, L - 6, Y(lo));
+  g.strokeStyle = A(cssv("--ok"), 0.7); g.setLineDash([5, 4]); g.beginPath(); g.moveTo(L, Y(mean)); g.lineTo(R, Y(mean)); g.stroke(); g.setLineDash([]);
+  g.fillStyle = cssv("--ok"); g.fillText(`${fmtV(mean * 1000, 4)} mV`, L - 6, Y(mean));
+  for (let q = kA; q <= Math.min(k, kB); q++) {
+    const v = C.code[q] * VR / FS_CODE, x = X(q), y = Y(v), off = v > hi || v < lo;
+    if (status[q] === 2) { g.fillStyle = cssv("--ok"); g.beginPath(); g.arc(x, y, 3.2, 0, 7); g.fill(); }
+    else { g.strokeStyle = cssv("--mut"); g.lineWidth = 1; g.beginPath(); g.moveTo(x - 3, y - 3); g.lineTo(x + 3, y + 3); g.moveTo(x + 3, y - 3); g.lineTo(x - 3, y + 3); g.stroke(); if (off) { g.fillStyle = cssv("--mut"); g.textAlign = "center"; g.fillText(v > hi ? "▲" : "▼", x, v > hi ? Y(hi) + 10 : Y(lo) - 10); } }
+  }
+  g.fillStyle = cssv("--mut"); g.textAlign = "left";
+  g.fillText(`AIN${zch}, slot ${selName(s.sel)}: ${k - kA + 1 > 0 ? Math.min(k, kB) - kA + 1 : 0} of ${s.convs.length} conversions so far (● kept, × dropped, ▲▼ off scale) · dashed (green): mean of all kept = the slot's reading`, L, H - 6);
+  // DRDY flash
+  const sinceD = tNow - (k + 1) * d.T;
+  $("l4hint").textContent = `DRDY ${sinceD < d.T * 0.3 ? "▲ just now" : "low"} · ${fmtT(d.T)} per conversion`;
+}
+
+// ───────────────────────────── lane 6: frame ─────────────────────────────
+function drawFrame() {
+  const { frames, p, slots } = SIM, ng = NG(p);
+  const si = slotAt(tNow); const scNow = si >= 0 ? slots[si].scan : 0;
+  let fi = -1; for (let i = 0; i < frames.length; i++) if (frames[i].t <= tNow) fi = i;
+  const fr = fi >= 0 ? frames[fi] : null;
+  // stats over all frames from scan 2 on (scan 1 starts from an arbitrary previous state)
+  const stat = [];
+  for (let g = 0; g < ng; g++) {
+    const fs = frames.slice(1).filter(f => f.g[g] && !f.g[g].rail);
+    if (!fs.length) { stat.push(null); continue; }
+    const e = fs.map(f => f.g[g].err), m = e.reduce((a, b) => a + b, 0) / e.length;
+    stat.push({ m, sd: Math.sqrt(e.reduce((a, b) => a + (b - m) ** 2, 0) / Math.max(1, e.length - 1)) });
+  }
+  let html = `<thead><tr><th style="text-align:left">gauge</th><th>sel·ch</th><th>code</th><th>out mV</th><th>true mV</th><th>error</th><th>of which<br>settle tail</th><th>conv.<br>averaged</th><th>error mean<br>all scans</th><th>error rms<br>about mean</th></tr></thead><tbody>`;
+  for (let g = 0; g < ng; g++) {
+    const f = fr ? fr.g[g] : null, S = stat[g];
+    html += `<tr><td style="text-align:left;color:${chVar(g % p.nch)}">${gaugeLabel(p, g)}${p.gauges[g].rail ? " (railed)" : ""}</td><td>${Math.floor(g / p.nch)}·${g % p.nch}</td>`;
+    if (p.gauges[g].rail && f) { html += `<td>0x${((f.code + 0x1000000) & 0xFFFFFF).toString(16).toUpperCase().padStart(6, "0")}</td><td>${fmtV(f.out * 1000, 4)}</td><td colspan="6" style="text-align:left" class="hint">railed (3.3 V at the pin, beyond ±1.2 V): code pinned at full scale, no error computed</td></tr>`; continue; }
+    if (!S) { html += `<td colspan="8" style="text-align:left" class="hint">${p.gauges[g].rail ? "railed" : "select not scanned"}</td></tr>`; continue; }
+    html += (f ? `<td>0x${((f.code + 0x1000000) & 0xFFFFFF).toString(16).toUpperCase().padStart(6, "0")}</td><td>${fmtV(f.out * 1000, 4)}</td><td>${fmtV(Math.min(f.tru, VR) * 1000, 4)}</td><td>${fmtUV(f.err)}</td><td>${fmtUV(f.tail)}</td><td>${f.n}</td>` : `<td colspan="6">waiting for the first frame</td>`) + `<td>${fmtUV(S.m)}</td><td>${fmtUV(S.sd).replace("+", "")}</td></tr>`;
+  }
+  $("frame").innerHTML = html + `</tbody>`;
+  $("l5hint").textContent = fr ? `frame of scan ${fr.scan + 1} sent at ${fmtT(fr.t)} · now in scan ${scNow + 1} · stats over scans 2…${p.scans}` : "";
+  // traces: error − mean, per scan, per gauge
+  const cv = $("c5"), want = Math.max(220, ng * 20 + 24); if (+cv.getAttribute("height") !== want) cv.setAttribute("height", want);
+  const [g, W, H] = prep(cv);
+  const L = 80, R = W - 10, n = frames.length, X = i => L + (i + 0.5) / n * (R - L), rh = (H - 22) / ng;
+  let em = 1e-7; for (const f of frames.slice(1)) for (let q = 0; q < ng; q++) if (stat[q] && !p.gauges[q].rail) em = Math.max(em, Math.abs(f.g[q].err - stat[q].m));
+  for (let q = 0; q < ng; q++) {
+    const yc = 6 + q * rh + rh / 2, Y = v => yc - v / em * (rh / 2 - 1.5);
+    g.strokeStyle = cssv("--line"); g.lineWidth = 1; g.beginPath(); g.moveTo(L, yc); g.lineTo(R, yc); g.stroke();
+    g.fillStyle = CHC(q % p.nch); g.textAlign = "right"; g.fillText(gaugeLabel(p, q), L - 6, yc);
+    if (p.gauges[q].rail) { g.fillStyle = cssv("--mut"); g.textAlign = "left"; g.fillText("railed: code pinned at full scale", L + 4, yc); continue; }
+    if (!stat[q]) { g.fillStyle = cssv("--mut"); g.textAlign = "left"; g.fillText("not scanned", L + 4, yc); continue; }
+    g.strokeStyle = CHC(q % p.nch); g.lineWidth = 1.3; g.beginPath();
+    for (let i = 1; i < n; i++) { const y = Y(frames[i].g[q].err - stat[q].m); if (i === 1) g.moveTo(X(i), y); else g.lineTo(X(i), y); }
+    g.stroke();
+    g.fillStyle = CHC(q % p.nch);
+    for (let i = 1; i <= Math.min(fi, n - 1); i++) g.fillRect(X(i) - 1.5, Y(frames[i].g[q].err - stat[q].m) - 1.5, 3, 3);
+  }
+  if (fi >= 0) { g.strokeStyle = cssv("--fg"); g.beginPath(); g.moveTo(X(fi), 2); g.lineTo(X(fi), H - 14); g.stroke(); }
+  g.fillStyle = cssv("--mut"); g.textAlign = "left"; g.fillText(`error − its mean, per scan (each row ±${fmtUV(em).replace("+", "")}); constant offsets (e.g. the comb folded to 0 Hz by a locked scan) are in the mean column`, L, H - 6);
+}
+
+// ───────────────────────────── lane 1: block diagram ─────────────────────────────
+// Layout follows p.nsel × p.nch: one gauge row per (select, channel), one nsel:1 mux per ADC channel.
+let BL = null;
+function buildBlock() {
+  const p = SIM.p, ng = NG(p), rh = ng <= 8 ? 36 : ng <= 16 ? 22 : 17;
+  const Hg = 22 + ng * rh, Htot = Math.max(330, Hg + 20), band = (Htot - 40) / p.nch;
+  const s = [], T = (x, y, txt, cls = "t", a = "start", id = "") => s.push(`<text x="${x}" y="${y}" class="${cls}" text-anchor="${a}"${id ? ` id="${id}"` : ""}>${txt}</text>`);
+  const muxY = c => 14 + c * band, muxH = band - 22, inY = (c, q) => muxY(c) + 12 + (p.nsel > 1 ? q * (muxH - 24) / (p.nsel - 1) : (muxH - 24) / 2), outY = c => muxY(c) + muxH / 2;
+  const gy = g => 22 + g * rh;
+  for (let g = 0; g < ng; g++) {
+    const y = gy(g), sel = Math.floor(g / p.nch), c = g % p.nch, col = chVar(c);
+    if (c === 0) s.push(`<rect x="4" y="${y - rh / 2 + 2}" width="200" height="${rh * p.nch - 4}" rx="4" style="fill:none;stroke:var(--line)"/>`);
+    T(10, y + 4, gaugeLabel(p, g), rh < 20 ? "v" : "t");
+    s.push(`<path d="M50,${y} L84,${y}" class="w"/><path d="M84,${y - Math.min(9, rh / 2 - 2)} L84,${y + Math.min(9, rh / 2 - 2)} L102,${y} Z" class="box"/>`);
+    s.push(`<path d="M102,${y} L118,${y}" class="w"/><rect x="118" y="${y - 4}" width="16" height="8" class="box" id="rc${g}"/><path d="M134,${y} L148,${y}" class="w"/>`);
+    T(150, y + 4, "", "v", "start", "gv" + g);
+    s.push(`<path d="M204,${y} C250,${y} 250,${inY(c, sel)} 300,${inY(c, sel)}" class="wdim" id="gw${g}" style="stroke:${col}"/>`);
+  }
+  T(104, Htot - 6, "bridge · INA351 G 10 · RC 1 k/0.1 µF", "n", "middle");
+  for (let c = 0; c < p.nch; c++) {
+    s.push(`<rect x="300" y="${muxY(c)}" width="70" height="${muxH}" rx="4" class="box"/>`);
+    T(335, muxY(c) + muxH + 12, `mux → AIN${c}`, "v", "middle");
+    for (let q = 0; q < p.nsel; q++) T(305, inY(c, q) + 3.5, q, "v");
+    s.push(`<path d="M370,${outY(c)} L452,${outY(c)}" class="w" style="stroke:${chVar(c)}"/>`); T(376, outY(c) - 6, "", "v", "start", "pin" + c);
+  }
+  const adcTop = 30, adcH = Htot - 60;
+  s.push(`<rect x="452" y="${adcTop - 18}" width="180" height="${adcH + 18}" rx="6" class="box"/>`); T(542, adcTop - 4, `ADS131M04 (${p.nch} of 4 ch)`, "t", "middle");
+  for (let c = 0; c < p.nch; c++) {
+    const y = outY(c);
+    T(457, y + 4, `AIN${c}`, "v");
+    s.push(`<rect x="492" y="${y - 12}" width="60" height="24" rx="3" class="box"/>`); T(522, y - 1, "ΔΣ", "v", "middle"); T(522, y + 9, "", "t", "middle", "bit" + c);
+    s.push(`<path d="M552,${y} L562,${y}" class="w"/><rect x="562" y="${y - 12}" width="64" height="24" rx="3" class="box"/>`); T(594, y - 1, "sinc3", "v", "middle"); T(594, y + 9, "", "v", "middle", "code" + c);
+    if (band > 60) T(492, y + 25, "", "v", "start", "dens" + c);
+  }
+  T(542, adcTop + adcH - 18, "", "v", "middle", "fmod"); T(542, adcTop + adcH - 4, "", "v", "middle", "osrl");
+  const my = Htot / 2;
+  s.push(`<path d="M632,${my - 40} L700,${my - 40}" class="w" id="drdyw"/><path d="M632,${my + 40} L700,${my + 40}" class="w" id="spiw"/>`);
+  T(666, my - 46, "DRDY", "t", "middle", "drdyt"); T(666, my + 34, "SPI", "t", "middle"); T(666, my + 54, "", "v", "middle", "spiv");
+  s.push(`<rect x="700" y="${my - 125}" width="150" height="250" rx="6" style="fill:#1f2a44;stroke:#0e1526"/>`);
+  s.push(`<text x="775" y="${my - 105}" text-anchor="middle" style="font:600 12px var(--f-mono);fill:#dfe6f2">ESP32</text>`);
+  for (let i = 0; i < 8; i++) s.push(`<text x="710" y="${my - 81 + i * 17}" id="mcu${i}" style="font:400 10.5px var(--f-mono);fill:#aeb8cc"></text>`);
+  const hn = Math.min(ng, 12), hh = Math.max(250, 46 + hn * 17);
+  s.push(`<path d="M850,${my} L880,${my}" class="w"/><rect x="880" y="${my - hh / 2}" width="116" height="${hh}" rx="6" class="box"/>`); T(938, my - hh / 2 + 18, "host frame", "t", "middle");
+  for (let i = 0; i < hn; i++) T(886, my - hh / 2 + 38 + i * 17, "", "v", "start", "hf" + i);
+  T(938, my + hh / 2 - 8, "", "v", "middle", "hfn");
+  const svg = $("blk"); svg.setAttribute("viewBox", `0 0 1000 ${Htot}`); svg.innerHTML = s.join("");
+  BL = { shape: `${p.nsel}x${p.nch}`, hn };
+}
+function updateBlock() {
+  const { slots, ch, d, p, frames, status } = SIM, si = slotAt(tNow), s = si >= 0 ? slots[si] : null, n = Math.min(SIM.nb - 1, Math.max(0, Math.floor(tNow / d.tb)));
+  if (!BL || BL.shape !== `${p.nsel}x${p.nch}`) buildBlock();
+  for (let g = 0; g < NG(p); g++) {
+    const G = SIM.G[g], v = G.rail ? RAIL : SIM.xTrue(g, tNow);
+    $("gv" + g).textContent = G.rail ? "3300 railed" : (v * 1000).toFixed(1) + " mV";
+    const active = s && s.sel >= 0 && Math.floor(g / p.nch) === s.sel;
+    const el = $("gw" + g); el.setAttribute("class", active ? "w" : "wdim"); el.style.strokeWidth = active ? 2.6 : 1.1; el.style.opacity = active ? 1 : 0.45;
+    $("rc" + g).style.display = p.rc ? "" : "none";
+  }
+  for (let c = 0; c < p.nch; c++) {
+    $("pin" + c).textContent = (ch[c].v[n] * 1000).toFixed(2) + " mV";
+    $("bit" + c).textContent = "bit " + ch[c].bits[n];
+    const k = convDoneAt(tNow); $("code" + c).textContent = "0x" + ((ch[c].code[k] + 0x1000000) & 0xFFFFFF).toString(16).toUpperCase().padStart(6, "0");
+    const de = $("dens" + c);
+    if (de) { let o = 0; const a = Math.max(0, n - p.osr + 1); for (let q = a; q <= n; q++) o += ch[c].bits[q]; de.textContent = `1s (last OSR): ${(o / (n - a + 1) * 100).toFixed(1)} %`; }
+  }
+  $("fmod").textContent = `fMOD ${(d.fmod / 1e3).toFixed(0)} kHz · bit ${fmtT(d.tb)}`;
+  $("osrl").textContent = `OSR ${p.osr} · window ${fmtT(d.win)}`;
+  const k = convDoneAt(tNow), since = tNow - (k + 1) * d.T, hot = since < Math.min(d.T * 0.3, d.readUs + 2);
+  $("drdyw").style.stroke = hot ? "var(--ok)" : ""; $("drdyw").style.strokeWidth = hot ? 3.5 : "";
+  $("drdyt").style.fill = hot ? "var(--ok)" : "";
+  const reading = since < d.readUs; $("spiw").style.stroke = reading ? "var(--gb)" : ""; $("spiw").style.strokeWidth = reading ? 3.5 : "";
+  $("spiv").textContent = reading ? `read #${k}` : "idle";
+  const pos = s ? s.convs.indexOf(k) : -1, st = status[k];
+  const lines = [
+    s ? `slot ${selName(s.sel)} (scan ${s.scan + 1})` : "",
+    s ? `since switch ${fmtT(tNow - s.tSw)}` : "",
+    `conv #${k}: ${st === 2 ? "KEEP" : st === 1 ? "drop" : "–"}`,
+    s ? `pos ${pos + 1}/${s.convs.length}` : "",
+    s ? `kept ${s.keep.filter(q => q <= k).length}/${s.keep.length}` : "",
+    p.policy === "locked" ? `D = ${d.D}, mean of kept` : `settle ${p.settle} µs`,
+    p.policy === "locked" ? `N = ${p.N} per scan` : `drop ${p.discard}, keep 1`,
+    `${(1e6 / SIM.scanPeriod).toFixed(1)} scans/s`];
+  lines.forEach((t, i) => $("mcu" + i).textContent = t);
+  let fi = -1; for (let i = 0; i < frames.length; i++) if (frames[i].t <= tNow) fi = i;
+  const ng = NG(p);
+  for (let i = 0; i < BL.hn; i++) { const f = fi >= 0 ? frames[fi].g[i] : null; $("hf" + i).textContent = fi >= 0 ? `${gaugeLabel(p, i)} ${f ? (f.out * 1000).toFixed(2) : "—"}` : ""; }
+  $("hfn").textContent = fi >= 0 ? (ng > BL.hn ? `+${ng - BL.hn} more (lane 6)` : `scan ${fi + 1}, mV`) : "no frame yet";
+  $("blkhint").textContent = s ? `select ${s.sel < 0 ? "other" : s.sel}: ` + [...Array(p.nch).keys()].map(c => `AIN${c} ← ${s.sel < 0 ? "other" : gaugeLabel(p, s.sel * p.nch + c)}`).join(", ") : "";
+}
+
+// ───────────────────────────── notes ─────────────────────────────
+function updateNote() {
+  const p = SIM.p, d = SIM.d;
+  const cpar = p.tailFrac / (1 - p.tailFrac) * C_RC * 1e9;
+  $("modelnote").innerHTML = [
+    `<li><b>Topology.</b> The board has 2 × CD4097B (dual 8:1) feeding a 4-channel ADS131M04: 8 selects × 4 channels = 32 gauges. Here: ${p.nsel} selects × ${p.nch} channel${p.nch > 1 ? "s" : ""} = ${NG(p)} gauges${p.nsel === 8 && p.nch === 4 ? " (the board's scale; names from the firmware's OUT_OF table)" : ""}. “Extra selects” (${p.extra} now) stand in for selects of the board that are not modelled, so the scan timing matches; their inputs sit at ${p.other} V. Each ADC channel has its own ${p.nsel}:1 mux; all switch together.</li>`,
+    `<li><b>Gauges.</b> INA output = REF (${REF * 1000} mV, bench) + offset + bend sine (${p.bendHz} Hz), + white noise ${p.enoise} µV/√Hz, + the 845 Hz 3V3 ripple at ${p.humK} mV per V of offset (bench mechanism), all through the 1 kΩ / 0.1 µF RC (f<sub>c</sub> = ${FC_RC.toFixed(0)} Hz) when on. Railed = 3.3 V. The 62.5 Hz comb (${p.comb} µV per line, 16 lines) is added at the ADC pins, equal on both; its real injection point is unknown.</li>`,
+    `<li><b>Mux switch.</b> At a switch the pin keeps its old value through a fast part (τ ${p.tauFast} µs, the fits put it at an effective ~15 µs delay) and a charge-sharing tail: ${p.tailFrac} × (old pin − new input) × e<sup>−t/${p.tau} µs</sup>${p.tail2 ? ` + ${p.tail2} × e<sup>−t/${p.tau2} µs</sup>` : ""}. A railed source holds the pin ${p.ovUs} µs longer (overload recovery, modelled as a delay). Defaults from the bench settle fits (τ 70–90 µs, ~0.0136 of the step; the individual fits scatter, 1e-3…4e-3 slow parts with 69–142 µs). A plausible reading, not measured: ${p.tailFrac} ≈ C<sub>par</sub>/(C<sub>par</sub> + 100 nF), i.e. C<sub>par</sub> ≈ ${cpar.toFixed(1)} nF of mux + ADC input, recharged through 1 kΩ (τ ≈ ${TAU_RC_US.toFixed(0)} µs). The RC switch only filters the gauge signals; it does not change the tail parameters.</li>`,
+    `<li><b>Modulator.</b> 1-bit, ${p.order === 2 ? "second" : "first"} order, the same loop as the signal chain page (y = sign of the last integrator before the step; x1 += u − y; x2 += x1 − y), u = pin / 1.2 V clipped to ±1, integrators clamped (±4, ±16). The ADS131M04's real loop is not published; second order stands in. ADC thermal noise: white per-bit input noise sized so the sinc3 output matches the datasheet's gain-1 noise at OSR ≥ 256 (${p.adcNoise ? (SIM.sigBit * 1e3).toFixed(3) + " mV per bit now" : "off now"}); at OSR 64/128 the table also holds the chip's quantization noise, which this modulator makes itself.</li>`,
+    `<li><b>sinc3 and the code.</b> Weights = three length-OSR boxcars convolved (3·OSR − 2 bits, sum OSR³); result = Σ w·(±1) / OSR³; code = round(result × 2²³), clipped to 0x800000…0x7FFFFF. One result per OSR bits (T = 2·OSR/CLKIN = ${fmtT(d.T)}), window 3·T. The chip's internal reference error, gain error and offset are not modelled.</li>`,
+    `<li><b>Firmware.</b> Legacy (M0): switch, wait settle, count conversions that end after it, drop N, keep the next; the next switch follows that read (${fmtT(d.readUs)} for a 6-word SPI frame + ${READ_OVH_US} µs). Locked (M1/M2): every conversion is read; scan = N conversions on the ADC grid, split over the selects (floor/ceil); switch ${p.swLat} µs after the DRDY that ends a slot; drop the first D = ceil(3 + (settle + ${LK_LAT_ALLOW_US})/T) − 1 of each slot, average the rest. CRC errors, missed DRDYs and resyncs are not modelled.</li>`,
+    `<li><b>Error columns.</b> True = the noiseless gauge signal (REF + offset + bend, through the RC when on) at the centre of the kept windows. Error = output − true; “settle tail” = the switch disturbance seen through the kept conversions (exact, same sinc3 sums); the rest is noise, 845 Hz ripple, comb and quantization. Time skew between gauges is not an error here (each gauge is compared at its own sampling time).</li>`,
+  ].join("");
+}
+
+// ───────────────────────────── transport ─────────────────────────────
+function speedUs() { return Math.pow(10, speedLog); }   // signal µs per screen second
+function draw() {
+  if (!SIM) return;
+  $("speedlbl").textContent = `1 s on screen = ${fmtT(speedUs())} of signal`;
+  const si = slotAt(tNow), s = si >= 0 ? SIM.slots[si] : null;
+  $("clock").textContent = `t = ${fmtT(tNow)} · scan ${s ? s.scan + 1 : "–"} · slot ${s ? (selName(s.sel)) : "–"} · ${s ? fmtT(tNow - s.tSw) + " after the switch" : ""} · bit #${Math.floor(tNow / SIM.d.tb)} · ${SIM.p.teaching || SIM.p.osr < 64 ? "TEACHING SETTINGS (not the board)" : ""}`;
+  updateBlock(); drawScan(); drawSettle(); drawBits(); drawConv(); drawFrame();
+}
+function frame(ts) {
+  if (lastFrame !== null && playing && SIM) {
+    const dt = Math.min(0.1, (ts - lastFrame) / 1000);
+    tNow += dt * speedUs();
+    if (tNow > simEnd()) tNow = SIM.slots[0].tSw + 0.5 * SIM.d.T;
+    draw();
+  }
+  lastFrame = ts;
+  requestAnimationFrame(frame);
+}
+function stepBy(kind) {
+  playing = false; $("play").textContent = "▶ play"; $("play").classList.remove("on");
+  const d = SIM.d;
+  if (kind === "bit") tNow = (Math.floor(tNow / d.tb + 1e-9) + 1) * d.tb + 1e-6;
+  else if (kind === "conv") tNow = (convDoneAt(tNow) + 2) * d.T + 1e-6;
+  else if (kind === "slot") { const si = slotAt(tNow); tNow = (SIM.slots[si + 1] || SIM.slots[0]).tSw + 1e-6; }
+  else if (kind === "scan") { const si = slotAt(tNow), sc = SIM.slots[si].scan, nx = SIM.slots.find(s => s.scan === sc + 1) || SIM.slots[0]; tNow = nx.tSw + 1e-6; }
+  if (tNow > simEnd()) tNow = SIM.slots[0].tSw + 1e-6;
+  draw();
+}
+
+// ───────────────────────────── boot ─────────────────────────────
+function boot() {
+  const hp = new URLSearchParams(location.hash.slice(1));
+  if (hp.has("selftest")) { const el = $("selftest"); el.hidden = false; try { el.textContent = JSON.stringify(selftest()); } catch (e) { el.textContent = JSON.stringify({ error: String(e), stack: e.stack }); } return; }
+  const ps = $("preset");
+  for (const [k, v] of Object.entries(PRESETS)) { const o = document.createElement("option"); o.value = k; o.textContent = v.name; ps.appendChild(o); }
+  const oc = document.createElement("option"); oc.value = "custom"; oc.textContent = "custom"; ps.appendChild(oc);
+  buildSettings();
+  const pre = hp.get("preset") || "quiet"; ps.value = pre; applyPreset(pre);
+  if (hp.has("theme")) document.documentElement.dataset.theme = hp.get("theme");
+  if (hp.has("zch")) { zch = +hp.get("zch"); $("zch").value = zch; }
+  if (hp.has("zoom")) { zoomF = +hp.get("zoom"); $("zoom").value = zoomF; zoomUser = true; }
+  for (const [k, v] of hp) if (k.startsWith("p.")) { const key = k.slice(2); P[key] = typeof BASE[key] === "number" ? Number(v) : typeof BASE[key] === "boolean" ? v === "1" : v; }
+  if (hp.has("rail")) hp.get("rail").split(",").forEach(g => P.gauges[+g].rail = true);
+  SIM = simulate(P); zoomDefault(); syncSettings(); updateDerived(); buildBlock(); updateNote();
+  tNow = SIM.slots[0].tSw + SIM.scanPeriod * 1.02;
+  if (hp.has("t")) tNow = SIM.slots[0].tSw + Number(hp.get("t"));
+  if (hp.has("slot")) { const [sc, j, off] = hp.get("slot").split(",").map(Number); const s = SIM.slots.find(q => q.scan === sc && q.j === j); if (s) tNow = s.tSw + (off || 0); }
+  if (hp.has("pause")) { playing = false; $("play").textContent = "▶ play"; $("play").classList.remove("on"); }
+  ps.addEventListener("change", () => { if (ps.value !== "custom") { applyPreset(ps.value); rebuild(); } });
+  $("play").addEventListener("click", () => { playing = !playing; $("play").textContent = playing ? "❚❚ pause" : "▶ play"; $("play").classList.toggle("on", playing); });
+  document.querySelectorAll("[data-step]").forEach(b => b.addEventListener("click", () => stepBy(b.dataset.step)));
+  $("speed").value = speedLog; $("speed").addEventListener("input", e => { speedLog = +e.target.value; draw(); });
+  $("zoom").addEventListener("input", e => { zoomF = +e.target.value; zoomUser = true; draw(); });
+  $("zch").addEventListener("change", e => { zch = +e.target.value; draw(); });
+  $("theme").addEventListener("click", () => { const r = document.documentElement, dark = r.dataset.theme ? r.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches; r.dataset.theme = dark ? "light" : "dark"; alphaCache.clear(); draw(); });
+  window.addEventListener("resize", () => draw());
+  document.addEventListener("keydown", e => { if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return; if (e.key === " ") { e.preventDefault(); $("play").click(); } else if (e.key === "ArrowRight") stepBy(e.shiftKey ? "conv" : "bit"); });
+  draw();
+  requestAnimationFrame(frame);
+}
+boot();
+</script>
+</body>
+</html>
