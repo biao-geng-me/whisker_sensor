@@ -90,6 +90,25 @@ def test_back_to_legacy(fake_esp32):
     assert len(quiet) >= 40 and {b.t_us - a.t_us for a, b in zip(quiet, quiet[1:])} == {16000}
 
 
+def test_quiet_defaults_and_125hz(fake_esp32):
+    fd = os.open(fake_esp32, os.O_RDWR | os.O_NOCTTY)
+    try:
+        os.write(fd, b"M1;B")
+        evs = _read_events(fd, 0.6)
+        os.write(fd, b"M1 200 512 8000;")       # N = 8000 / 128 us is not whole: refused
+        evs += _read_events(fd, 0.4)
+        os.write(fd, b"M1 200 256 8000;")
+        evs += _read_events(fd, 1.2)
+    finally:
+        os.close(fd)
+    infos = [ef.info_cfg(dict(e.__dict__)) for e in evs if isinstance(e, ef.Info)]
+    assert infos[0]["osr"] == 512 and infos[0]["n_conv"] == 125 and infos[0]["scan_hz"] == 62.5
+    assert any("whole number of conversions" in e.text for e in evs if isinstance(e, ef.Text))
+    assert infos[-1]["osr"] == 256 and infos[-1]["n_conv"] == 125 and infos[-1]["scan_hz"] == 125.0
+    fast = [e for e in evs if isinstance(e, ef.Scan) and e.dur_us == 8000]
+    assert len(fast) >= 60 and {b.t_us - a.t_us for a, b in zip(fast, fast[1:])} == {8000}
+
+
 def _free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))

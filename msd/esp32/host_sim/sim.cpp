@@ -8,8 +8,9 @@
 // ADC model: conversions every T = 2*OSR/CLKIN on a grid restarted by RESET,
 // a CLOCK write or a CLKIN change; a 2-deep output FIFO; DRDY low while data
 // are unread, high from the start of a read; a conversion that completes
-// during a read gives no falling edge (SBAS890D 8.5.1.5), one that completes
-// while DRDY is already low gives a new edge; the STATUS RESET flag is set by
+// during a read gives no falling edge of its own (SBAS890D 8.5.1.5), one that
+// completes while DRDY is already low gives a new edge, a read that leaves data
+// in the FIFO ends with a narrow high pulse (a falling edge at the read end); the STATUS RESET flag is set by
 // a reset and cleared by writing MODE bit 10 = 0; commands are parsed from the
 // first word, the response comes in word 0 of the next frame, RESET needs the
 // full 18-byte frame. A conversion is the box mean of the analog input over
@@ -17,7 +18,8 @@
 // KICK x (old - new) x exp(-dt/TAU) (the measured charge-sharing tail).
 //
 // Usage: sim --end 3 --cmd 1.0:S0123457; --cmd 1.0:M2; --cmd 1.05:B --out out.bin
-//        [--stall T:US] [--adc-reset T] [--seed N] [--cost-scale X]
+//        [--stall T:US] [--adc-reset T] [--seed N] [--cost-scale X] [--no-pulse]
+//        [--trace T0:T1]  (one stderr line per reader step between T0 and T1 s)
 #include "Arduino.h"
 #include "SPI.h"
 #include "soc/gpio_reg.h"
@@ -43,6 +45,11 @@ static void (*sim_isr)(void) = nullptr;
 static bool sim_isrPending = false;
 static double sim_isrDue = 0;
 static std::mt19937 sim_rng(1);
+// --stall T:US: at T the sketch is preempted for US (a higher-priority task or
+// an interrupt hog); the ADC and the DRDY ISR keep running. It can land
+// anywhere, also inside an SPI read (CS low).
+static std::vector<std::pair<double, double>> sim_stalls;
+static bool sim_pulse = true;            // narrow DRDY pulse after a read that leaves data
 
 // ---------------------------------------------------------------- pins
 enum { P_CS = 21, P_DRDY = 4, P_CLKIN = 16, P_A1 = 25, P_B1 = 26, P_C1 = 27, P_A2 = 32, P_B2 = 33,
@@ -105,7 +112,7 @@ struct Adc {
     uint16_t resp = 0;
     bool haveResp = false;
     uint32_t spiHz = 600000;
-    uint64_t nConv = 0, nBlocked = 0, nOverwrite = 0;
+    uint64_t nConv = 0, nBlocked = 0, nOverwrite = 0, nPulse = 0;
 
     int osr() const { int c = (reg[3] >> 2) & 7; return 128 << c; }
     void restartConv(double delay = 0) {
@@ -189,13 +196,24 @@ struct Adc {
             if (a == 3) { fifo.clear(); drdyLow = false; restartConv(); }
             resp = 0x4000 | (a << 7); haveResp = true;
         }
-        drdyLow = !fifo.empty();                 // leftover / blocked data: low, no edge
+        bool left = !fifo.empty();
+        // Data left after a read (a 2-deep FIFO, or a conversion that completed
+        // during the read): DRDY goes high for a few CLKIN cycles at the end of
+        // the read and falls again (SBAS890D Fig 8-21 "narrow DRDY pulse"), a
+        // falling edge the ESP32 catches. --no-pulse: stays low, no edge.
+        if (left && sim_pulse && fresh && pos >= 6) { nPulse++; edge(); }
+        drdyLow = left;
     }
 } adc;
 
 // ---------------------------------------------------------------- time
 static void advance(double dt) {
     double end = sim_t + dt;
+    for (auto &s : sim_stalls)
+        if (s.second > 0 && !sim_inIsr && s.first <= end) {
+            end += s.second;
+            s.second = 0;
+        }
     for (;;) {
         double tc = adc.nextConv;
         double ti = (!sim_inIsr && sim_isrPending) ? sim_isrDue : 1e18;
@@ -352,13 +370,21 @@ size_t HardwareSerial::printf(const char *fmt, ...) {
 void HardwareSerial::flush() { while (sim_txPending > 0) { advance(20); txDrain(); } }
 
 // ---------------------------------------------------------------- the sketch
+static double sim_traceFrom = -1, sim_traceTo = -1;          // --trace T0:T1 (s)
+#define LK_TRACE(t, edge, pend, k, lastK, back, over, wait)                                  \
+    do {                                                                                     \
+        if (sim_t >= sim_traceFrom && sim_t <= sim_traceTo)                                  \
+            fprintf(stderr, "trace %.1f t=%u edge=%d pend=%d k=%d lastK=%d back=%d over=%d"  \
+                    " wait=%d fifo=%zu drdy=%d\n", sim_t, (unsigned)(t), (int)(edge),       \
+                    (int)(pend), (int)(k), (int)(lastK), (int)(back), (int)(over),           \
+                    (int)(wait), adc.fifo.size(), (int)adc.drdyLow);                         \
+    } while (0)
 #include SKETCH
 
 // ---------------------------------------------------------------- main
 int main(int argc, char **argv) {
     double endS = 3;
     std::string outPath = "sim_out.bin";
-    std::vector<std::pair<double, double>> stalls;
     std::vector<double> resets;
     double scale = 1;
     for (int i = 1; i < argc; i++) {
@@ -376,8 +402,15 @@ int main(int argc, char **argv) {
         } else if (a == "--stall") {
             std::string v = next();
             size_t c = v.find(':');
-            stalls.push_back({atof(v.substr(0, c).c_str()) * 1e6, atof(v.substr(c + 1).c_str())});
+            sim_stalls.push_back({atof(v.substr(0, c).c_str()) * 1e6, atof(v.substr(c + 1).c_str())});
         } else if (a == "--adc-reset") resets.push_back(atof(next().c_str()) * 1e6);
+        else if (a == "--no-pulse") sim_pulse = false;
+        else if (a == "--trace") {
+            std::string v = next();
+            size_t c = v.find(':');
+            sim_traceFrom = atof(v.substr(0, c).c_str()) * 1e6;
+            sim_traceTo = atof(v.substr(c + 1).c_str()) * 1e6;
+        }
         else { fprintf(stderr, "unknown arg %s\n", a.c_str()); return 2; }
     }
     if (scale != 1) {
@@ -392,8 +425,6 @@ int main(int argc, char **argv) {
     while (sim_t < endS * 1e6) {
         loop();
         advance(C.loop);
-        for (auto &s : stalls)
-            if (s.second > 0 && sim_t >= s.first) { advance(s.second); s.second = 0; }
         for (auto &r : resets)
             if (r > 0 && sim_t >= r) { adc.reset(); r = 0; }
     }
@@ -402,7 +433,8 @@ int main(int argc, char **argv) {
     fwrite(sim_tx.data(), 1, sim_tx.size(), f);
     fclose(f);
     fprintf(stderr, "sim: %.3f s virtual, %llu conversions, %llu blocked DRDY pulses, %llu FIFO"
-            " overwrites, %zu bytes out\n", sim_t / 1e6, (unsigned long long)adc.nConv,
-            (unsigned long long)adc.nBlocked, (unsigned long long)adc.nOverwrite, sim_tx.size());
+            " overwrites, %llu narrow pulses, %zu bytes out\n", sim_t / 1e6, (unsigned long long)adc.nConv,
+            (unsigned long long)adc.nBlocked, (unsigned long long)adc.nOverwrite,
+            (unsigned long long)adc.nPulse, sim_tx.size());
     return 0;
 }

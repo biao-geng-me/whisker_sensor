@@ -247,8 +247,11 @@ def info_cfg(info: dict) -> dict:
         cfg["selects"] = "".join(str(s) for s in range(8) if cfg["sel_mask"] >> s & 1)
     if "mode" in cfg:
         cfg["mode_name"] = MODE_NAMES.get(cfg["mode"], str(cfg["mode"]))
-        if cfg["n_conv"] and cfg.get("fdata_sps"):
-            cfg["scan_hz"] = round(cfg["fdata_sps"] / cfg["n_conv"], 3)
+        # fdata_sps is a whole number on the wire (7812 at OSR 512): use CLKIN/(2 OSR)
+        fdata = (cfg["clkin_hz"] / 2 / cfg["osr"] if cfg.get("osr") and cfg.get("clkin_hz")
+                 else cfg.get("fdata_sps"))
+        if cfg["n_conv"] and fdata:
+            cfg["scan_hz"] = round(fdata / cfg["n_conv"], 3)
     if info.get("avg_per_sel") is not None:
         cfg["avg_per_sel"] = list(info["avg_per_sel"])
     return cfg

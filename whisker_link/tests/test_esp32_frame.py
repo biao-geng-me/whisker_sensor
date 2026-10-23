@@ -108,6 +108,9 @@ def test_info_v4_and_health_roundtrip():
     assert ev == info
     cfg = ef.info_cfg(dict(ev.__dict__))
     assert cfg["mode_name"] == "wide" and cfg["scan_hz"] == 250.0 and cfg["avg_per_sel"][7] == 8
+    q = ef.Info(ef.PROTO_VERSION, 32, 0x2405, 0x0F0A, 8_000_000, 7812, 921600, 512, 200, 4,
+                0b10111111, 1, 8_000_000, 125, (14, 14, 13, 13, 13, 13, 0, 13))
+    assert ef.info_cfg(dict(q.__dict__))["scan_hz"] == 62.5     # not 7812 / 125
     h = ef.Health(1, 2, 371, 34, 180, 160, 16, 3, 31250, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1000)
     (hv,) = list(ef.Decoder().feed(ef.encode_health(h)))
     assert hv == h and hv.summary()["busy_pct"] == 37.1 and hv.summary()["lat_avg_us"] == 18.0

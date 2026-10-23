@@ -34,21 +34,38 @@ from whisker_link import esp32_frame as ef  # noqa: E402
 from whisker_link.channels import CHANNEL_NAMES, channels_of_selects  # noqa: E402
 
 RAIL = (1 << 23) - 1
-# mode -> (osr, spi_hz, n_conv, scan period us)
-MODES = {1: (256, 8_000_000, 250, 16_000), 2: (128, 11_428_571, 125, 4_000)}
+# mode -> default (osr, spi_hz, scan period us), as in whisker_daq.ino (M)
+MODES = {1: (512, 8_000_000, 16_000), 2: (128, 11_428_571, 4_000)}
+OSR_CODE = {128: 0, 256: 1, 512: 2, 1024: 3, 2048: 4, 4096: 5, 8192: 6, 16384: 7}
 
 
-def info_for(mode: int, sel_mask: int) -> ef.Info:
+def lock_params(mode: int, settle: int = 200, osr: int = 0, period: int = 0,
+                spi: int = 0) -> tuple | str:
+    """(osr, spi, n_conv, scan_us, settle, discard) of a locked mode, or the firmware's error."""
+    d_osr, d_spi, d_period = MODES[mode]
+    osr, period, spi = osr or d_osr, period or d_period, spi or d_spi
+    if osr not in OSR_CODE:
+        return "osr must be a power of 2, 128..16384"
+    if mode == 2 and period != 4000:
+        return "wide mode has a fixed 4000 us period"
+    if mode == 1 and (period <= 0 or period > 64000 or period % 8000):
+        return "period must be a multiple of 8000 us, up to 64000"
+    t = osr // 4                         # conversion period at CLKIN 8 MHz, us
+    if period % t:
+        return "scan period not a whole number of conversions at this OSR"
+    return osr, spi, period // t, period, settle, math.ceil(3 + (settle + 10) / t) - 1
+
+
+def info_for(mode: int, sel_mask: int, lk: tuple | None = None) -> ef.Info:
     if mode in MODES:
-        osr, spi, n, _ = MODES[mode]
+        osr, spi, n, _, settle, discard = lk or lock_params(mode)
         nsel = bin(sel_mask).count("1")
-        discard = 6 if mode == 1 else 9
         sels = [s for s in range(8) if sel_mask >> s & 1]
         avg = [0] * 8
         for i, s in enumerate(sels):
             avg[s] = n // nsel + (1 if i < n % nsel else 0) - discard
-        return ef.Info(ef.PROTO_VERSION, 32, 0x2405, 0x0F02 if mode == 2 else 0x0F06, 8_000_000,
-                       8_000_000 // 2 // osr, 921600, osr, 200, discard, sel_mask,
+        return ef.Info(ef.PROTO_VERSION, 32, 0x2405, 0x0F00 | OSR_CODE[osr] << 2 | 2, 8_000_000,
+                       8_000_000 // 2 // osr, 921600, osr, settle, discard, sel_mask,
                        mode, spi, n, tuple(avg))
     return ef.Info(ef.PROTO_VERSION, 32, 0x2405, 0xFF02, 800_000, 3125, 921600, 128, 250, 3,
                    sel_mask, 0, 600_000, 0, tuple(1 if sel_mask >> s & 1 else 0 for s in range(8)))
@@ -99,6 +116,7 @@ def main() -> None:
     binary = False
     seq = 0
     mode, sel_mask = 0, 0xFF
+    lk = None                            # lock_params() of the current locked mode
     period = 1.0 / args.rate
     next_t = time.monotonic()
     grid_us = None                       # locked modes: t_us on an exact grid
@@ -111,27 +129,36 @@ def main() -> None:
         out(ef.encode_text(msg) if binary else (msg + "\r\n").encode())
 
     def run_arg_cmd(c: str) -> None:
-        nonlocal mode, sel_mask, period, grid_us, n_health
+        nonlocal mode, sel_mask, period, grid_us, n_health, lk
         if c[0] == "S":
             digits = {int(ch) for ch in c[1:] if ch in "01234567"}
             sel_mask = sum(1 << d for d in digits) or 0xFF
             say(f"selects: {''.join(str(d) for d in range(8) if sel_mask >> d & 1)}")
         else:
+            usage = "M: usage M<0|1|2> [settle_us] [osr] [period_us] [spi_hz];"
             try:
-                m = int(c[1:].split()[0])
+                v = [int(x) for x in c[1:].split()[:5]]
+                m = v[0]
             except (ValueError, IndexError):
-                say("M: usage M<0|1|2> [settle_us] [osr] [spi_hz];")
+                say(usage)
                 return
             if m not in (0, 1, 2):
-                say("M: usage M<0|1|2> [settle_us] [osr] [spi_hz];")
+                say(usage)
                 return
+            if m in MODES:
+                v += [0] * (5 - len(v))
+                p = lock_params(m, v[1] if len(v) > 1 and v[1] else 200, v[2], v[3], v[4])
+                if isinstance(p, str):
+                    say(f"M: {p}")
+                    return
+                lk = p
             mode = m
-            period = MODES[m][3] / 1e6 if m in MODES else 1.0 / args.rate
+            period = lk[3] / 1e6 if m in MODES else 1.0 / args.rate
             grid_us = None
             n_health = 0
             say(f"mode {m} (simulated)")
         if binary:
-            out(ef.encode_info(info_for(mode, sel_mask)))
+            out(ef.encode_info(info_for(mode, sel_mask, lk)))
 
     while True:
         try:
@@ -150,7 +177,7 @@ def main() -> None:
                 pending = k
             elif k == "B":
                 binary = True
-                out(ef.encode_info(info_for(mode, sel_mask)))
+                out(ef.encode_info(info_for(mode, sel_mask, lk)))
             elif k == "b":
                 out(ef.encode_text("Re-capturing baseline...") if binary
                     else b"Re-capturing baseline...\r\n")
@@ -167,8 +194,8 @@ def main() -> None:
         if not binary:
             continue
         if mode in MODES:
-            grid_us = micros() if grid_us is None else grid_us + MODES[mode][3]
-            t_us, dur = grid_us & 0xFFFFFFFF, MODES[mode][3]
+            grid_us = micros() if grid_us is None else grid_us + lk[3]
+            t_us, dur = grid_us & 0xFFFFFFFF, lk[3]
         else:
             t_us, dur = micros(), 12_300
         phase = math.sin(2 * math.pi * args.freq * time.time())
@@ -185,7 +212,7 @@ def main() -> None:
         seq += 1
         if mode in MODES and now - last_health >= 1.0:
             last_health = now
-            osr, _, n, scan_us = MODES[mode]
+            osr, _, n, scan_us = lk[:4]
             conv = int(1e6 / scan_us * n)
             out(ef.encode_health(ef.Health(1, mode, 380 if mode == 2 else 250, 30, 180, 160, 17,
                                            4, conv, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1000)))

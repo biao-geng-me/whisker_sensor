@@ -176,7 +176,8 @@ def test_commands_over_pty(tmp_path, capsys):
 def test_mode_command():
     assert ad.mode_command("wide", None, None, None) == "M2 200;"
     assert ad.mode_command("quiet", 250, 512, None) == "M1 250 512;"
-    assert ad.mode_command("1", 200, 0, 9000000) == "M1 200 0 9000000;"
+    assert ad.mode_command("1", 200, 0, 9000000) == "M1 200 0 0 9000000;"
+    assert ad.mode_command("quiet", None, 256, None, 8000) == "M1 200 256 8000;"
     assert ad.mode_command("legacy", 300, 512, None) == "M0;"
 
 

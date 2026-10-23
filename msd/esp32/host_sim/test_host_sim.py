@@ -64,14 +64,17 @@ def expected(o: int) -> int:          # the simulated input of OUT o (sim.cpp ou
 SKIPPED6 = {OUT_OF[a][6] for a in range(4)}
 
 
-@pytest.mark.parametrize("mode,period,tol", [(2, 4000, 300), (1, 16000, 60)])
-def test_locked_modes(sim, tmp_path, mode, period, tol):
+@pytest.mark.parametrize("mcmd,mode,period,osr,tol", [
+    ("M2;", 2, 4000, 128, 300), ("M1;", 1, 16000, 512, 60), ("M1 200 256;", 1, 16000, 256, 60),
+    ("M1 200 256 8000;", 1, 8000, 256, 60)])
+def test_locked_modes(sim, tmp_path, mcmd, mode, period, osr, tol):
     scans, infos, health, _ = run(sim, tmp_path / "o.bin", "--end", "3",
-                                  "--cmd", "1.0:S0123457;", "--cmd", f"1.0:M{mode};",
+                                  "--cmd", "1.0:S0123457;", "--cmd", f"1.0:{mcmd}",
                                   "--cmd", "1.3:B")
     cfg = ef.info_cfg(dict(infos[-1].__dict__))
     assert cfg["mode"] == mode and cfg["selects"] == "0123457" and cfg["clkin_hz"] == 8_000_000
-    assert cfg["n_conv"] * 1e6 / cfg["fdata_sps"] == period
+    assert cfg["osr"] == osr
+    assert cfg["scan_hz"] == 1e6 / period
     assert len(scans) > 1.6e6 / period
     assert {b.t_us - a.t_us for a, b in zip(scans, scans[1:])} == {period}
     assert all(b.seq == a.seq + 1 for a, b in zip(scans, scans[1:]))
@@ -85,6 +88,14 @@ def test_locked_modes(sim, tmp_path, mode, period, tol):
     h = health[-1]
     assert h.mode == mode and h.overrun == 0 and h.missed == 0 and h.tx_drop == 0
     assert h.empty_slots == 0 and h.conversions > 0.95 * cfg["fdata_sps"]
+    assert sum(x.resync for x in health) <= 1          # the one at stream start
+
+
+def test_period_needs_whole_conversions(sim, tmp_path):
+    _, infos, _, text = run(sim, tmp_path / "o.bin", "--end", "1.5",
+                            "--cmd", "1.0:M1 200 512 8000;", "--cmd", "1.2:B")
+    assert any("whole number of conversions" in t for t in text)
+    assert infos[-1].mode == 0
 
 
 def test_stall_flags_one_scan_and_keeps_grid(sim, tmp_path):
@@ -113,3 +124,32 @@ def test_legacy_default_and_back(sim, tmp_path):
     assert [i.mode for i in infos] == [0, 2, 0]
     legacy = [s for s in scans if s.dur_us != 4000]
     assert len(legacy) > 50 and len([s for s in scans if s.dur_us == 4000]) > 100
+
+
+# An overrun (a stall of 1.1-4 conversions, at phases spread over a scan): the
+# reader reads the older FIFO entry, and the narrow DRDY pulse after it is an
+# extra edge for an index already read. Bench 2026-10-23 (quiet OSR 256): one
+# startup overrun left every later index one ahead, and resync counted every
+# conversion (the old firmware does the same in this sim: ~13500 resyncs/s).
+@pytest.mark.parametrize("mcmd,T,period", [("M1 200 256;", 64, 16000), ("M1;", 128, 16000),
+                                           ("M2;", 32, 4000), ("M1 200 256 8000;", 64, 8000)])
+def test_overrun_realigns(sim, tmp_path, mcmd, T, period):
+    for i, mult in enumerate((1.1, 1.5, 2.0, 2.6, 4.0, 1.5, 2.6)):
+        at = 1.5 + (i * period / 7 + i * T * 0.37) * 1e-6
+        scans, _, health, _ = run(sim, tmp_path / "o.bin", "--end", "2.7",
+                                  "--cmd", "1.0:S0123457;", "--cmd", f"1.0:{mcmd}",
+                                  "--cmd", "1.3:B", "--stall", f"{at}:{mult * T}")
+        what = (mult, at)
+        assert {b.t_us - a.t_us for a, b in zip(scans, scans[1:])} == {period}, what
+        assert all(b.seq == a.seq + 1 for a, b in zip(scans, scans[1:])), what
+        flagged = [s.seq for s in scans if s.flags]
+        # one scan, or two when the stall straddles a scan end
+        assert len(flagged) <= 2 and all(b == a + 1 for a, b in zip(flagged, flagged[1:])), what
+        assert sum(h.overrun for h in health) <= 1, what
+        assert sum(h.resync for h in health) <= 3, (what, [h.resync for h in health])
+        tail = [s for s in scans if s.t_us > scans[-1].t_us - 300_000]
+        assert all(s.flags == 0 for s in tail), what
+        for s in tail:
+            for o in range(1, 33):
+                if o not in SKIPPED6:
+                    assert abs(s.raw[o - 1] - expected(o)) < (300 if period == 4000 else 60)

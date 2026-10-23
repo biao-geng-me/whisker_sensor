@@ -92,9 +92,12 @@ Most of the remaining noise is a comb at exact multiples of 62.5 Hz (16 ms, ESP3
 | mode | command | CLKIN | OSR (T) | SPI | N per scan | scan | conversions averaged per select (7 selects) |
 |---|---|---|---|---|---|---|---|
 | legacy | `M0;` | 0.8 MHz | 128 (320 µs) | 600 kHz | – | ~13 ms, ~76 Hz | 1 |
-| quiet | `M1;` | 8 MHz | 256 (64 µs) | 8 MHz | 250 | 16 ms, 62.5 Hz | 29–30 (drop 6) |
-| quiet, OSR 512 | `M1 200 512;` | 8 MHz | 512 (128 µs) | 8 MHz | 125 | 16 ms, 62.5 Hz | 13–14 (drop 4) |
+| quiet (default OSR 512 since 2026-10-23) | `M1;` | 8 MHz | 512 (128 µs) | 8 MHz | 125 | 16 ms, 62.5 Hz | 13–14 (drop 4) |
+| quiet, OSR 256 | `M1 200 256;` | 8 MHz | 256 (64 µs) | 8 MHz | 250 | 16 ms, 62.5 Hz | 29–30 (drop 6) |
+| quiet, OSR 256, 125 Hz (bench comparison) | `M1 200 256 8000;` | 8 MHz | 256 (64 µs) | 8 MHz | 125 | 8 ms, 125 Hz | 11–12 (drop 6) |
 | wide | `M2;` | 8 MHz | 128 (32 µs) | 12 MHz (11.43 actual) | 125 | 4 ms, 250 Hz | 8–9 (drop 9) |
+
+The command is `M<mode> [settle_us] [osr] [period_us] [spi_hz];`, where 0 or a missing field means the mode's default. Before 2026-10-23 the fourth field was `spi_hz`. A quiet period must be a multiple of 8000 µs (the comb sits at multiples of 125 Hz, so 8 ms folds it too) and a whole number of conversions, so 8000 µs needs OSR ≤ 256 and `M1 200 512 8000;` is refused. Wide mode is fixed at 4000 µs.
 
 How it works:
 - **Slots.** Each scan is N conversions split over the active selects: slots get floor or ceil of N/nsel, and the total is exactly N. Scan k starts on conversion k·N.
@@ -134,9 +137,10 @@ What to watch on the bench:
 cd C:\Users\Biao\Projects\whisker_sensor\msd\esp32
 # wide: set selects + mode, stream 20 s, print HEALTH each second and a summary
 python adc_diag.py stream --port COM4 --selects 0123457 --mode wide --secs 20 --out wide.bin
-# quiet, and the OSR 512 variant
-python adc_diag.py stream --port COM4 --mode quiet --secs 20 --out quiet.bin
-python adc_diag.py stream --port COM4 --mode quiet --osr 512 --secs 20
+# quiet (OSR 512), the OSR 256 variant, and OSR 256 at 125 Hz
+python adc_diag.py stream --port COM4 --selects 0123457 --mode quiet --secs 20 --out quiet512.bin
+python adc_diag.py stream --port COM4 --mode quiet --osr 256 --secs 20 --out quiet256.bin
+python adc_diag.py stream --port COM4 --mode quiet --osr 256 --period-us 8000 --secs 20 --out quiet125.bin
 # leave a mode set, then look at it in wavi_py (the ESP32 keeps it until a reboot)
 python adc_diag.py mode --port COM4 wide
 cd ..\..
@@ -145,15 +149,28 @@ python -m wavi_py --transport esp32 --serial-port COM4
 python msd\esp32\adc_diag.py mode --port COM4 legacy
 ```
 
-On the ROV, `rpi/daq_server.py --selects 0123457 --mode wide` (or `--mode quiet`, `--mode quiet,200,512`) sends `S…;M…;B` on every stream start. In a serial monitor, type `M2;` etc. directly.
+On the ROV, `rpi/daq_server.py --selects 0123457 --mode wide` (or `--mode quiet`, `--mode quiet,200,256`, `--mode quiet,200,256,8000`) sends `S…;M…;B` on every stream start. In a serial monitor, type `M2;` etc. directly.
 
-Host simulation: [`host_sim/`](host_sim/) compiles the real sketch (arduino-cli `--preprocess` output) against a mock Arduino layer and a model of the ADS131M04. The model covers the conversion grid, the 2-deep FIFO, DRDY edges and blocked pulses, the mux tail, and SPI frames with CRC. `python -m pytest msd/esp32/host_sim` (needs arduino-cli and a g++, e.g. `CXX=~/app/miniconda/envs/mpi/bin/g++` on the cluster) checks:
+Host simulation: [`host_sim/`](host_sim/) compiles the real sketch (arduino-cli `--preprocess` output) against a mock Arduino layer and a model of the ADS131M04. The model covers the conversion grid, the 2-deep FIFO, DRDY edges and blocked pulses, the narrow DRDY pulse at the end of a read that leaves data in the FIFO (`--no-pulse` turns it off), the mux tail, and SPI frames with CRC. `python -m pytest msd/esp32/host_sim` (needs arduino-cli and a g++, e.g. `CXX=~/app/miniconda/envs/mpi/bin/g++` on the cluster) checks:
 - both modes: exact scan spacing, averages and no flags
 - a 300 µs stall: one SYNC-flagged scan, grid kept
+- an overrun in quiet OSR 256, OSR 512 and wide at several phases: at most one flagged scan, and `resync` doesn't keep counting afterwards (the 2026-10-23 bug)
 - an ADC reset
 - switching back to legacy
 
 The CPU costs in the model are guesses, so the busy % and latency it reports are only indicative. The bench HEALTH numbers are the real ones.
+
+## First board run of the locked modes (bench, 2026-10-23)
+
+Captures and analysis are in `/scratch/bigeme/whisker_dev/bench_1023/`. Quiet timing was clean: 62.500 Hz, every step exactly 16000 µs, no seq gaps. Noise on W2_A/W2_B was 0.025/0.027 mV at OSR 256 and 0.019/0.016 mV at OSR 512, against 0.065 mV in the legacy scan. OSR 512 matches the floor emulated from a raw burst (~1 µV/√Hz input noise seen for ~1.9 ms of every 16 ms), so it is now the quiet default. A comb burst put the interference at multiples of 125 Hz, locked to the ESP32 clock, so 8 ms periods fold it too. Wide failed on one core (overrun ~15 %, latency max 113 µs against T = 32 µs). A dual-core reader is in design.
+
+**Resync bug, fixed.** In quiet OSR 256, one startup overrun made `resync` count every conversion for the rest of the run. Mechanism, reproduced in `host_sim`:
+- A stall longer than one T leaves two conversions in the ADC FIFO. The reader labels its read with the newer edge's index but gets the older entry.
+- That read ends with the datasheet's narrow DRDY pulse (data still in the FIFO), and the ISR counts it as a new edge. Its time maps to the index just read.
+- The old code forced such an edge to `lastK + 1`. From then on every index was one ahead of the edge grid, every edge took the glitch path, and the offset never cleared.
+- The reader now trusts the edge time (`k` stays as the grid says). The slot is tainted and the scan flagged SYNC, and `resync` stops at the glitch. An edge that lands in the scan already closed is read and dropped.
+
+Noise check: with the offset, every mux switch and every averaged conversion moved one T earlier together. The conversions used relative to each switch were the same, so the offset can't change the noise. The "12.5 Hz" lines are at 12.57 Hz (quiet OSR 256) and 12.72 Hz (OSR 512) in the 20 s captures. They are not locked to the scan, so the deterministic offset didn't make them either. Removing them lowers the OSR 256 std by only ~7 %. The remaining OSR 256 excess is broadband, with an ASD floor 2.1–2.45 µV/√Hz against 1.9–1.95 at OSR 512, and is still unexplained. The next OSR 256 run, without the offset, will tell.
 
 ## Mux settling and fresh conversions (bench, 2026-10-20)
 

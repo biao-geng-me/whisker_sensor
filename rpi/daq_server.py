@@ -651,14 +651,15 @@ _MODES = {"legacy": 0, "quiet": 1, "wide": 2}
 def _parse_mode(s: str) -> str:
     """``wide`` / ``2`` / ``quiet,250,512`` -> the M command's arguments, e.g. ``1 250 512``.
 
-    Fields after the mode: settle_us, osr, spi_hz (see whisker_daq.ino, 'M').
+    Fields after the mode: settle_us, osr, period_us, spi_hz (see whisker_daq.ino, 'M');
+    0 = the mode's default. ``quiet,200,256,8000`` = quiet at OSR 256 and 125 Hz.
     """
     parts = [p.strip() for p in s.replace(":", ",").split(",") if p.strip()]
     if not parts:
         raise argparse.ArgumentTypeError("mode: legacy|quiet|wide or 0|1|2")
     m = _MODES.get(parts[0].lower(), parts[0])
     try:
-        nums = [int(m)] + [int(p) for p in parts[1:4]]
+        nums = [int(m)] + [int(p) for p in parts[1:5]]
     except ValueError:
         raise argparse.ArgumentTypeError(f"mode: bad value {s!r}") from None
     if nums[0] not in (0, 1, 2):
@@ -689,8 +690,9 @@ def main(argv: Optional[list[str]] = None) -> None:
     ap.add_argument("--baud", type=int, default=DEFAULT_SERIAL_BAUD)
     ap.add_argument("--mode", type=_parse_mode, default=None,
                     help="ESP32 scan mode, sent as M...; before every B: legacy (~76 Hz), quiet"
-                         " (62.5 Hz) or wide (250 Hz), optionally ,settle_us,osr,spi_hz"
-                         " (e.g. quiet,200,512); default: leave as is")
+                         " (62.5 Hz, OSR 512) or wide (250 Hz), optionally"
+                         " ,settle_us,osr,period_us,spi_hz (e.g. quiet,200,256 or"
+                         " quiet,200,256,8000); default: leave as is")
     ap.add_argument("--selects", type=_parse_selects, default=None,
                     help="mux selects the ESP32 scans, e.g. 0123457 (sent as S<digits>; before"
                          " every B, since the ESP32 forgets it on reboot); default: leave as is")

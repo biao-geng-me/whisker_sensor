@@ -671,11 +671,14 @@ def cmd_selects(a) -> int:
 MODES = {"legacy": 0, "quiet": 1, "wide": 2, "0": 0, "1": 1, "2": 2}
 
 
-def mode_command(mode: str, settle: int | None, osr: int | None, spi: int | None) -> str:
+def mode_command(mode: str, settle: int | None, osr: int | None, spi: int | None,
+                 period: int | None = None) -> str:
+    """The M command: M<mode> [settle_us] [osr] [period_us] [spi_hz]; (0 = default)."""
     m = MODES[mode.lower()]
     if m == 0:
         return "M0;"
-    args = [str(m), str(settle if settle is not None else 200), str(osr or 0), str(spi or 0)]
+    args = [str(m), str(settle if settle is not None else 200), str(osr or 0), str(period or 0),
+            str(spi or 0)]
     while args[-1] == "0":               # 0 = the mode's default
         args.pop()
     return "M" + " ".join(args) + ";"
@@ -701,7 +704,7 @@ def cmd_mode(a) -> int:
     if a.mode.lower() not in MODES:
         print("mode: legacy|quiet|wide (or 0|1|2)", file=sys.stderr)
         return 2
-    cmd = mode_command(a.mode, a.settle_us, a.osr, a.spi)
+    cmd = mode_command(a.mode, a.settle_us, a.osr, a.spi, a.period_us)
     raw = _send_and_echo(a.port, cmd, (b"mode ", b"M: "))
     if b"mode " not in raw and b"M: " not in raw:
         print(f"no confirmation from the ESP32 (sent {cmd}); in binary mode the reply is a framed"
@@ -722,7 +725,7 @@ def cmd_stream(a) -> int:
         if a.mode.lower() not in MODES:
             print("mode: legacy|quiet|wide (or 0|1|2)", file=sys.stderr)
             return 2
-        cmd += mode_command(a.mode, a.settle_us, a.osr, a.spi)
+        cmd += mode_command(a.mode, a.settle_us, a.osr, a.spi, a.period_us)
     cmd += "B"
     ser = open_port(a.port)
     dec, raw = ef.Decoder(), bytearray()
@@ -829,7 +832,10 @@ def main(argv=None) -> int:
 
     mo = argparse.ArgumentParser(add_help=False)
     mo.add_argument("--settle-us", type=int, help="locked modes: settle after a switch (default 200)")
-    mo.add_argument("--osr", type=int, help="locked modes: OSR (quiet 256 or 512, wide 128)")
+    mo.add_argument("--osr", type=int, help="locked modes: OSR (quiet 512 default or 256, wide 128)")
+    mo.add_argument("--period-us", type=int,
+                    help="quiet mode: scan period, a multiple of 8000 us (default 16000; 8000 ="
+                         " 125 Hz, needs --osr 256 or lower)")
     mo.add_argument("--spi", type=int, help="locked modes: SPI clock, Hz (quiet 8 MHz, wide 12 MHz)")
 
     p = sub.add_parser("mode", parents=[mo], help="set the scan mode")

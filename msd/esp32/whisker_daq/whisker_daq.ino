@@ -66,13 +66,15 @@
  *            Host: msd/esp32/adc_diag.py spi. See spi_sweep.
  *    S<digits>;  scan only these mux selects, e.g. S0123457; ("S;" = all 8,
  *            also the boot default). Skipped outputs read as railed/open.
- *    M<0|1|2> [settle_us] [osr] [spi_hz];   SCAN MODE (boot default M0)
+ *    M<0|1|2> [settle_us] [osr] [period_us] [spi_hz];   SCAN MODE (boot default M0)
  *            M0 legacy ~76 Hz scan (below). M1 quiet: locked scan, CLKIN
- *            8 MHz, OSR 256, SPI 8 MHz, 250 conversions = 16 ms, 62.5 Hz.
+ *            8 MHz, OSR 512, SPI 8 MHz, 125 conversions = 16 ms, 62.5 Hz.
  *            M2 wide: OSR 128, SPI 12 MHz, 125 conversions = 4 ms, 250 Hz.
- *            settle default 200 us; "M1 200 512;" = quiet at OSR 512
- *            (125 conversions, fewer reads). Locked modes send a HEALTH frame
- *            each ~1 s. See the "Locked scan" section. Forgotten on reboot.
+ *            0 or left out = default (settle 200 us). "M1 200 256;" = quiet
+ *            at OSR 256 (250 conversions); "M1 200 256 8000;" = quiet at
+ *            125 Hz (quiet periods: multiples of 8000 us, N = period / T must
+ *            be whole, so 8000 needs OSR <= 256). Locked modes send a HEALTH
+ *            frame each ~1 s. See the "Locked scan" section. Forgotten on reboot.
  *  r, D and p restore the normal config (0.8 MHz, OSR 128, SPI_HZ) after,
  *  and put a locked mode back if one was on.
  *  Any text-mode command leaves binary mode. Serial Monitor: set the line
@@ -1654,7 +1656,7 @@ static void setSelMask(uint8_t m) {
     logf("selects: %s (%d of %d; skipped outputs read as railed/open)\n", list, n, NUM_SEL);
     if (g_lk.mode) {                          // new slot table, same grid
         LockState saved = g_lk;
-        const char *err = lkConfigure(g_lk.mode, g_lk.settleUs, g_lk.osr, g_lk.spi);
+        const char *err = lkConfigure(g_lk.mode, g_lk.settleUs, g_lk.osr, g_lk.scanUs, g_lk.spi);
         if (err) { g_lk = saved; logf("selects: %s; locked mode unchanged\n", err); }
         lkRearm(false);
     }
@@ -1678,14 +1680,15 @@ static void selects_cmd() {
 // ─────────────────────────────────────────────────────────────────────────────
 //  Locked scan ('M1' quiet 62.5 Hz, 'M2' wide 250 Hz; 'M0' = legacy scan)
 // ─────────────────────────────────────────────────────────────────────────────
-// Most of the remaining noise is a comb at exact multiples of 62.5 Hz (16 ms,
-// ESP32/USB activity). CLKIN (8 MHz from LEDC) and micros() come from the same
-// crystal, so a scan that is exactly N conversions of the free-running ADC,
-// with N x T a multiple of 16 ms, folds the whole comb onto 0 Hz (a constant
-// offset per channel).
-//   quiet  OSR 256 (T 64 us), SPI 8 MHz,  N 250 -> 16 ms, 62.5 Hz
-//   wide   OSR 128 (T 32 us), SPI 12 MHz, N 125 ->  4 ms, 250 Hz
-//   (quiet with OSR 512: T 128 us, N 125, fewer frames to read)
+// Most of the remaining noise is a comb at exact multiples of 125 Hz (bench
+// 2026-10-23; ESP32/USB activity), locked to the ESP32 crystal. CLKIN (8 MHz
+// from LEDC) and micros() come from the same crystal, so a scan that is
+// exactly N conversions of the free-running ADC, with N x T a multiple of
+// 8 ms, folds the whole comb onto 0 Hz (a constant offset per channel).
+//   quiet  OSR 512 (T 128 us), SPI 8 MHz,  N 125 -> 16 ms, 62.5 Hz (default;
+//          at the input-noise floor on the bench)
+//          OSR 256 (T 64 us): N 250; period 8000 us (125 Hz): N 125
+//   wide   OSR 128 (T 32 us),  SPI 12 MHz, N 125 ->  4 ms, 250 Hz
 // The N conversions are split over the active selects (slots get floor/ceil of
 // N / nsel). The mux switches right after the DRDY that ends the previous slot;
 // scan k starts on conversion k x N. Per slot, the reading is the plain mean
@@ -1715,9 +1718,14 @@ static void selects_cmd() {
                                    // slightly late read is harmless except at a slot end,
                                    // which idle work never precedes)
 #define LK_TIMEOUT_MS      50      // no conversion for this long: re-init the ADC
-static const uint16_t LK_OSR [3] = {0, 256, 128};
+#ifndef LK_TRACE                   // host_sim hook: one line per reader step
+#define LK_TRACE(...)
+#endif
+static const uint16_t LK_OSR [3] = {0, 512, 128};   // quiet: OSR 512 is at the input-noise floor
 static const uint32_t LK_SPI [3] = {0, 8000000, 12000000};
-static const uint32_t LK_SCAN[3] = {0, 16000, 4000};
+static const uint32_t LK_SCAN[3] = {0, 16000, 4000};  // default scan period, us
+static const uint32_t LK_SCAN_STEP[3] = {0, 8000, 4000}; // a period override must be a multiple
+                                                          // (the comb is at multiples of 125 Hz)
 static const char    *LK_NAME[3] = {"legacy", "quiet", "wide"};
 
 static_assert(PIN_SELA_2 >= 32 && PIN_SELB_2 >= 32 && PIN_SELA_1 < 32 && PIN_SELB_1 < 32 &&
@@ -1767,15 +1775,18 @@ static uint32_t adsReadFast(long ch[4], bool *crcOk) {
 }
 
 // Slot table for mode/settle/OSR/SPI and the current selects. nullptr = OK.
-static const char *lkConfigure(uint8_t mode, long settle, long osr, long spi) {
+static const char *lkConfigure(uint8_t mode, long settle, long osr, long scanUs, long spi) {
     if (mode < 1 || mode > 2) return "mode must be 1 (quiet) or 2 (wide)";
+    if (mode == 2 && scanUs != (long)LK_SCAN[2]) return "wide mode has a fixed 4000 us period";
+    if (scanUs <= 0 || scanUs > 64000 || scanUs % LK_SCAN_STEP[mode])
+        return "period must be a multiple of 8000 us, up to 64000";
     if (osrCode(osr) < 0) return "osr must be a power of 2, 128..16384";
     if (spi < 100000 || spi > SPI_MAX_HZ) return "spi out of 0.1-20 MHz";
     if (settle < 0 || settle > 5000) return "settle out of 0-5000 us";
     if ((2ULL * osr * 1000000ULL) % LK_CLKIN) return "conversion period not a whole us";
     uint32_t T = (uint32_t)(2ULL * osr * 1000000ULL / LK_CLKIN);
-    if (LK_SCAN[mode] % T) return "scan period not a whole number of conversions at this OSR";
-    uint32_t N = LK_SCAN[mode] / T;
+    if (scanUs % T) return "scan period not a whole number of conversions at this OSR";
+    uint32_t N = scanUs / T;
     if (N > LK_MAX_N) return "too many conversions per scan";
     uint8_t sels[NUM_SEL], nsel = 0;
     for (uint8_t s = 0; s < NUM_SEL; s++) if ((g_selMask >> s) & 1) sels[nsel++] = s;
@@ -1785,7 +1796,7 @@ static const char *lkConfigure(uint8_t mode, long settle, long osr, long spi) {
     uint32_t minLen = N / nsel;
     if (minLen <= discard) return "settle too long: a slot would have no usable conversion";
     g_lk.mode = mode; g_lk.osr = osr; g_lk.spi = spi; g_lk.settleUs = settle;
-    g_lk.T = T; g_lk.N = N; g_lk.scanUs = LK_SCAN[mode];
+    g_lk.T = T; g_lk.N = N; g_lk.scanUs = (uint32_t)scanUs;
     g_lk.nslot = nsel; g_lk.discard = discard;
     memset(g_lk.avgPerSel, 0, sizeof(g_lk.avgPerSel));
     uint16_t start = 0;
@@ -1947,22 +1958,46 @@ static int lkStep() {
         g_scans += q;                        // seq counts grid scans: the host sees the gap
         if (!g_lk.waitBoundary) { g_lk.scanFlags |= FLAG_SYNC; h.missed += q * g_lk.N; }
     }
-    if (edge && k <= g_lk.lastK) { k = g_lk.lastK + 1; h.resync++; }   // timestamp glitch
+    // An edge whose grid index was already read: an earlier read got a label
+    // one ahead (after an overrun it read the older of two FIFO entries, and the
+    // narrow DRDY pulse at the end of that read is an extra edge, late enough to
+    // round to the next index; or a late ISR time). Trust the edge-time grid:
+    // take k as it is and don't use this read (index k was counted already).
+    // Forcing k = lastK + 1 instead left every later index one ahead, with a
+    // resync on every conversion (bench 2026-10-23, quiet OSR 256).
+    bool back = edge && k <= g_lk.lastK;
+    if (back) h.resync++;
     // (while waiting for a boundary nothing is collected, so gaps don't count)
-    bool sync = !g_lk.waitBoundary && (pend > 1 || k > g_lk.lastK + 1);
-    if (sync) {
+    bool over = !g_lk.waitBoundary && (pend > 1 || k > g_lk.lastK + 1);
+    bool sync = over;
+    if (over) {
         h.overrun++;
         if (k > g_lk.lastK + 1) h.missed += k - g_lk.lastK - 1;
     }
     if (!edge) h.edgeless++;
+    LK_TRACE(t, edge, pend, k, g_lk.lastK, back, over, g_lk.waitBoundary);
 
     // Mux: switch right after the DRDY that ends a slot (before the read).
     uint8_t s = 0;
     bool boundary;
     if (g_lk.waitBoundary) {
         boundary = (k == (int32_t)g_lk.N - 1) || k == -1;
+    } else if (k < 0) {
+        // realigned back into the scan that was already closed (one conversion
+        // early, so slot 0 just got one more conversion of settling): nothing
+        // to collect
+        if (g_lk.curSel != g_lk.slotSel[0]) {
+            muxFast(g_lk.slotSel[0]);
+            g_lk.curSel = g_lk.slotSel[0];
+            g_lk.taint[0] = true;
+            g_lk.scanFlags |= FLAG_SYNC;
+        }
+        boundary = false;
     } else {
         s = g_lk.posSlot[k];
+        // the read labelled k earlier was conversion k - 1: harmless inside the
+        // settled part of the slot, unsettled if k is the first one averaged
+        if (back && k - g_lk.slotStart[s] == g_lk.discard) sync = true;
         if (sync) g_lk.taint[s] = true;
         if (g_lk.curSel != g_lk.slotSel[s]) {          // missed a switch
             muxFast(g_lk.slotSel[s]);
@@ -1996,7 +2031,7 @@ static int lkStep() {
         h.latSum += lat; h.latN++;
         if (lat > h.latMax) h.latMax = lat;
     }
-    if (sync) {                              // drain the FIFO's older entry
+    if (over) {                              // drain the FIFO's older entry
         long junk[4]; bool jok;
         for (int i = 0; i < 2 && drdyLowFast() && (int32_t)(g_drdyEdges - g_drdyTaken) <= 0; i++)
             adsReadFast(junk, &jok);
@@ -2033,7 +2068,7 @@ static int lkStep() {
             g_lk.lastK = k;
         }
     } else {
-        if (use && !g_lk.taint[s] && k - g_lk.slotStart[s] >= g_lk.discard) {
+        if (use && !back && k >= 0 && !g_lk.taint[s] && k - g_lk.slotStart[s] >= g_lk.discard) {
             for (uint8_t a = 0; a < NUM_ADC_CH; a++) g_lk.acc[s][a] += ch[a];
             g_lk.cnt[s]++;
         }
@@ -2088,7 +2123,7 @@ static void lkService(uint32_t budgetUs) {
         // idle: only if the next DRDY is far enough off and doesn't end a slot
         if (!g_lk.streaming || g_lk.waitBoundary) continue;
         int32_t next = g_lk.lastK + 1;
-        if (next < (int32_t)g_lk.N) {
+        if (next >= 0 && next < (int32_t)g_lk.N) {
             uint8_t s = g_lk.posSlot[next];
             if (next == g_lk.slotStart[s] + g_lk.slotLen[s] - 1) continue;
         }
@@ -2137,14 +2172,17 @@ static void lkPrintMode() {
          1e6 / g_lk.scanUs, g_lk.nslot, g_lk.settleUs, g_lk.discard, avg);
 }
 
-// M<mode> [settle_us] [osr] [spi_hz];   M0 legacy, M1 quiet, M2 wide.
+// M<mode> [settle_us] [osr] [period_us] [spi_hz];   M0 legacy, M1 quiet, M2 wide.
+// 0 (or left out) = the mode's default: settle 200, quiet OSR 512 / 16000 us /
+// SPI 8 MHz, wide OSR 128 / 4000 us / 12 MHz. Quiet periods: multiples of 8000.
 static void mode_cmd() {
     char buf[64];
     readCmdLine(buf, sizeof(buf));
-    long v[4] = {-1, LK_SETTLE_DEFAULT, 0, 0};
-    int n = parseLongs(buf, v, 4);
+    long v[5] = {-1, LK_SETTLE_DEFAULT, 0, 0, 0};
+    int n = parseLongs(buf, v, 5);
     if (n < 1 || v[0] < 0 || v[0] > 2) {
-        logf("M: usage M<0|1|2> [settle_us] [osr] [spi_hz];  0 legacy, 1 quiet, 2 wide\n");
+        logf("M: usage M<0|1|2> [settle_us] [osr] [period_us] [spi_hz];  0 legacy, 1 quiet,"
+             " 2 wide\n");
         return;
     }
     if (v[0] == 0) {
@@ -2156,7 +2194,7 @@ static void mode_cmd() {
     uint8_t keep = g_lk.mode;
     LockState saved = g_lk;
     const char *err = lkConfigure((uint8_t)v[0], v[1], v[2] ? v[2] : LK_OSR[v[0]],
-                                  v[3] ? v[3] : LK_SPI[v[0]]);
+                                  v[3] ? v[3] : LK_SCAN[v[0]], v[4] ? v[4] : LK_SPI[v[0]]);
     if (err) {
         g_lk = saved;
         logf("M: %s\n", err);
@@ -2255,8 +2293,8 @@ void setup() {
     Serial.println("          D<from> <to> [clkin] [osr] [spi] [reps] [win] [dither] [dwell] [jitter];=fine settle");
     Serial.println("          p[clkin] [osr] [secs] [spi ...];=SPI speed sweep");
     Serial.println("          S<digits>;=scan only these selects (S; = all 8)");
-    Serial.println("          M<0|1|2> [settle_us] [osr] [spi];=scan mode: 0 legacy 76 Hz,"
-                   " 1 quiet 62.5 Hz, 2 wide 250 Hz");
+    Serial.println("          M<0|1|2> [settle_us] [osr] [period_us] [spi];=scan mode: 0 legacy"
+                   " 76 Hz, 1 quiet 62.5 Hz (OSR 512), 2 wide 250 Hz");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
