@@ -156,7 +156,7 @@ void lkRearm(bool newGrid) {
     lkClearScan();
     g_lk.scanFlags = 0;                      // nothing of an interrupted scan carries over
     drdyResync();
-    g_lk.lastActT = g_lk.lastEdgeT = micros();
+    g_lk.lastActT = g_lk.lastEdgeT = g_lk.lastGoodT = micros();
 }
 
 // CLKIN 8 MHz, OSR and SPI of the configured mode, full ADC init, rearm.
@@ -199,29 +199,44 @@ void lkHealthPayload(uint8_t *p, const LockHealth &h, uint32_t win, uint8_t mode
     put_u16(p + 54, hh.txLate);
 }
 
-void lkMsgText(char *buf, int size, uint32_t code, uint32_t arg, uint8_t mode) {
-    if (code == LKM_ADC_RESET)
-        snprintf(buf, size, "[adc reset #%lu] in %s mode: re-initialising", (unsigned long)arg,
+// The host's fault model (whisker_link/esp32_fault.py) parses these lines.
+void lkMsgText(char *buf, int size, const uint32_t m[4], uint8_t mode) {
+    if (m[0] == LKM_ADC_RESET)
+        snprintf(buf, size, "[adc reset #%lu] in %s mode: re-initialising", (unsigned long)m[1],
                  LK_NAME[mode]);
-    else if (code == LKM_HALT)
+    else if (m[0] == LKM_HALT)
         snprintf(buf, size, "[halt] no conversion for %d ms in %s mode: CLKIN restart + re-init",
                  LK_TIMEOUT_MS, LK_NAME[mode]);
+    else if (m[0] == LKM_UNREC)              // the legacy scan's line, same text
+        unrecText(buf, size, m[1], (uint16_t)m[2], (uint16_t)(m[2] >> 16), m[3]);
+    else if (m[0] == LKM_ADC_OK)
+        snprintf(buf, size, "[adc ok] %s mode: converting again after %lu halt recoveries",
+                 LK_NAME[mode], (unsigned long)m[1]);
     else
-        snprintf(buf, size, "[reader message %lu %lu]", (unsigned long)code, (unsigned long)arg);
+        snprintf(buf, size, "[reader message %lu %lu]", (unsigned long)m[0], (unsigned long)m[1]);
 }
 
 // A message from the reader: logged by whoever sends (the reader itself in C0,
 // into its TX queue), queued for the host core in C1.
-static void lkMsg(uint32_t code, uint32_t arg) {
+static void lkMsg(uint32_t code, uint32_t arg, uint32_t a2 = 0, uint32_t a3 = 0) {
+    const uint32_t m[4] = {code, arg, a2, a3};
     if (lkToHost()) {
         XRec r;
-        r.kind = XR_MSG; r.mode = g_lk.mode; r.msg[0] = code; r.msg[1] = arg;
+        r.kind = XR_MSG; r.mode = g_lk.mode;
+        memcpy(r.msg, m, sizeof(m));
         g_xq.push(r);                        // (no notify: the host polls each tick)
         return;
     }
-    char buf[120];
-    lkMsgText(buf, sizeof(buf), code, arg, g_lk.mode);
+    char buf[160];
+    lkMsgText(buf, sizeof(buf), m, g_lk.mode);
     logf("%s\n", buf);
+}
+
+// A usable conversion after halt recoveries: the ADC is back.
+static void lkHaltOver() {
+    if (g_lk.haltRun > LK_UNREC_N) lkMsg(LKM_ADC_OK, g_lk.haltRun);
+    g_lk.haltRun = 0;
+    g_adcDown = false;
 }
 
 static void lkSendHealth() {               // C0: straight into the TX queue
@@ -295,7 +310,10 @@ static inline int32_t lkIndex(uint32_t t) {
     return d >= 0 ? (d + T / 2) / T : -((-d + T / 2) / T);
 }
 
-// Reads one conversion if one is waiting. 0 = none waiting, 1 = handled.
+// Reads one conversion if one is waiting. 0 = none waiting, 1 = a usable
+// conversion (CRC ok, fresh; also an ADC reset, re-initialised), 2 = a read with
+// none (CRC error, stale, the LOCK reply, an unchecked read): the caller then
+// checks for a halt (lkWatchHalt), since DRDY stuck low gives reads but no data.
 static int IRAM_ATTR lkStep() {
     uint32_t e, t;
     bool edge;
@@ -326,7 +344,7 @@ static int IRAM_ATTR lkStep() {
     bool ok;
 
     if (!g_lk.haveRef) {                     // new grid: this conversion = pos N-1
-        if (!edge) { adsReadFast(ch, &ok); g_respPending = false; return 1; }
+        if (!edge) { adsReadFast(ch, &ok); g_respPending = false; return 2; }
         g_lk.tRef = t + g_lk.T;
         g_lk.haveRef = true;
         g_lk.lastK = -2;                     // this one is k = -1
@@ -429,7 +447,7 @@ static int IRAM_ATTR lkStep() {
     g_lk.lastActT = r1;
     g_lk.lastEdgeT = t;
 
-    bool use = true;
+    bool use = true, good = false;
     if (g_respPending) { g_respPending = false; use = false; }      // LOCK reply frame
     else if (!ok) { h.crc++; g_crcFails++; g_lk.scanFlags |= FLAG_CRC_RETRY; use = false; }
     else if ((st >> 8) & STATUS_RESET) {
@@ -442,6 +460,10 @@ static int IRAM_ATTR lkStep() {
         return 1;
     } else if (((st >> 8) & STATUS_DRDY_ALL) != STATUS_DRDY_ALL) {
         h.stale++; g_staleReads++; g_lk.scanFlags |= FLAG_STALE; use = false;
+    } else {
+        good = true;
+        g_lk.lastGoodT = r1;
+        if (g_lk.haltRun) lkHaltOver();
     }
 
     if (g_lk.waitBoundary) {
@@ -465,7 +487,7 @@ static int IRAM_ATTR lkStep() {
         if (k == (int32_t)g_lk.N - 1) lkCloseScan(r1);
     }
     h.busyUs += micros() - tIn;
-    return 1;
+    return good ? 1 : 2;
 }
 
 // After a pause (text mode, a command): drop what the FIFO holds and wait for
@@ -478,45 +500,90 @@ static void lkResume() {
     g_lk.h.resync++;
 }
 
+// No usable conversion for LK_TIMEOUT_MS: CLKIN restart + full re-init. After
+// LK_UNREC_N of them in a row with no usable conversion in between, the ADC is
+// declared UNRECOVERED with the legacy scan's line (the host's fault model
+// parses it; only a PCB power cycle helps: SYNC/RESET is tied high), and from
+// then on retried every LK_UNREC_RETRY_MS, each failed retry repeating the line
+// (it printed "[halt] no conversion" ~10x/s forever before). Recovery blocks
+// the reader for up to ~0.4 s (initADC waits 300 ms for a DRDY).
 static void lkRecover() {
     g_lk.h.recov++;
     g_halts++;
-    lkMsg(LKM_HALT, 0);
+    if (g_lk.haltRun >= LK_UNREC_N) {
+        g_unrecovered++;
+        g_adcDown = true;
+        lkMsg(LKM_UNREC, g_halts, (uint32_t)g_id | (uint32_t)g_clockRb << 16, g_crcFails);
+    } else {
+        lkMsg(LKM_HALT, 0);
+    }
+    if (g_lk.haltRun < 255) g_lk.haltRun++;
     spiFlush();
     setClkin(LK_CLKIN);
     lkStart();
     g_lk.scanFlags |= FLAG_RECOVERED;        // (after lkStart: its rearm clears the flags)
+    g_lk.haltT = micros();
+}
+
+// true = it recovered (a halt). Called when no usable conversion came.
+static bool IRAM_ATTR lkWatchHalt() {
+    uint32_t now = micros();
+    if (g_lk.haltRun > LK_UNREC_N) {         // UNRECOVERED: back off
+        if (now - g_lk.haltT < LK_UNREC_RETRY_MS * 1000UL) return false;
+    } else if (now - g_lk.lastGoodT <= LK_TIMEOUT_MS * 1000UL) {
+        return false;
+    }
+    lkRecover();
+    return true;
+}
+
+// The ADC has gone quiet (no read for two conversion periods, at least 2 ms):
+// halted, or between recoveries. No read to protect, so TX needn't wait.
+static inline bool lkSilent(uint32_t now) {
+    return now - g_lk.lastActT > (g_lk.T > 1000 ? 2UL * g_lk.T : 2000UL);
 }
 
 // Run the reader for about budgetUs (it returns right after a conversion, so
-// the caller's own work can't make the next read late). Idle time between
-// conversions goes to the deferred frame and the TX chunks.
+// the caller's own work can't make the next read late, or while the ADC is
+// silent). Idle time between conversions goes to the deferred frame and the TX
+// chunks.
 void lkService(uint32_t budgetUs) {
     uint32_t t0 = micros();
     // A gap shorter than a scan (a busy loop(), an interrupt hog) is a sync loss
     // inside the scan: lkStep sees the jump, taints the slot and flags the
     // scan. Longer (text modes, commands): drop the FIFO, wait for a boundary.
-    if (t0 - g_lk.lastActT > g_lk.scanUs) lkResume();
+    // (Both the caller and the ADC away: with a dead ADC the caller comes back
+    // every budget, and a resume would restart the halt timeout each time.)
+    if (t0 - g_lk.lastSvcT > g_lk.scanUs && t0 - g_lk.lastActT > g_lk.scanUs) lkResume();
     for (;;) {
-        if (lkStep()) {
-            if (micros() - t0 >= budgetUs) return;
+        int r = lkStep();
+        if (r) {
+            if (r == 2) lkWatchHalt();
+            if (micros() - t0 >= budgetUs) break;
+            continue;
+        }
+        if (lkWatchHalt()) {
+            if (micros() - t0 >= budgetUs) break;
             continue;
         }
         uint32_t now = micros();
-        if (now - g_lk.lastActT > LK_TIMEOUT_MS * 1000UL) {
-            lkRecover();
-            if (micros() - t0 >= budgetUs) return;
+        bool silent = lkSilent(now);
+        if (!g_lk.streaming) {
+            if (silent && now - t0 >= budgetUs) break;
             continue;
         }
-        // idle: only if the next DRDY is far enough off and doesn't end a slot
-        if (!g_lk.streaming || g_lk.waitBoundary) continue;
-        int32_t next = g_lk.lastK + 1;
-        if (next >= 0 && next < (int32_t)g_lk.N) {
-            uint8_t s = g_lk.posSlot[next];
-            if (next == g_lk.slotStart[s] + g_lk.slotLen[s] - 1) continue;
+        if (!silent) {
+            // idle: only if the next DRDY is far enough off and doesn't end a slot
+            if (g_lk.waitBoundary) continue;
+            int32_t next = g_lk.lastK + 1;
+            if (next >= 0 && next < (int32_t)g_lk.N) {
+                uint8_t s = g_lk.posSlot[next];
+                if (next == g_lk.slotStart[s] + g_lk.slotLen[s] - 1) continue;
+            }
+            if ((int32_t)(g_lk.lastEdgeT + g_lk.T - now) < LK_TX_GUARD_US) continue;
         }
-        if ((int32_t)(g_lk.lastEdgeT + g_lk.T - now) < LK_TX_GUARD_US) continue;
         uint32_t w0 = micros();
+        bool did = true;
         if (g_lk.pendingSend) {
             g_lk.pendingSend = false;
             send_scan();                     // packs into the TX queue
@@ -525,13 +592,17 @@ void lkService(uint32_t budgetUs) {
             uint32_t dt = micros() - w0;
             if (n && dt > g_lk.h.txMax) g_lk.h.txMax = (uint16_t)min<uint32_t>(dt, 65535);
         } else if (g_lk.remote) {
-            logqDrain(1);                    // captured ESP-IDF log lines, rate-limited
-            continue;
+            // C0: this task sends, so the heartbeat and the captured ESP-IDF log
+            // lines (rate-limited) are its job too
+            if (!beatService()) logqDrain(1);
+            did = false;
         } else {
-            continue;
+            did = false;
         }
-        g_lk.h.busyUs += micros() - w0;
+        if (did) g_lk.h.busyUs += micros() - w0;
+        if (silent && micros() - t0 >= budgetUs) break;
     }
+    g_lk.lastSvcT = micros();
 }
 
 // ── The reader task (streaming, C0 and C1) ──────────────────────────────────
@@ -583,8 +654,8 @@ static void lkTaskMain(void *) {
             lkService(0);
             continue;
         }
-        if (lkStep()) continue;
-        if (micros() - g_lk.lastActT > LK_TIMEOUT_MS * 1000UL) lkRecover();
+        if (lkStep() == 1) continue;
+        lkWatchHalt();
     }
 }
 

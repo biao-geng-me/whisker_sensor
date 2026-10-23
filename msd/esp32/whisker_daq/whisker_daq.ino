@@ -129,6 +129,7 @@ static float outNoise[NUM_OUT + 1];
 
 uint16_t g_id = 0, g_clockRb = 0, g_modeRb = 0;
 uint32_t g_halts = 0, g_crcFails = 0, g_unrecovered = 0, g_scans = 0;
+bool     g_adcDown = false;     // an UNRECOVERED halt was declared, no good conversion since
 static uint32_t g_recByLevel[4] = {0, 0, 0, 0};
 uint32_t g_staleReads = 0;      // reads whose STATUS DRDY bits said "no new data"
 uint32_t g_adcReinits = 0;      // re-inits after STATUS RESET was seen set
@@ -353,6 +354,86 @@ void send_scan() {
                     (g_scanRecovered ? FLAG_RECOVERED : 0) | (g_scanCrcRetry ? FLAG_CRC_RETRY : 0) |
                     (g_scanStale ? FLAG_STALE : 0) | (g_scanReinit ? FLAG_REINIT : 0) |
                     (g_lk.mode ? g_lk.outFlags : 0), raw);
+}
+
+// ── Heartbeat ────────────────────────────────────────────────────────────────
+// About once a second in every mode, also while nothing streams (ADC dead, text
+// modes, the legacy scan), so the host can tell "ADC dead" (heartbeat, no
+// conversions) from "ESP32 hung" (no heartbeat). Binary mode: a BEAT frame
+// (FT_BEAT; old decoders skip unknown frame types). Text modes: the same fields
+// as one "#BEAT v1 key=value ..." line. It also carries what the boot found
+// (reset reason, boot CLOCK readback, recovery), which the banner only prints.
+// Sent by whoever sends at the moment: the host core, or the reader in C0
+// streaming (lkService's idle time); never inside a command or a diagnostic dump.
+//   u8 version, u32 uptime_ms, u8 mode (0 legacy, 1 quiet, 2 wide), u8 core (C),
+//   u8 host_mode ('B' binary, 'g' 'x' 's' 'c' 'n' text), u8 flags (BEAT_*),
+//   u16 window_ms, u32 drdy_edges (DRDY falling edges in the window: the ADC
+//   converts iff > 0), u32 halts, u32 unrecovered, u32 adc_reinits, u16 clock_rb
+//   (last CLOCK readback), u16 device_id, u32 scans, u8 reset_reason
+//   (esp_reset_reason()), u16 boot_clock_rb
+#define BEAT_LEN  38
+static bool     g_beatOn = false;            // from the boot banner on (beatStart)
+static uint32_t g_beatT = 0, g_beatEdges = 0;
+static uint8_t  g_resetReason = 0, g_bootFlags = 0;
+static uint16_t g_bootClockRb = 0;
+static char     g_prevNote[300];             // the reader watchdog's note from before the reset
+static bool     g_prevNotePending = false;
+
+static void beatStart() {
+    g_beatT = millis();
+    g_beatEdges = g_drdyEdges;
+    g_beatOn = true;
+}
+
+bool beatService() {
+    if (!g_beatOn) return false;
+    uint32_t now = millis();
+    if (now - g_beatT < 1000) return false;
+    uint32_t e = g_drdyEdges, edges = e - g_beatEdges;
+    uint16_t win = (uint16_t)min<uint32_t>(now - g_beatT, 65535);
+    g_beatT = now;
+    g_beatEdges = e;
+    uint8_t fl = g_bootFlags | (g_adcDown ? BEAT_ADC_DOWN : 0) | (lkTaskOk() ? 0 : BEAT_NO_READER);
+    if (g_mode != 'B') {
+        Serial.printf("#BEAT v%d up_ms=%lu mode=%u core=%u hmode=%c flags=0x%02X window_ms=%u"
+                      " edges=%lu halts=%lu unrec=%lu reinit=%lu clock_rb=0x%04X id=0x%04X"
+                      " scans=%lu reset=%u boot_clock_rb=0x%04X\n", BEAT_VERSION,
+                      (unsigned long)now, g_lk.mode, g_core, g_mode, fl, win, (unsigned long)edges,
+                      (unsigned long)g_halts, (unsigned long)g_unrecovered,
+                      (unsigned long)g_adcReinits, g_clockRb, g_id, (unsigned long)g_scans,
+                      g_resetReason, g_bootClockRb);
+        return true;
+    }
+    uint8_t p[BEAT_LEN];
+    p[0] = BEAT_VERSION;
+    put_u32(p + 1, now);
+    p[5] = g_lk.mode;
+    p[6] = g_core;
+    p[7] = (uint8_t)g_mode;
+    p[8] = fl;
+    put_u16(p + 9, win);
+    put_u32(p + 11, edges);
+    put_u32(p + 15, g_halts);
+    put_u32(p + 19, g_unrecovered);
+    put_u32(p + 23, g_adcReinits);
+    put_u16(p + 27, g_clockRb);
+    put_u16(p + 29, g_id);
+    put_u32(p + 31, g_scans);
+    p[35] = g_resetReason;
+    put_u16(p + 36, g_bootClockRb);
+    send_frame(FT_BEAT, p, sizeof(p));
+    return true;
+}
+
+// The reader watchdog's note from before the reset, framed, at the first B
+// (the banner prints it raw, which a host that connects later never sees).
+static void sendPrevNote() {
+    if (!g_prevNotePending) return;
+    g_prevNotePending = false;
+    char b[256];
+    int n = snprintf(b, sizeof(b), "previous reset: [reader watchdog] %s", g_prevNote);
+    if (n > 255) n = 255;
+    if (n > 0) send_frame(FT_TEXT, (const uint8_t *)b, (uint8_t)n);
 }
 
 // ── Whisker / connector helpers ──────────────────────────────────────────────
@@ -580,6 +661,7 @@ static bool readValid(long ch[4], uint32_t budget_ms, uint32_t *idx, uint32_t *t
 // Levels: 1 soft re-init · 2 SPI flush + re-init · 3 CLKIN restart (+HW reset)
 static int recoverADC(long ch[4], uint32_t *idx = nullptr) {
     for (int level = 1; level <= 3; level++) {
+        beatService();                       // a dead ADC takes ~1.2 s per pass
         switch (level) {
             case 1: break;
             case 2: spiFlush(); break;
@@ -600,11 +682,15 @@ static int recoverADC(long ch[4], uint32_t *idx = nullptr) {
 // 3 = read after a reinitADC (the ADC had reset; the sweep must restart).
 static int readOrRecover(long ch[4], uint32_t *idx = nullptr) {
     uint32_t reinits = g_adcReinits;
-    if (readValid(ch, 250, idx)) return g_adcReinits != reinits ? 3 : 1;
+    if (readValid(ch, 250, idx)) {
+        g_adcDown = false;
+        return g_adcReinits != reinits ? 3 : 1;
+    }
     g_halts++;
     g_scanRecovered = true;
     int lvl = recoverADC(ch, idx);
     if (lvl > 0) {
+        g_adcDown = false;
         g_recByLevel[lvl]++;
         logf("[halt #%lu] recovered at L%d  (L1=%lu L2=%lu L3=%lu fail=%lu crcbad=%lu stale=%lu)\n",
              (unsigned long)g_halts, lvl,
@@ -614,11 +700,20 @@ static int readOrRecover(long ch[4], uint32_t *idx = nullptr) {
         return g_adcReinits != reinits ? 3 : 2;
     }
     g_unrecovered++;
-    logf("[halt #%lu] UNRECOVERED  ID=0x%04X CLOCKrb=0x%04X crcbad=%lu"
-         "  -> power-cycle the PCB with the ESP32 already running\n",
-         (unsigned long)g_halts, g_id, g_clockRb, (unsigned long)g_crcFails);
+    g_adcDown = true;
+    char b[160];
+    unrecText(b, sizeof(b), g_halts, g_id, g_clockRb, g_crcFails);
+    logf("%s\n", b);
+    beatService();
     delay(500);
     return 0;
+}
+
+// Also the locked reader's (lkRecover); the host's fault model parses it.
+void unrecText(char *buf, int size, uint32_t halts, uint16_t id, uint16_t clockRb, uint32_t crc) {
+    snprintf(buf, size, "[halt #%lu] UNRECOVERED  ID=0x%04X CLOCKrb=0x%04X crcbad=%lu"
+             "  -> power-cycle the PCB with the ESP32 already running", (unsigned long)halts, id,
+             clockRb, (unsigned long)crc);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -707,9 +802,11 @@ static bool scan_all() {
 
 static void captureBaseline(int nScans) {
     double sum[NUM_OUT + 1] = {}, sq[NUM_OUT + 1] = {};
-    int got = 0;
+    int got = 0, fails = 0;
     for (int i = 0; i < nScans; i++) {
-        if (!scan_all()) continue;
+        beatService();
+        // a dead ADC: give up after two failed scans (each takes 1-3 s), not nScans
+        if (!scan_all()) { if (++fails >= 2 && !got) break; continue; }
         for (int o = 1; o <= NUM_OUT; o++) { sum[o] += outV[o]; sq[o] += (double)outV[o] * outV[o]; }
         got++;
     }
@@ -1606,6 +1703,7 @@ static void hostSetup() {
     Serial.println("\n=================================================");
     Serial.println("  whisker_daq — 16 whiskers x 2 gauges = 32 ch");
     Serial.println("=================================================");
+    beatStart();       // from here on (#BEAT lines: a dead ADC makes the boot take ~10 s)
 
 #if PROBE_SELECTS
     int lows = probeSelectsGrounded();
@@ -1650,7 +1748,10 @@ static void hostSetup() {
         int lvl = recoverADC(tmp);
         Serial.printf("Boot recovery: %s\n", lvl ? "OK" : "FAILED");
         cfg = (g_clockRb & CLOCK_MASK) == (CLOCK_ALL_CH_OSR128 & CLOCK_MASK);
+        g_bootFlags |= BEAT_BOOT_RECOVERY | (lvl ? 0 : BEAT_BOOT_REC_FAIL);
     }
+    if (cfg) g_bootFlags |= BEAT_BOOT_CLOCK_OK;
+    g_bootClockRb = g_clockRb;
     // ID register (SBAS890D): bits 15:12 = 0010b, CHANCNT 11:8 = 4 -> 0x24xx.
     Serial.printf("Device ID      = 0x%04X  %s\n", g_id,
                   (g_id >> 8) == 0x24 ? "(ADS131M04)" :
@@ -1772,8 +1873,8 @@ static void hostSendRecord(const XRec &r) {
         g_hh.hostTxMax = 0;                    // per HEALTH window
         g_hh.txLate = 0;
     } else if (r.kind == XR_MSG) {
-        char buf[120];
-        lkMsgText(buf, sizeof(buf), r.msg[0], r.msg[1], r.mode);
+        char buf[160];
+        lkMsgText(buf, sizeof(buf), r.msg, r.mode);
         logf("%s\n", buf);
     }
 }
@@ -1784,6 +1885,7 @@ static void hostSendRecord(const XRec &r) {
 #define TX_LATE_US  200
 static uint32_t g_nextScanEnd = 0;     // C1: when the next scan record is due (grid time)
 static bool     g_haveNextEnd = false;
+static uint32_t g_lastScanTxMs = 0;    // C1: millis() of the last scan frame sent
 static void hostDrain(bool window) {
     while (const XRec *q = g_xq.peek()) {
         if (window && q->kind == XR_SCAN && g_lk.txWinUs) {
@@ -1799,6 +1901,10 @@ static void hostDrain(bool window) {
         hostSendRecord(r);
         uint32_t dt = micros() - w0;
         if (dt > g_hh.hostTxMax) g_hh.hostTxMax = (uint16_t)min<uint32_t>(dt, 65535);
+        if (r.kind == XR_SCAN) {             // the heartbeat goes with a scan frame (its TX
+            g_lastScanTxMs = millis();       // window, if any)
+            beatService();
+        }
     }
 }
 
@@ -1806,7 +1912,8 @@ static void hostDrain(bool window) {
 // what it queued. false: it didn't let go (it keeps the ADC; try again later).
 static bool hostTakeBack() {
     if (!lkRemoteActive()) return true;
-    if (!lkPark(100)) {
+    // (normally < one conversion; a halt recovery blocks the reader for up to ~0.4 s)
+    if (!lkPark(1000)) {
         logf("[park timeout] the reader on core 1 did not stop\n");
         return false;
     }
@@ -1890,7 +1997,7 @@ static void hostLoop() {
             g_lk.streaming = false;
         }
         switch (k) {
-            case 'B': g_mode = 'B'; send_info(); break;
+            case 'B': g_mode = 'B'; send_info(); sendPrevNote(); break;
             case 'b': logf("Re-capturing baseline...\n"); captureBaseline(16); break;
             case 'v': g_absolute = !g_absolute; break;
             case 'm': if (g_mode == 'B') g_mode = 'g'; print_map(); break;
@@ -1939,6 +2046,7 @@ static void hostLoop() {
             // record is due, so its window isn't missed.
             hostDrain(true);
             logqDrain(2);
+            if (millis() - g_lastScanTxMs > 100) beatService();   // no scans (ADC halted)
             if (g_lk.txWinUs && g_haveNextEnd &&
                 (int32_t)(g_nextScanEnd - micros()) < 1500) {
                 while (!g_xq.ready() && (int32_t)(g_nextScanEnd + 2000 - micros()) > 0) {}
@@ -1955,6 +2063,7 @@ static void hostLoop() {
     logqDrain(2);
     if (streaming && !g_lk.streaming) lkHealthReset();   // HEALTH windows cover streaming only
     g_lk.streaming = streaming;
+    beatService();
     switch (g_mode) {
         case 'B': if (g_lk.mode) lkService(20000);       // only if the reader task is missing
                   else if (scan_all()) send_scan();      // legacy
@@ -1979,16 +2088,21 @@ static void hostLoop() {
 static bool g_lkTaskStarted = false;
 static void hostTask(void *) {
     bool wdt0 = disableCore0WDT();
+    g_resetReason = (uint8_t)esp_reset_reason();
+    if (g_wdMagic == WD_MAGIC) {             // kept for the first B (sendPrevNote)
+        g_wdMagic = 0;
+        g_wdNote[sizeof(g_wdNote) - 1] = 0;
+        strncpy(g_prevNote, g_wdNote, sizeof(g_prevNote) - 1);
+        g_prevNotePending = true;
+        g_bootFlags |= BEAT_PREV_WD;
+    }
     hostSetup();
     if (!wdt0) Serial.println("note: core 0's idle task is still on the task watchdog");
     if (!g_lkTaskStarted)
         Serial.println("*** reader task NOT created (xTaskCreatePinnedToCore failed): locked"
                        " modes stream from the host core (old C0 path), C1 unavailable");
-    Serial.printf("reset reason %d\n", (int)esp_reset_reason());
-    if (g_wdMagic == WD_MAGIC) {
-        Serial.printf("previous reset: [reader watchdog] %s\n", g_wdNote);
-        g_wdMagic = 0;
-    }
+    Serial.printf("reset reason %d\n", (int)g_resetReason);
+    if (g_bootFlags & BEAT_PREV_WD) Serial.printf("previous reset: [reader watchdog] %s\n", g_prevNote);
     for (;;) hostLoop();
 }
 

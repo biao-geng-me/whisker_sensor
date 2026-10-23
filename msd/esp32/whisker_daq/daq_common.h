@@ -114,6 +114,16 @@ static const uint8_t CONN_TO_JPIN[17] =
 #define FT_TEXT       0x02
 #define FT_INFO       0x03
 #define FT_HEALTH     0x04   // 1 Hz reader health in the locked scan modes
+#define FT_BEAT       0x05   // 1 Hz heartbeat in every mode (beatService); text modes
+                             // print it as a "#BEAT v1 key=value ..." line instead
+#define BEAT_VERSION  1
+// BEAT flags
+#define BEAT_ADC_DOWN       0x01   // an UNRECOVERED halt was declared, no conversion since
+#define BEAT_NO_READER      0x02   // the reader task wasn't created (locked modes on core 0)
+#define BEAT_PREV_WD        0x04   // the previous reset was the reader watchdog
+#define BEAT_BOOT_CLOCK_OK  0x08   // the boot CLOCK write was accepted
+#define BEAT_BOOT_RECOVERY  0x10   // the ADC was stuck at boot and needed a recovery
+#define BEAT_BOOT_REC_FAIL  0x20   // ... which failed
 #define PROTO_VERSION 4      // 2: INFO + osr, settle_us, discard_samples; 3: + sel_mask;
                              // 4: + mode, spi_hz, n_conv, avg per select; HEALTH frame
 #define FLAG_RECOVERED 0x01   // an ADC halt was recovered during this sweep
@@ -148,8 +158,9 @@ struct FastCfg {
 extern SPIClass vspi;
 extern float    outV  [NUM_OUT + 1];   // latest voltage, indexed by OUT number
 extern long     outRaw[NUM_OUT + 1];   // latest raw 24-bit code
-extern uint16_t g_clockRb;
-extern uint32_t g_halts, g_crcFails, g_scans, g_staleReads, g_adcReinits;
+extern uint16_t g_clockRb, g_id;
+extern uint32_t g_halts, g_crcFails, g_scans, g_staleReads, g_adcReinits, g_unrecovered;
+extern bool     g_adcDown;             // UNRECOVERED declared, no good conversion since
 extern uint32_t g_scanT0, g_scanDur;
 extern bool     g_scanRecovered, g_scanCrcRetry, g_scanStale, g_scanReinit;
 extern uint8_t  g_selMask;
@@ -173,6 +184,12 @@ bool fastCfgApply(long clkin, long osr, long spi, FastCfg *c);
 void restoreNormalCfg();
 void spiFlush();
 void setClkin(uint32_t hz);
+// "[halt #N] UNRECOVERED  ID=... CLOCKrb=... crcbad=...  -> power-cycle ..." (the
+// host's fault model parses it: whisker_link/esp32_fault.py)
+void unrecText(char *buf, int size, uint32_t halts, uint16_t id, uint16_t clockRb, uint32_t crc);
+// The 1 Hz heartbeat, if one is due; called by whoever sends at the moment (the
+// host core, or the reader in C0 streaming). true = sent.
+bool beatService();
 
 // Forget edges nobody read (text-mode pauses, re-init). Data still sitting in
 // the ADC's FIFO keeps DRDY low, so waitDRDY still finds it.

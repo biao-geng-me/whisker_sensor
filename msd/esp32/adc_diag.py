@@ -18,8 +18,13 @@ Subcommands (the ESP32 on a serial port, e.g. COM5 or /dev/ttyUSB0):
              optional --settle-us / --osr / --period-us / --spi. The ESP32
              forgets it on reboot.
 ``stream``   Optionally set selects and mode, stream for N s and print each
-             1 s HEALTH record (busy %, DRDY-to-read latency, overruns, ...) and a
-             summary of the scans (rate, t_us spacing, seq gaps, flags).
+             1 s HEALTH record (busy %, DRDY-to-read latency, overruns, ...) and
+             heartbeat (BEAT), and a summary of the scans (rate, t_us spacing, seq
+             gaps, flags) and the beats.
+``beat``     Heartbeat check (firmware since 2026-10-23 brief 6): N s in a text mode
+             (``#BEAT`` lines), then N s in binary mode (BEAT frames); prints each
+             beat and what the boot found (reset reason, boot CLOCK readback,
+             recovery, a reader-watchdog note), exits 3 if a beat is missing or late.
 
 Settle analysis, per ADC channel with a step: ``pre`` = mean of the conversions
 that ended before the switch, ``final`` = mean over the end of the window. The
@@ -732,6 +737,26 @@ STREAM_FAIL_MARKS = ("[reader watchdog]", "whisker_daq \u2014", "Commands: B=", 
 NO_SCAN_TIMEOUT_S = 2.0
 
 
+BEAT_FLAG_NAMES = ((0x01, "ADC_DOWN"), (0x02, "NO_READER"), (0x04, "PREV_WD"),
+                   (0x08, "BOOT_CLOCK_OK"), (0x10, "BOOT_RECOVERY"), (0x20, "BOOT_REC_FAIL"))
+
+
+def beat_line(b) -> str:
+    fl = "|".join(n for bit, n in BEAT_FLAG_NAMES if b.flags & bit) or "0"
+    return (f"BEAT up {b.uptime_ms / 1e3:8.3f} s  mode {b.mode} core {b.core} host '{b.host_mode}'"
+            f"  DRDY {b.conv_hz:7.1f}/s ({b.drdy_edges} in {b.window_ms} ms)  halts {b.halts}"
+            f" unrecovered {b.unrecovered} reinits {b.adc_reinits}  CLOCK 0x{b.clock_rb:04X}"
+            f" ID 0x{b.device_id:04X}  scans {b.scans}  reset {b.reset_reason}"
+            f" boot CLOCK 0x{b.boot_clock_rb:04X}  flags {fl}")
+
+
+def beat_summary(beats) -> str:
+    gaps = [b.uptime_ms - a.uptime_ms for a, b in zip(beats, beats[1:])]
+    return (f"heartbeat: {len(beats)} beats" + (f", spacing {min(gaps)}-{max(gaps)} ms" if gaps else "")
+            + (f", DRDY {min(b.conv_hz for b in beats):.0f}-{max(b.conv_hz for b in beats):.0f}/s"
+               if beats else ""))
+
+
 class StreamWatch:
     """Fails a stream run loudly: no SCAN within NO_SCAN_TIMEOUT_S of B (of each
     re-send), or a reboot / watchdog / crash line anywhere."""
@@ -780,7 +805,7 @@ def cmd_stream(a) -> int:
     resends = 0
     ser = open_port(a.port)
     dec, raw = ef.Decoder(), bytearray()
-    scans, infos, health = [], [], []
+    scans, infos, health, beats = [], [], [], []
     watch = StreamWatch()
     try:
         ser.reset_input_buffer()
@@ -822,6 +847,9 @@ def cmd_stream(a) -> int:
                               f" tx_late {h['tx_late']} parks {h['parks']}"
                               f" park_timeouts {h['park_timeouts']}" if "core" in h else ""),
                           flush=True)
+                elif isinstance(ev, ef.Beat):
+                    beats.append(ev)
+                    print(beat_line(ev), flush=True)
                 elif isinstance(ev, ef.Text):
                     print("TEXT", ev.text)
                     n = len(watch.problems)
@@ -860,6 +888,11 @@ def cmd_stream(a) -> int:
               + (f"; core {sorted({h['core'] for h in hs if 'core' in h})}, parks"
                  f" {hs[-1]['parks']}, park timeouts {hs[-1]['park_timeouts']}" if "core" in hs[-1]
                  else ""))
+    if beats:
+        print(beat_summary(beats))
+    else:
+        print("WARNING: no heartbeat (BEAT) frames: firmware before 2026-10-23 brief 6?",
+              file=sys.stderr)
     if resends:
         print(f"stress: the setup was re-sent {resends} times ({len([x for x in scans if x.flags])}"
               f" flagged scans in total)")
@@ -872,6 +905,66 @@ def cmd_stream(a) -> int:
         for p in dict.fromkeys(watch.problems):
             print(f"  - {p}", file=sys.stderr)
         return 3
+    return 0
+
+
+def cmd_beat(a) -> int:
+    """Heartbeat in a text mode, then in binary mode; the boot fields it carries."""
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from whisker_link import esp32_frame as ef
+
+    ser = open_port(a.port)
+    dec = ef.Decoder()
+    got: dict[str, list] = {"text": [], "binary": []}
+    notes = []
+    try:
+        ser.reset_input_buffer()
+        for phase, key in (("text", b"g"), ("binary", b"B")):
+            ser.write(key)
+            t0 = time.monotonic()
+            print(f"-- {phase} mode ({key.decode()}) for {a.secs:g} s")
+            while time.monotonic() - t0 < a.secs:
+                for ev in dec.feed(ser.read(ser.in_waiting or 1)):
+                    if isinstance(ev, ef.Beat):
+                        if time.monotonic() - t0 > 1.2:       # (one may still be of the last mode)
+                            got[phase].append(ev)
+                        print(beat_line(ev), flush=True)
+                    elif isinstance(ev, ef.Info):
+                        print("INFO", json.dumps(ef.info_cfg(dict(ev.__dict__))))
+                    elif isinstance(ev, ef.Text) and ("previous reset" in ev.text
+                                                      or "reset reason" in ev.text):
+                        notes.append(ev.text)
+                        print("TEXT", ev.text)
+        ser.write(b"g")
+    finally:
+        ser.close()
+    problems = []
+    for phase, want in (("text", lambda b: b.host_mode != "B"), ("binary", lambda b: b.host_mode == "B")):
+        bs = got[phase]
+        print(f"{phase}: " + beat_summary(bs))
+        gaps = [y.uptime_ms - x.uptime_ms for x, y in zip(bs, bs[1:])]
+        if len(bs) < a.secs - 2.5:
+            problems.append(f"{phase} mode: {len(bs)} beats in {a.secs:g} s")
+        if gaps and max(gaps) > 1600:
+            problems.append(f"{phase} mode: a beat {max(gaps)} ms after the previous one")
+        if not all(want(b) for b in bs):
+            problems.append(f"{phase} mode: beats with the wrong host mode")
+        if bs and not all(b.drdy_edges > 0 and not b.adc_down for b in bs):
+            problems.append(f"{phase} mode: the ADC is not converting (DRDY 0 / ADC_DOWN)")
+    allb = got["text"] + got["binary"]
+    if allb:
+        b = allb[-1]
+        print(f"boot: reset reason {b.reset_reason} ({ef.RESET_REASONS.get(b.reset_reason, '?')}),"
+              f" boot CLOCK readback 0x{b.boot_clock_rb:04X}, flags "
+              + ("|".join(n for bit, n in BEAT_FLAG_NAMES if b.flags & bit) or "0")
+              + f"; now: mode {b.mode}, CLOCK 0x{b.clock_rb:04X}, ID 0x{b.device_id:04X},"
+              f" uptime {b.uptime_ms / 1e3:.1f} s")
+    if problems:
+        print(f"ERROR: heartbeat check failed ({len(problems)} problem(s)):", file=sys.stderr)
+        for p in problems:
+            print(f"  - {p}", file=sys.stderr)
+        return 3
+    print("heartbeat OK")
     return 0
 
 
@@ -950,6 +1043,11 @@ def main(argv=None) -> int:
     p.add_argument("--secs", type=float, default=10.0)
     p.add_argument("--out", type=Path, help="save the raw byte stream here")
     p.set_defaults(func=cmd_stream)
+
+    p = sub.add_parser("beat", help="heartbeat check: text mode, then binary mode")
+    p.add_argument("--port", required=True)
+    p.add_argument("--secs", type=float, default=6.0, help="seconds per mode")
+    p.set_defaults(func=cmd_beat)
 
     a = ap.parse_args(argv)
     return a.func(a)

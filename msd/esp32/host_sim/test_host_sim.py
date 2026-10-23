@@ -48,16 +48,21 @@ def sim(tmp_path_factory):
 LAST = {}                              # the last run: decoder junk bytes, sim summary
 
 
-def run(sim, out: Path, *args: str):
+def run_events(sim, out: Path, *args: str) -> list:
     """Run the sim; every run must be free of task-watchdog errors and raw
-    (unframed) ESP-IDF log lines (bench r3)."""
+    (unframed) ESP-IDF log lines (bench r3). The decoded events, in order."""
     r = subprocess.run([str(sim), "--out", str(out), *args], capture_output=True, text=True,
                        timeout=300)
     assert r.returncode == 0, r.stderr
     assert "twdt errors 0, raw log lines 0, reader kernel calls 0" in r.stderr, r.stderr[-500:]
     dec = ef.Decoder()
     evs = list(dec.feed(out.read_bytes()))
-    LAST.update(junk=dec.n_junk, stderr=r.stderr)
+    LAST.update(junk=dec.n_junk, stderr=r.stderr, beats=[e for e in evs if isinstance(e, ef.Beat)])
+    return evs
+
+
+def run(sim, out: Path, *args: str):
+    evs = run_events(sim, out, *args)
     return ([e for e in evs if isinstance(e, ef.Scan)], [e for e in evs if isinstance(e, ef.Info)],
             [e for e in evs if isinstance(e, ef.Health)], [e.text for e in evs if isinstance(e, ef.Text)])
 
@@ -430,3 +435,158 @@ def test_c0_pending_scan_not_lost_on_command(sim, tmp_path):
     # counted as a resync; every scan that was closed must arrive
     assert lost <= sum(h.resync for h in health) + 1, (gaps, [h.resync for h in health])
     assert sum(h.tx_drop for h in health) == 0
+
+
+# ---------------------------------------------------------------- dead ADC, heartbeat (brief 6)
+import re  # noqa: E402
+
+from whisker_link.esp32_fault import FaultMonitor, classify  # noqa: E402
+
+UNREC_RE = re.compile(r"^\[halt #\d+\] UNRECOVERED  ID=0x2405 CLOCKrb=0x00FF crcbad=\d+"
+                      r"  -> power-cycle the PCB with the ESP32 already running$")
+
+
+def timeline(evs):
+    """(ESP32 time in s, event): from the heartbeat uptime and the scan times."""
+    t, out = 0.0, []
+    for e in evs:
+        if isinstance(e, ef.Beat):
+            t = e.uptime_ms / 1e3
+        elif isinstance(e, ef.Scan):
+            t = max(t, e.t_us / 1e6)
+        out.append((t, e))
+    return out
+
+
+def feed_monitor(tl):
+    """The host's fault model over the stream, on the ESP32's clock."""
+    now = [0.0]
+    mon = FaultMonitor(lambda: now[0], wall=lambda: 1.7e9 + now[0])
+    mon.link(True, 0.0)
+    for t, e in tl:
+        while now[0] < t:
+            now[0] = min(t, now[0] + 0.1)
+            mon.poll()
+        if isinstance(e, ef.Scan):
+            mon.on_scan(e.flags)
+        elif isinstance(e, ef.Text):
+            mon.on_text(e.text)
+        elif isinstance(e, ef.Beat):
+            mon.on_beat(e)
+    return mon
+
+
+def _beat_gaps(beats, t0=0.0, t1=1e9):
+    return [b.uptime_ms - a.uptime_ms for a, b in zip(beats, beats[1:]) if t0 <= a.uptime_ms / 1e3 < t1]
+
+
+@pytest.mark.parametrize("setup,period", [("S0123457;B", 16000), ("S0123457;C0;B", 16000),
+                                          ("S0123457;M2;B", 4000)])
+def test_dead_adc_locked_unrecovered_backoff_heartbeat(sim, tmp_path, setup, period):
+    """The ADC locks up while a locked mode streams (no DRDY, the CLOCK write
+    doesn't stick), the PCB is power-cycled 12 s later. Before: '[halt] no
+    conversion' ~10x/s forever. Now: 5 of them, then the legacy UNRECOVERED line,
+    then a retry (and the line) every 5 s; a heartbeat every second throughout."""
+    evs = run_events(sim, tmp_path / "o.bin", "--end", "18", "--board-costs",
+                     "--cmd", f"2.0:{setup}", "--adc-dead", "3.0:15.0")
+    tl = timeline(evs)
+    text = [(t, e.text) for t, e in tl if isinstance(e, ef.Text) and t > 2.0]
+    halts = [x for x in text if x[1].startswith("[halt")]
+    assert [x[1].startswith("[halt] no conversion") for x in halts] == [True] * 5 + [False] * 2, halts
+    unrec = [x for x in halts if "UNRECOVERED" in x[1]]
+    assert all(UNREC_RE.match(x) and classify(x)[1] == "adc_unrecovered" for _, x in unrec)
+    assert 4.0 < unrec[0][0] < 6.5 and 4.5 < unrec[1][0] - unrec[0][0] < 5.6, unrec
+    assert any("[adc ok]" in x for t, x in text if t > 14.0)
+    beats = LAST["beats"]
+    assert max(_beat_gaps(beats, 2.0)) <= 1350, _beat_gaps(beats, 2.0)
+    dead = [b for b in beats if 4.5 < b.uptime_ms / 1e3 < 15.0]
+    assert len(dead) >= 9 and all(b.drdy_edges == 0 and b.host_mode == "B" for b in dead)
+    assert all(b.adc_down == (b.uptime_ms / 1e3 > unrec[0][0]) for b in dead)
+    assert dead[-1].unrecovered == 2 and dead[-1].clock_rb == 0x00FF
+    after = [b for b in beats if b.uptime_ms > 16_000]
+    assert after and all(not b.adc_down and b.drdy_edges > 1000 for b in after)
+    scans = [e for t, e in tl if isinstance(e, ef.Scan) and t > 16.0]
+    assert len(scans) > 1.5e6 / period and {b.t_us - a.t_us for a, b in zip(scans, scans[1:])} == {period}
+    assert LAST["junk"] == 0
+    mon = feed_monitor(tl)
+    assert [e["code"] for e in mon.take_events() if e["event"] == "fault"][-1] == "adc_unrecovered"
+
+
+def test_dead_adc_legacy_heartbeat(sim, tmp_path):
+    """Legacy scan: UNRECOVERED every failed sweep (~1.4 s, as before), beats keep coming."""
+    evs = run_events(sim, tmp_path / "o.bin", "--end", "14", "--board-costs",
+                     "--cmd", "2.0:S0123457;M0;B", "--adc-dead", "3.0:12.0")
+    text = [e.text for e in evs if isinstance(e, ef.Text)]
+    assert 3 <= len([x for x in text if UNREC_RE.match(x)]) <= 7
+    assert any("recovered at L" in x for x in text)
+    beats = LAST["beats"]
+    assert max(_beat_gaps(beats, 2.0)) <= 1700
+    assert any(b.adc_down for b in beats) and not beats[-1].adc_down and beats[-1].drdy_edges > 1000
+
+
+def test_dead_adc_at_boot(sim, tmp_path):
+    """Dead from power-up: the boot gives up on the baseline after 2 scans (not 16
+    x 1-3 s), text-mode #BEAT lines carry the boot result, B streams the beat."""
+    evs = run_events(sim, tmp_path / "o.bin", "--end", "16", "--adc-dead", "0.0001",
+                     "--cmd", "13:B")
+    text = [e.text for e in evs if isinstance(e, ef.Text)]
+    assert any("Baseline FAILED" in x for x in text) and any("Boot recovery: FAILED" in x for x in text)
+    beats = LAST["beats"]
+    boot = [b for b in beats if b.host_mode != "B"]
+    assert boot and boot[0].uptime_ms < 2500 and max(_beat_gaps(beats)) < 2500
+    late = [b for b in beats if b.host_mode == "B"]
+    assert late and all(b.flags & ef.BEAT_BOOT_REC_FAIL and not b.flags & ef.BEAT_BOOT_CLOCK_OK
+                        and b.boot_clock_rb == 0x00FF and b.drdy_edges == 0 and b.adc_down
+                        for b in late)
+    assert any(isinstance(e, ef.Info) and e.mode == 0 for e in evs)      # back to legacy
+
+
+def test_dead_adc_with_host_kicks(sim, tmp_path):
+    """daq_server re-sends S..;M1;B every 2 s while nothing streams: no park
+    timeout (a recovery blocks the reader ~0.4 s), it recovers at the power cycle."""
+    cmds = ["--cmd", "2.0:S0123457;B"]
+    for i in range(6):
+        cmds += ["--cmd", f"{3.5 + 2 * i:.1f}:S0123457;M1;B"]
+    evs = run_events(sim, tmp_path / "o.bin", "--end", "17", "--board-costs", *cmds,
+                     "--adc-dead", "3.0:14.2")
+    text = [e.text for e in evs if isinstance(e, ef.Text)]
+    assert not any("park timeout" in x for x in text)
+    assert any(UNREC_RE.match(x) for x in text)
+    # (an M with a dead ADC holds the host ~0.9 s: a failed init and the one back;
+    # no beat inside a command, which could land in a diagnostic's dump)
+    assert max(_beat_gaps(LAST["beats"], 2.0)) <= 2100
+    scans = [e for e in evs if isinstance(e, ef.Scan) and e.t_us > 15.5e6]
+    assert len(scans) > 60 and not [s for s in scans if s.flags]
+
+
+@pytest.mark.parametrize("cmd,hmode,mode,conv", [("S0123457;B", "B", 1, 7812),
+                                                 ("S0123457;M2;B", "B", 2, 31250),
+                                                 ("S0123457;M0;B", "B", 0, 3125), ("g", "g", 1, 7812)])
+def test_heartbeat_healthy(sim, tmp_path, cmd, hmode, mode, conv):
+    """What the board check looks at: one beat a second in every mode (a #BEAT line
+    in a text mode), DRDY edges at the conversion rate, the boot result."""
+    evs = run_events(sim, tmp_path / "o.bin", "--end", "7", "--board-costs", "--cmd", f"2.0:{cmd}")
+    beats = [b for b in LAST["beats"] if b.uptime_ms > 3000]
+    assert len(beats) >= 3 and all(900 <= g <= 1250 for g in _beat_gaps(beats))
+    for b in beats:
+        assert b.host_mode == hmode and b.mode == mode and b.core == 1 and b.reset_reason == 1
+        assert b.flags == ef.BEAT_BOOT_CLOCK_OK and b.boot_clock_rb == 0xFF02 and b.device_id == 0x2405
+        assert abs(b.conv_hz - conv) < 0.03 * conv and b.halts == b.unrecovered == 0
+    if hmode == "B":
+        assert LAST["junk"] == 0
+        scans = [e for e in evs if isinstance(e, ef.Scan)]
+        assert scans and not [s for s in scans[2:] if s.flags]
+
+
+def test_previous_watchdog_note_is_framed_once(sim, tmp_path):
+    """After a reader-watchdog restart: the banner prints the note raw, the beat
+    flags it, and the first B sends it once as framed TEXT (a host that connects
+    after the boot sees it)."""
+    note = "no progress for 3001 ms: req 2/RUN state 1/RUNNING beat 77"
+    evs = run_events(sim, tmp_path / "o.bin", "--end", "6", "--prev-wd", note,
+                     "--cmd", "2.0:B", "--cmd", "3.0:g", "--cmd", "4.0:B")
+    lines = [e.text for e in evs if isinstance(e, ef.Text) and note in e.text]
+    assert lines == [f"previous reset: [reader watchdog] {note}"] * 2      # raw banner + framed
+    assert all(b.flags & ef.BEAT_PREV_WD for b in LAST["beats"])
+    mon = feed_monitor(timeline(evs))
+    assert [e["code"] for e in mon.take_events()].count("reader_watchdog") == 1

@@ -38,6 +38,10 @@
 //        [--tx-couple CODES] (inputs offset while UART0 transmits)
 //        [--fail-task NAME]  (xTaskCreatePinnedToCore fails for that task)
 //        [--idf-log T:TEXT]  (an ESP-IDF component logs "E (ms) TEXT" at T)
+//        [--prev-wd TEXT]    (boot as after a reader-watchdog restart: its RTC note)
+//        [--adc-dead T[:T2]] (the ADC locks up at T: SPI and ID answer, no conversions,
+//                             no DRDY, the CLOCK write doesn't stick (reads 0x00FF), RESET
+//                             doesn't help; at T2 the PCB is power-cycled: back at defaults)
 //        [--trace T0:T1]  (one stderr line per reader step between T0 and T1 s)
 #include "Arduino.h"
 #include "SPI.h"
@@ -167,15 +171,16 @@ struct Adc {
     bool haveResp = false;
     uint32_t spiHz = 600000;
     uint64_t nConv = 0, nBlocked = 0, nOverwrite = 0, nPulse = 0;
+    bool dead = false;                         // --adc-dead: locked up
 
     int osr() const { int c = (reg[3] >> 2) & 7; return 128 << c; }
     void restartConv(double delay = 0) {
         T = clkin ? 2.0 * osr() / clkin * 1e6 : 1e18;
-        nextConv = clkin ? sim_t + delay + T : 1e18;
+        nextConv = clkin && !dead ? sim_t + delay + T : 1e18;
     }
     void reset() {
         memset(reg, 0, sizeof(reg));
-        reg[0] = 0x2405; reg[2] = 0x0510; reg[3] = 0x0F0E;
+        reg[0] = 0x2405; reg[2] = 0x0510; reg[3] = dead ? 0x00FF : 0x0F0E;
         resetFlag = true;
         fifo.clear();
         drdyLow = false;
@@ -248,7 +253,8 @@ struct Adc {
             uint16_t v = (uint16_t)(in[3] << 8 | in[4]);
             reg[a] = v;
             if (a == 2) resetFlag = (v >> 10) & 1;
-            if (a == 3) { fifo.clear(); drdyLow = false; restartConv(); }
+            if (a == 3 && dead) reg[3] = 0x00FF;            // doesn't stick
+            else if (a == 3) { fifo.clear(); drdyLow = false; restartConv(); }
             resp = 0x4000 | (a << 7); haveResp = true;
         }
         bool left = !fifo.empty();
@@ -327,6 +333,7 @@ static int sim_drdyCore = 1, sim_uartCore = 1;
 static double sim_endUs = 3e6;
 static std::vector<double> sim_resets;
 static std::vector<std::pair<double, std::string>> sim_idfLogs;   // --idf-log T:TEXT
+static double sim_deadAt = 0, sim_aliveAt = 0;                       // --adc-dead T[:T2]
 static void simIdfLog(const char *fmt, ...);
 static void simFinish();
 
@@ -367,11 +374,13 @@ static void schedule() {
         for (size_t i = 0; i < sim_stalls.size(); i++) if (sim_stalls[i].us > 0) cand(sim_stalls[i].t, 4, (int)i);
         for (size_t i = 0; i < sim_resets.size(); i++) if (sim_resets[i] > 0) cand(sim_resets[i], 5, (int)i);
         for (size_t i = 0; i < sim_idfLogs.size(); i++) if (sim_idfLogs[i].first > 0) cand(sim_idfLogs[i].first, 7, (int)i);
+        if (sim_deadAt > 0) cand(sim_deadAt, 8);
+        if (sim_aliveAt > 0 && sim_deadAt == 0) cand(sim_aliveAt, 9);
         cand(sim_endUs, 6);
         if (te > G) break;
         sim_t = te;
         switch (kind) {
-            case 0: adc.complete(); adc.nextConv += adc.T; break;
+            case 0: adc.complete(); adc.nextConv = adc.dead ? INF : adc.nextConv + adc.T; break;
             case 1:
                 if (te > sim_isrDue + 0.5) sim_isrLate++;
                 sim_isrPending = false;
@@ -389,6 +398,13 @@ static void schedule() {
             case 7:
                 simIdfLog("E (%lu) %s\r\n", (unsigned long)(te / 1000), sim_idfLogs[arg].second.c_str());
                 sim_idfLogs[arg].first = 0;
+                break;
+            case 8:                         // lock-up: conversions stop, DRDY stays high
+                adc.dead = true; adc.nextConv = INF; adc.fifo.clear(); adc.drdyLow = false;
+                adc.reg[3] = 0x00FF; sim_deadAt = 0;
+                break;
+            case 9:                         // PCB power cycle with CLKIN running: defaults
+                adc.dead = false; adc.reset(); sim_aliveAt = 0;
                 break;
         }
     }
@@ -666,6 +682,7 @@ static double sim_traceFrom = -1, sim_traceTo = -1;          // --trace T0:T1 (s
 int main(int argc, char **argv) {
     double endS = 3;
     double scale = 1;
+    std::string prevWd;
     std::vector<std::pair<std::string, double>> costSet;
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
@@ -686,6 +703,12 @@ int main(int argc, char **argv) {
             sscanf(v.c_str(), "%lf:%lf:%d", &t, &us, &core);
             sim_stalls.push_back({t * 1e6, us, core & 1});
         } else if (a == "--adc-reset") sim_resets.push_back(atof(next().c_str()) * 1e6);
+        else if (a == "--prev-wd") prevWd = next();
+        else if (a == "--adc-dead") {
+            double t0 = 0, t1 = 0;
+            sscanf(next().c_str(), "%lf:%lf", &t0, &t1);
+            sim_deadAt = t0 * 1e6; sim_aliveAt = t1 * 1e6;
+        }
         else if (a == "--no-pulse") sim_pulse = false;
         else if (a == "--board-costs") boardCosts();
         else if (a == "--fail-task") sim_failTask = next();
@@ -726,6 +749,10 @@ int main(int argc, char **argv) {
     std::stable_sort(sim_rx.begin(), sim_rx.end(),
                      [](const auto &x, const auto &y) { return x.first < y.first; });
     sim_endUs = endS * 1e6;
+    if (!prevWd.empty()) {                      // what hostWatchReader left in RTC memory
+        g_wdMagic = WD_MAGIC;
+        snprintf(g_wdNote, sizeof(g_wdNote), "%s", prevWd.c_str());
+    }
     sim_readerRunning = [] { return (__atomic_load_n(&g_xc.state, __ATOMIC_RELAXED) & 1) != 0; };
     sim_core[1].nextTick = 1000 + sim_tickPhase;   // each core has its own tick timer
     sim_level[P_CS] = 1;

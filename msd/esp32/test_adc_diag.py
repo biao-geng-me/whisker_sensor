@@ -200,7 +200,31 @@ def test_stream_against_fake(tmp_path, capsys):
     out = capsys.readouterr().out
     assert '"mode_name": "wide"' in out and "HEALTH busy" in out
     assert "{4000:" in out and "seq gaps 0" in out
+    assert "BEAT up" in out and "heartbeat: " in out
     assert (tmp_path / "s.bin").stat().st_size > 10000
+
+
+@pytest.mark.parametrize("dead", [False, True])
+def test_beat_against_fake(capsys, dead):
+    """beat: #BEAT lines in a text mode, BEAT frames in binary mode; a dead ADC fails."""
+    pytest.importorskip("serial")
+    import subprocess
+    root = Path(__file__).resolve().parents[2]
+    p = subprocess.Popen([sys.executable, "-u", str(root / "rpi" / "sim" / "fake_esp32.py")]
+                         + (["--adc-dead"] if dead else []),
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        port = p.stdout.readline().decode().strip()
+        rc = ad.main(["beat", "--port", port, "--secs", "4"])
+    finally:
+        p.kill()
+        p.wait()
+    cap = capsys.readouterr()
+    assert "host 'g'" in cap.out and "host 'B'" in cap.out and "boot: reset reason 1 (poweron)" in cap.out
+    if dead:
+        assert rc == 3 and "not converting" in cap.err and "ADC_DOWN" in cap.out
+    else:
+        assert rc == 0 and "heartbeat OK" in cap.out and "BOOT_CLOCK_OK" in cap.out
 
 
 def test_stream_watch_fails_loudly():

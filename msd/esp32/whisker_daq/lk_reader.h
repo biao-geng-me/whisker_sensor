@@ -13,7 +13,9 @@
 #define LK_TX_GUARD_US     6       // idle work only if the next DRDY is this far off (a
                                    // slightly late read is harmless except at a slot end,
                                    // which idle work never precedes)
-#define LK_TIMEOUT_MS      50      // no conversion for this long: re-init the ADC
+#define LK_TIMEOUT_MS      50      // no usable conversion for this long: re-init the ADC
+#define LK_UNREC_N         5       // this many failed re-inits in a row: UNRECOVERED, then
+#define LK_UNREC_RETRY_MS  5000    // ... one more re-init (and UNRECOVERED line) this often
 #ifndef LK_TRACE                   // host_sim hook: one line per reader step
 #define LK_TRACE(...)
 #endif
@@ -45,6 +47,10 @@ struct LockState {
     int32_t  lastK;                 // pos of the last conversion read (-1: none yet)
     uint8_t  curSel;
     uint32_t tSw, lastEdgeT, lastActT;
+    uint32_t lastGoodT;             // the last usable conversion (CRC ok, fresh, no RESET)
+    uint32_t haltT;                 // end of the last halt recovery
+    uint32_t lastSvcT;              // the last return from lkService
+    uint8_t  haltRun;               // halt recoveries since the last usable conversion
     int64_t  acc[NUM_SEL][NUM_ADC_CH];
     uint16_t cnt[NUM_SEL];
     bool     taint[NUM_SEL];
@@ -62,7 +68,7 @@ extern LockState g_lk;
 // ── Dual-core (C1): the reader task on core 1 and the host task on core 0 ───
 // Records the reader hands to the host (whisker_daq.ino formats and sends them).
 enum : uint8_t { XR_SCAN = 1, XR_HEALTH = 2, XR_MSG = 3 };
-enum : uint8_t { LKM_ADC_RESET = 1, LKM_HALT = 2 };
+enum : uint8_t { LKM_ADC_RESET = 1, LKM_HALT = 2, LKM_UNREC = 3, LKM_ADC_OK = 4 };
 struct XRec {
     uint8_t  kind, flags, mode, pad;
     uint32_t seq, tUs, durUs;       // SCAN; HEALTH: tUs = window length, us
@@ -70,7 +76,7 @@ struct XRec {
     union {
         int32_t    raw[NUM_OUT + 1];   // SCAN: codes by OUT number (as outRaw)
         LockHealth h;                  // HEALTH
-        uint32_t   msg[2];             // MSG: code, argument
+        uint32_t   msg[4];             // MSG: code, arguments (lkMsgText)
     };
 };
 #define LK_XQ_N  32                 // 128 ms of scans at 250 Hz
@@ -89,7 +95,7 @@ extern HostHealth g_hh;
 void lkHealthPayload(uint8_t *p, const LockHealth &h, uint32_t winUs, uint8_t mode,
                      const HostHealth &hh);
 // Text of a reader message (XR_MSG), for the host to log.
-void lkMsgText(char *buf, int size, uint32_t code, uint32_t arg, uint8_t mode);
+void lkMsgText(char *buf, int size, const uint32_t msg[4], uint8_t mode);
 
 bool lkTaskStart();                 // setup(), on core 1: the reader task, parked (false: failed)
 bool lkTaskOk();                    // the reader task exists
