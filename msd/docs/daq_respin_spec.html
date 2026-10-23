@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DAQ Respin Spec</title>
+<style>
+:root {
+  --bg: #fbfbfa; --fg: #1d1f22; --muted: #5d636b; --line: #dcdfe3; --card: #ffffff;
+  --accent: #2a62c9; --good: #1f7a46; --warn: #a15c00; --bad: #b3261e; --code: #f1f3f5;
+  --svg-fill: #eef3fc; --svg-fill2: #f3f6ef; --svg-fill3: #fbf1e6;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #15171a; --fg: #e5e7ea; --muted: #9aa1aa; --line: #33373d; --card: #1c1f23;
+    --accent: #7aa7ff; --good: #5cc48a; --warn: #f0a94a; --bad: #ff7b72; --code: #23272c;
+    --svg-fill: #1f2a3d; --svg-fill2: #222b20; --svg-fill3: #33281a;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #15171a; --fg: #e5e7ea; --muted: #9aa1aa; --line: #33373d; --card: #1c1f23;
+  --accent: #7aa7ff; --good: #5cc48a; --warn: #f0a94a; --bad: #ff7b72; --code: #23272c;
+  --svg-fill: #1f2a3d; --svg-fill2: #222b20; --svg-fill3: #33281a;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--fg); margin: 0; font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 980px; margin: 0 auto; padding: 24px 16px 64px; }
+h1 { font-size: 26px; margin: 0 0 4px; }
+h2 { font-size: 19px; margin: 36px 0 10px; padding-top: 8px; border-top: 1px solid var(--line); }
+h3 { font-size: 16px; margin: 20px 0 6px; }
+p, li { max-width: 78ch; }
+.sub { color: var(--muted); margin: 0 0 20px; }
+.box { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; margin: 14px 0; }
+.box.rec { border-left: 4px solid var(--accent); }
+.box.warn { border-left: 4px solid var(--warn); }
+.tw { overflow-x: auto; margin: 10px 0 16px; }
+table { border-collapse: collapse; font-variant-numeric: tabular-nums; min-width: 100%; font-size: 14px; }
+th, td { border-bottom: 1px solid var(--line); padding: 5px 10px; text-align: left; vertical-align: top; }
+th { color: var(--muted); font-weight: 600; }
+td.n { text-align: right; white-space: nowrap; }
+code { background: var(--code); padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+.good { color: var(--good); font-weight: 600; } .bad { color: var(--bad); font-weight: 600; } .warnc { color: var(--warn); font-weight: 600; }
+svg { width: 100%; height: auto; display: block; }
+svg text { fill: var(--fg); font: 13px system-ui, sans-serif; }
+svg .m { fill: var(--muted); font-size: 11px; }
+svg .b { stroke: var(--fg); stroke-width: 1.2; fill: var(--svg-fill); }
+svg .b2 { stroke: var(--fg); stroke-width: 1.2; fill: var(--svg-fill2); }
+svg .b3 { stroke: var(--fg); stroke-width: 1.2; fill: var(--svg-fill3); }
+svg .w { stroke: var(--fg); stroke-width: 1.3; fill: none; }
+svg .wa { stroke: var(--accent); stroke-width: 1.6; fill: none; }
+svg .wd { stroke: var(--muted); stroke-width: 1.2; fill: none; stroke-dasharray: 4 3; }
+.toc { columns: 2; font-size: 14px; } .toc a { color: var(--accent); text-decoration: none; }
+@media (max-width: 600px) { .toc { columns: 1; } h1 { font-size: 22px; } }
+</style>
+</head>
+<body>
+<main>
+<h1>Whisker DAQ board respin: drop the mux, one ADC channel per gauge</h1>
+<p class="sub">MSD P25937 follow-up · draft 2026-10-23 · based on bench data from 2026-10-23 (<code>/scratch/bigeme/whisker_dev/bench_1023/</code>) and ADS131M04 datasheet SBAS890D</p>
+
+<div class="box rec">
+<b>Recommendation.</b> Replace the 2× CD4097B mux + 1× ADS131M04 with <b>4× ADS131M08</b>: 32 simultaneous channels, one per gauge, all clocked from one 8 MHz CLKIN and started by one SYNC pulse. Keep the 32 INA351 in the first spin (option A) but fix their REF so the ADC measures INA output against REF. Prototype the INA-less front end (option B) on the bench before deciding whether a later spin drops the INAs. On today's board data, option A halves the noise at the same 62.5 Hz rate (0.95 vs 1.9 µV at the bridge, 0.58 vs 1.15 µε), or gives 125 Hz at lower noise than the mux does at 62.5 Hz. It also removes the settle/discard scan machinery and the dual-core requirement.
+</div>
+
+<div class="toc">
+<ol>
+<li><a href="#why">Why: what the mux costs</a></li>
+<li><a href="#arch">Proposed architecture</a></li>
+<li><a href="#fe">Front end: option A (keep INA) and B (direct)</a></li>
+<li><a href="#rate">Clock, OSR and comb rejection</a></li>
+<li><a href="#perf">Expected performance</a></li>
+<li><a href="#power">Power, ground and layout</a></li>
+<li><a href="#fw">Firmware and host changes</a></li>
+<li><a href="#pre">Bench checks before committing</a></li>
+<li><a href="#open">Open questions</a></li>
+</ol>
+</div>
+
+<h2 id="why">1. Why: what the mux costs</h2>
+<p>Each ADC channel serves 8 mux positions (7 used), so every gauge is observed for only one slot of the scan, minus the settle discard. In quiet mode (62.5 Hz, OSR 512) that is about 1.9 ms of every 16 ms, or 12 % of the time. The board's noise is broadband input noise (about 1 µV/√Hz at the ADC input, 1.36 µV/√Hz below 31 Hz), so the short window costs directly. A comb burst held on one mux select (no switching) lets us compare the two readouts on the same data:</p>
+<div class="tw"><table>
+<tr><th>Readout of W2_A (same burst, CLKIN 0.8 MHz, OSR 128)</th><th>noise at ADC input</th><th>at bridge</th><th>strain (G=10)</th></tr>
+<tr><td>Mux-like: 1.9 ms mean every 16 ms (62.5 Hz)</td><td class="n">19.0 µV</td><td class="n">1.9 µV</td><td class="n">1.15 µε</td></tr>
+<tr><td>Continuous 8 ms mean (125 Hz)</td><td class="n">11.6 µV</td><td class="n">1.16 µV</td><td class="n">0.70 µε</td></tr>
+<tr><td>Continuous 16 ms mean (62.5 Hz)</td><td class="n">9.5 µV</td><td class="n">0.95 µV</td><td class="n">0.58 µε</td></tr>
+<tr><td>Board, quiet mode OSR 512 (mux scanning), for reference</td><td class="n">16–19 µV</td><td class="n">1.6–1.9 µV</td><td class="n">1.0–1.15 µε</td></tr>
+</table></div>
+<p>The gain is 2×, not the 2.9× the 12 % duty cycle alone predicts. A slow, 1/f-like part of the noise (amp, gauge or excitation) does not average down. The burst is 2.35 s (147 scans), so the stds are good to about ±6 %. The mux also brings:</p>
+<ul>
+<li>A settle tail after every switch (τ 70–90 µs, ~1.4 % of the step), handled by discarding conversions.</li>
+<li>Crosstalk between slots and channels that are not sampled at the same instant (A and B gauges of one whisker are about 7 ms apart).</li>
+<li>A dead position on mux 1 (W3_B, W8_B), which limits the board to 12 working whiskers.</li>
+<li>A locked-scan firmware with slot bookkeeping, a resync bug fixed today, and a wide mode (250 Hz) that needs a dual-core reader because it reads 31 k conversions/s.</li>
+</ul>
+
+<h2 id="arch">2. Proposed architecture</h2>
+<svg viewBox="0 0 900 425" role="img" aria-label="Block diagram: 32 quarter bridges feed 32 INA351, grouped by 8 into four ADS131M08, sharing CLKIN, SPI and SYNC to an ESP32.">
+  <rect class="b3" x="10" y="40" width="130" height="320" rx="6"/>
+  <text x="75" y="64" text-anchor="middle">32 quarter</text><text x="75" y="80" text-anchor="middle">bridges</text>
+  <text class="m" x="75" y="100" text-anchor="middle">350 Ω gauge +</text><text class="m" x="75" y="114" text-anchor="middle">completion R</text>
+  <text class="m" x="75" y="340" text-anchor="middle">Vex (own LDO)</text>
+  <rect class="b2" x="180" y="40" width="130" height="320" rx="6"/>
+  <text x="245" y="64" text-anchor="middle">32× INA351</text>
+  <text class="m" x="245" y="84" text-anchor="middle">G = 10 (option A)</text>
+  <text class="m" x="245" y="100" text-anchor="middle">REF = VREF_AMP</text><text class="m" x="245" y="114" text-anchor="middle">(buffered)</text>
+  <text class="m" x="245" y="330" text-anchor="middle">option B: removed,</text><text class="m" x="245" y="344" text-anchor="middle">bridge → ADC PGA</text>
+  <g>
+    <rect class="b" x="360" y="40" width="160" height="66" rx="6"/><text x="440" y="66" text-anchor="middle">ADS131M08 #1</text><text class="m" x="440" y="84" text-anchor="middle">W1–W4 (8 gauges)</text>
+    <rect class="b" x="360" y="125" width="160" height="66" rx="6"/><text x="440" y="151" text-anchor="middle">ADS131M08 #2</text><text class="m" x="440" y="169" text-anchor="middle">W5–W8</text>
+    <rect class="b" x="360" y="210" width="160" height="66" rx="6"/><text x="440" y="236" text-anchor="middle">ADS131M08 #3</text><text class="m" x="440" y="254" text-anchor="middle">W9–W12</text>
+    <rect class="b" x="360" y="295" width="160" height="66" rx="6"/><text x="440" y="321" text-anchor="middle">ADS131M08 #4</text><text class="m" x="440" y="339" text-anchor="middle">W13–W16</text>
+  </g>
+  <path class="w" d="M140 73 H180 M140 158 H180 M140 243 H180 M140 328 H180"/>
+  <path class="w" d="M310 73 H360 M310 158 H360 M310 243 H360 M310 328 H360"/>
+  <text class="m" x="335" y="66" text-anchor="middle">8 diff</text>
+  <rect class="b" x="690" y="120" width="190" height="160" rx="6"/>
+  <text x="785" y="146" text-anchor="middle">ESP32</text>
+  <text class="m" x="785" y="166" text-anchor="middle">LEDC CLKIN 8 MHz (80/10)</text>
+  <text class="m" x="785" y="182" text-anchor="middle">SPI + DMA, 4 CS</text>
+  <text class="m" x="785" y="198" text-anchor="middle">SYNC/RESET, DRDY ISR</text>
+  <text class="m" x="785" y="214" text-anchor="middle">boxcar 16 ms → 62.5 Hz</text>
+  <text class="m" x="785" y="230" text-anchor="middle">same 32-ch frame protocol</text>
+  <text class="m" x="785" y="262" text-anchor="middle">USB → BlueOS Pi</text>
+  <path class="wa" d="M690 140 H600 V73 H520 M600 158 H520 M600 140 V328 H520 M600 243 H520"/>
+  <text x="604" y="30" class="m">CLKIN (fan-out buffer,</text><text x="604" y="44" class="m">series-terminated)</text>
+  <path class="w" d="M690 200 H620 V90 H520 M620 175 H520 M620 200 V345 H520 M620 260 H520"/>
+  <text x="360" y="396" class="m">solid: SCLK / MOSI / MISO shared, CS1–4 separate · blue: CLKIN</text>
+  <path class="wd" d="M690 260 H640 V100 H520 M640 182 H520 M640 260 V352 H520 M640 268 H520"/>
+  <text x="360" y="414" class="m">dashed: common SYNC/RESET; DRDY from #1 (others to spare GPIOs for checks)</text>
+</svg>
+
+<div class="tw"><table>
+<tr><th>Item</th><th>Choice</th><th>Notes</th></tr>
+<tr><td>ADC</td><td>4× ADS131M08</td><td>Same family as today's M04: same SPI protocol, CRC, internal 1.2 V reference and noise table. 8 simultaneous channels each. GAIN1/GAIN2 registers cover 4 channels each (reg 0x05 is GAIN2 on the M08). Alternative: 8× ADS131M04 (known part, more packages).</td></tr>
+<tr><td>Clock</td><td>One CLKIN from ESP32 LEDC, 8 MHz = 80 MHz ÷ 10</td><td>Clean integer division of the ESP32 clock, so conversions stay locked to the comb (section 4). Fan out through a small LVCMOS buffer with series resistors, short equal traces. 8.192 MHz is not reachable cleanly from LEDC.</td></tr>
+<tr><td>Sync</td><td>One SYNC/RESET line to all four</td><td>A low pulse of 1–2047 tCLKIN resynchronises conversions (datasheet 8.5.1.6). With a common CLKIN, all four then convert in lockstep and one DRDY is enough to time reads.</td></tr>
+<tr><td>SPI</td><td>Shared SCLK/MOSI/MISO, CS per device</td><td>The M0x has no daisy chain; the datasheet expects discrete CS lines. Better: two ESP32 SPI hosts, two ADCs each, to halve bus time (section 4).</td></tr>
+<tr><td>DRDY</td><td>#1 to an interrupt pin; #2–4 to spare GPIOs</td><td>The spares are for verifying lockstep on the bench, not needed in operation.</td></tr>
+<tr><td>Channel map</td><td>W1–W4 on ADC #1, W5–W8 on #2, …</td><td>Keep A and B of one whisker on the same device. The frame stays 32 channels in OUT order W1_A…W16_B.</td></tr>
+</table></div>
+
+<h2 id="fe">3. Front end: option A (keep INA) and B (direct)</h2>
+<h3>Option A (first spin): keep the INA351, fix REF</h3>
+<ul>
+<li>The INA351 stays one per gauge at G = 10 (GS to GND as now). G = 20 is possible if bridge offsets are trimmed (section 6).</li>
+<li>Generate one <b>buffered</b> amp reference VREF_AMP of about 1.2 V (op-amp follower from a divider off a quiet rail) for all INA REF pins, and route it to every ADC <b>AINxN</b>. The ADC then measures INA output minus REF, centred in its ±1.2 V range. This fixes today's mismatch: the schematic has REF at 1.65 V but AINxN on GND, and the built board has a reworked 0.294 V divider with unexplained extra load.</li>
+<li>At ADC gain 1–4 the absolute input range is AGND − 1.3 V to AVDD, so 1.2 V ± 1.2 V fits at AVDD 3.3 V. Input impedance at gain ≤ 4 is about 330 kΩ × 4.096 MHz / fMOD (≈ 340 kΩ at 8 MHz), which the INA output drives easily.</li>
+<li>Lowest risk: the analog chain is unchanged, and only the mux comes out.</li>
+</ul>
+<h3>Option B (later spin, if the bench check supports it): bridge straight into the ADC PGA</h3>
+<ul>
+<li>At PGA 8–128 the ADC has an input precharge buffer (input impedance ≥ 1 MΩ), so the 175 Ω bridge can drive it directly.</li>
+<li>Input-referred ADC noise at about 1 kSPS (datasheet Table 7-1, 8.192 MHz): 1.74 µVrms at G = 8 and 0.77 µVrms at G ≥ 32. With a sinc3 noise bandwidth of about 0.275 × data rate, that is about 105 and 46 nV/√Hz. Today's chain measures about 100 nV/√Hz referred to the bridge (136 below 31 Hz).</li>
+<li><span class="warnc">Constraint: common mode.</span> At G ≥ 8 the absolute input must stay below AVDD − 1.8 V = 1.5 V at 3.3 V. A 3.3 V quarter bridge sits at 1.65 V, which is out of range. Fixes: excitation 2.5 V (midpoint 1.25 V, costs 24 % of the signal), a bridge biased below mid-supply, or AVDD 3.6 V (limit 1.8 V).</li>
+<li><span class="warnc">Constraint: offset range.</span> Full scale at the bridge is ±150 mV at G = 8 and ±37.5 mV at G = 32. Today W1_A is about 116 mV off balance at the bridge. G ≥ 16 needs completion resistors matched to the gauges (or a trim). The ADC's offset register is digital and doesn't extend range.</li>
+<li>Range is not an issue: 606 µε per mV at the bridge, so ±37.5 mV is ±22,000 µε.</li>
+<li>Saves 32 INA351 and their REF network. Whether it is quieter depends on whether the INA sets today's floor; that's the first bench check in section 8.</li>
+</ul>
+
+<h2 id="rate">4. Clock, OSR and comb rejection</h2>
+<p>The interference comb on today's board sits at multiples of 125 Hz and is locked to the ESP32 clock (within ~20 ppm). The respin should remove its source (section 6), but the data path should also reject it. Averaging exactly 16 ms of conversions puts a null on every multiple of 62.5 Hz, so it removes the comb completely rather than folding it to a DC offset. The condition is an integer number of conversions in 16 ms. With CLKIN = 80 MHz / n, conversions per 16 ms = 640 000 / (n · OSR):</p>
+<div class="tw"><table>
+<tr><th>CLKIN</th><th>OSR</th><th>data rate</th><th>conv / 16 ms</th><th>conv / 8 ms</th><th>SPI bits per conversion (4 ADCs)</th><th>bus time at 20 MHz</th></tr>
+<tr><td>8 MHz</td><td>256</td><td class="n">15 625 SPS</td><td class="n">250</td><td class="n">125</td><td class="n">960</td><td class="n">48 µs of 64 µs</td></tr>
+<tr><td>8 MHz</td><td><b>512</b></td><td class="n">7 812.5 SPS</td><td class="n"><b>125</b></td><td class="n">62.5 ✗</td><td class="n">960</td><td class="n">48 µs of 128 µs</td></tr>
+<tr><td>8 MHz</td><td>1024+</td><td class="n">≤ 3 906 SPS</td><td class="n">✗ not integer</td><td class="n">✗</td><td class="n">960</td><td class="n">—</td></tr>
+<tr><td>3.2 MHz (n = 25)</td><td>1024</td><td class="n">1 562.5 SPS</td><td class="n">25</td><td class="n">12.5 ✗</td><td class="n">960</td><td class="n">48 µs of 640 µs</td></tr>
+</table></div>
+<ul>
+<li><b>Default: 8 MHz, OSR 512, mean of 125 conversions → 62.5 Hz.</b> A 125 Hz output needs OSR 256 (mean of 125 per 8 ms).</li>
+<li>Bus load: each M08 frame is 10 × 24-bit words (status, 8 channels, CRC) = 240 bits, so 4 devices = 960 bits per conversion. At OSR 512 and 20 MHz SPI (datasheet limit tc(SC) ≥ 40 ns, i.e. 25 MHz), that is 38 % bus time. With two SPI hosts (2 ADCs each) and DMA started from the DRDY ISR, the CPU only accumulates sums. The ESP32 handles 7.8 k interrupts/s without the 32 µs deadlines that broke today's wide mode.</li>
+<li>The 3.2 MHz / OSR 1024 row is a fallback if the bus or ISR load proves too high: 7.5 % bus time, with the same 16 ms null. Check the noise at that clock against Table 7-1 first.</li>
+<li>A boxcar's sidelobes are poor away from its nulls. If out-of-band interference other than the comb turns up, add a second stage (e.g. a 2-stage boxcar, 2 × 16 ms) at the cost of latency.</li>
+</ul>
+
+<h2 id="perf">5. Expected performance</h2>
+<div class="tw"><table>
+<tr><th>Configuration</th><th>output rate</th><th>noise at bridge</th><th>strain</th><th>basis</th></tr>
+<tr><td>Today: mux, quiet OSR 512</td><td class="n">62.5 Hz</td><td class="n">1.6–1.9 µV</td><td class="n">1.0–1.15 µε</td><td>measured on board</td></tr>
+<tr><td>Option A, 16 ms mean</td><td class="n">62.5 Hz</td><td class="n">≈ 0.95 µV</td><td class="n">≈ 0.58 µε</td><td>emulated from burst (no mux)</td></tr>
+<tr><td>Option A, 8 ms mean</td><td class="n">125 Hz</td><td class="n">≈ 1.16 µV</td><td class="n">≈ 0.70 µε</td><td>emulated from burst</td></tr>
+<tr><td>Option B, PGA 32, 16 ms mean</td><td class="n">62.5 Hz</td><td class="n">0.2–0.95 µV</td><td class="n">0.12–0.58 µε</td><td>lower bound: ADC noise only; upper: if the floor is not the INA</td></tr>
+</table></div>
+<p>Further gains:</p>
+<ul>
+<li>All 32 gauges are sampled at the same instant.</li>
+<li>No settle tail and no mux crosstalk.</li>
+<li>All 16 whiskers are usable, with no dead mux slot.</li>
+</ul>
+<p>The burst was taken at CLKIN 0.8 MHz, so the ADC's share may drop slightly at 8 MHz. The 845 Hz ripple and the 1/f part are not fixed by the ADC change; they are what section 6 addresses.</p>
+
+<h2 id="power">6. Power, ground and layout</h2>
+<ul>
+<li><b>Ground:</b> a solid ground plane, and a connector to the ESP32 with several ground pins interleaved with the fast lines (CLKIN, SCLK). Today the board only works with exactly one ground wire twisted with CLKIN: two wires cause a CRC storm and a loose one gives ~60 CRC/s. Better still, put the ESP32 module on the board so there is no inter-board ground at all.</li>
+<li><b>Excitation:</b> give the bridges their own low-noise LDO after the TPSM84203 buck, with an LC post-filter. The 845 Hz 3V3 ripple reaches the data through bridge imbalance. The bridge load is about 0.6 A at 3.3 V for 32 bridges, so size the LDO and its heat for that, or reduce it with option B's lower excitation.</li>
+<li><b>Balance:</b> use completion resistors matched to the gauge (0.1 %, ~352 Ω including wiring). This reduces both ripple leakage and offset, and it's needed for higher gain. Add footprints for a per-bridge trim if the gauge resistances spread.</li>
+<li><b>ADC supplies:</b> AVDD from a quiet analog rail, DVDD from the digital 3.3 V, decoupled per device as in the datasheet layout example.</li>
+<li><b>CLKIN:</b> one buffer, series-terminated branches, kept away from the analog inputs. It is the only fast signal near the converters.</li>
+<li><b>Comb source:</b> USB/ESP32 activity locked to the ESP32 clock, with an 8 ms period. Keep the USB connector and the ESP32's supply return away from the analog section, so that the boxcar null is a second line of defence rather than the only one.</li>
+</ul>
+
+<h2 id="fw">7. Firmware and host changes</h2>
+<ul>
+<li><b>Init:</b> four devices on the same register map, the same CRC checks and the STATUS DRDY check. One SYNC pulse after config, then verify lockstep on the spare DRDY GPIOs.</li>
+<li><b>Reader:</b> a DRDY ISR queues one DMA transaction per SPI host; the completion handler adds to 32 running sums. Every 125 conversions it emits a frame. No slots, discard counts, settle timing or mux writes.</li>
+<li><b>Protocol:</b> keep the binary frame (32 channels, seq, t_us, flags) and INFO/HEALTH, so <code>whisker_link</code>, <code>daq_server</code>, <code>convert</code> and <code>wavi_py</code> don't change. INFO gains the device count and output period.</li>
+<li><b>Modes:</b> 62.5 Hz (OSR 512) and 125 Hz (OSR 256), plus a raw burst mode for diagnostics (all 32 channels at the native rate, for spectra).</li>
+<li><b>Health:</b> CRC, stale and overrun counts per device, plus DRDY latency. A dual-core reader is not required. Whether to keep it pinned to core 1 is a robustness choice.</li>
+</ul>
+
+<h2 id="pre">8. Bench checks before committing</h2>
+<div class="box warn">
+<ol>
+<li><b>Does the INA set the floor?</b> Wire one quarter bridge (2.5 V excitation or a divided midpoint below 1.5 V) straight into an ADC channel at PGA 8 and 32: a spare ADS131M04/M08 breakout, or one lifted mux output on today's board. Take a long burst and compare it with the same gauge through its INA. This decides option B.</li>
+<li><b>No-mux floor at the real clock.</b> On today's board, take a long burst on one select (e.g. <code>--n 16384</code>, so ~20 s) at CLKIN 8 MHz, OSR 512, and repeat the 16 ms boxcar emulation. This confirms the 0.95 µV estimate at the clock the respin will use. Today's burst ran at 0.8 MHz and only lasted 2.35 s.</li>
+<li><b>Where the 1/f part comes from.</b> Burst with a fixed precision resistor in place of the gauge (same bridge), and with the bridge excitation fed from a bench LDO. This separates gauge, excitation and amp noise.</li>
+<li><b>INA351 datasheet noise</b> (voltage density and 1/f corner at G = 10), compared with the ~100 nV/√Hz measured.</li>
+</ol>
+</div>
+
+<h2 id="open">9. Open questions</h2>
+<ul>
+<li><b>Ratiometric reference.</b> As far as the M04 datasheet goes, the M0x family has only an internal 1.2 V reference, with no external REF input. Excitation noise times bridge imbalance is therefore not cancelled the way a ratiometric ADC would cancel it. Confirm for the M08. If excitation noise turns out to dominate (check 3), consider an ADC with an external reference or a cleaner excitation.</li>
+<li><b>ADS131M08 package, cost and availability</b> for the MSD build, and its exact noise and power numbers (expected to match the M04 per channel; to be checked in its own datasheet).</li>
+<li><b>Excitation voltage</b> for option B (2.5 V vs AVDD 3.6 V), and whether 0.6 A of bridge current is acceptable on the ROV's 5 V payload supply.</li>
+<li><b>ESP32 on board or plug-in DevKit.</b> On-board removes the ground problem but changes the MSD layout more.</li>
+<li><b>Bandwidth need.</b> Is 31 Hz (62.5 Hz output) enough for the ROV experiments, or is 125 Hz (OSR 256, 4× the SPI rate) the target?</li>
+</ul>
+</main>
+</body>
+</html>
