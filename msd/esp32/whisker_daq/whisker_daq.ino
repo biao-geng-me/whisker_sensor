@@ -374,17 +374,45 @@ static bool txqPush(const uint8_t *d, uint32_t n) {
     g_txqHead += n;
     return true;
 }
+// UART0's hardware TX FIFO (128 B), estimated from what we wrote and the baud
+// rate. Serial.write only puts bytes in the driver's ring buffer; the driver's
+// refill ISR moves them to the FIFO when the FIFO is below 10 bytes. A write
+// while the FIFO still holds more than that defers the ISR to whenever the
+// FIFO drains, i.e. to a point of the conversion grid we don't control. So in
+// streaming, write only when the FIFO is (nearly) empty, and no more than it
+// holds: the refill then runs inside our own write, in a window we chose.
+// Bench 2026-10-23, OSR 256: one overrun per HEALTH frame, with reads
+// stretched to 53-65 us (an ISR inside the read).
+#define UART_FIFO_CAP   120                      // of 128, a little margin
+#define UART_FIFO_LOW   8                        // below the driver's threshold of 10
+static float    g_uFifo = 0;                     // bytes in the FIFO at g_uFifoT
+static uint32_t g_uFifoT = 0;
+static inline float uartFifoNow(uint32_t now) {
+    float f = g_uFifo - (float)(now - g_uFifoT) * (SERIAL_BAUD / 10 / 1e6f);
+    return f > 0 ? f : 0;
+}
+
 // Writes up to maxBytes of queued data (one contiguous piece); returns bytes written.
-static uint32_t txqWrite(uint32_t maxBytes) {
+// paced: also keep the UART FIFO from overflowing (streaming; see above).
+static uint32_t txqWrite(uint32_t maxBytes, bool paced = false) {
     uint32_t used = txqUsed();
     if (!used) return 0;
     uint32_t off = g_txqTail % TXQ_SIZE;
     uint32_t n = min(min(used, maxBytes), (uint32_t)(TXQ_SIZE - off));
+    uint32_t now = micros();
+    float fifo = uartFifoNow(now);
+    if (paced) {
+        if (fifo > UART_FIFO_LOW) return 0;
+        uint32_t room = UART_FIFO_CAP - (uint32_t)ceilf(fifo);
+        if (room < n) n = room;
+    }
     int room = Serial.availableForWrite();
     if (room <= 0) return 0;
     if ((uint32_t)room < n) n = room;
     n = Serial.write(g_txq + off, n);
     g_txqTail += n;
+    g_uFifo = fifo + n;
+    g_uFifoT = now;
     return n;
 }
 static void txqFlushBlocking() {
@@ -2133,7 +2161,7 @@ static void lkService(uint32_t budgetUs) {
             g_lk.pendingSend = false;
             send_scan();                     // packs into the TX queue
         } else if (txqUsed()) {
-            uint32_t n = txqWrite(g_lk.T >= 64 ? 48 : 16);
+            uint32_t n = txqWrite(g_lk.T >= 64 ? 48 : 16, true);
             uint32_t dt = micros() - w0;
             if (n && dt > g_lk.h.txMax) g_lk.h.txMax = (uint16_t)min<uint32_t>(dt, 65535);
         } else {

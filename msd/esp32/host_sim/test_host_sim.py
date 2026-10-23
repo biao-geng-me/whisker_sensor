@@ -155,3 +155,16 @@ def test_overrun_realigns(sim, tmp_path, mcmd, T, period):
             for o in range(1, 33):
                 if o not in SKIPPED6:
                     assert abs(s.raw[o - 1] - expected(o)) < (300 if period == 4000 else 60)
+
+
+# Bench 2026-10-23, OSR 256 on one core: one overrun per HEALTH frame. A write
+# while the UART FIFO still held data deferred the driver's refill ISR to a
+# random point of the grid (here: --board-costs, calibrated to the bench).
+@pytest.mark.parametrize("mcmd", ["M1 200 256;", "M1;", "M1 200 256 8000;"])
+def test_quiet_board_costs_no_overrun(sim, tmp_path, mcmd):
+    scans, _, health, _ = run(sim, tmp_path / "o.bin", "--end", "5.4", "--board-costs",
+                              "--cmd", "1.0:S0123457;", "--cmd", f"1.0:{mcmd}", "--cmd", "1.3:B")
+    assert len(health) >= 3
+    assert sum(h.overrun for h in health) == 0 and sum(h.missed for h in health) == 0
+    assert max(h.read_max_us for h in health) < 30            # no ISR inside a read
+    assert not [s for s in scans if s.flags]
