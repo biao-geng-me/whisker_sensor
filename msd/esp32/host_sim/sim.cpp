@@ -30,15 +30,20 @@
 // out on 1 ms tick boundaries.
 //
 // Usage: sim --end 3 --cmd 1.0:S0123457; --cmd 1.0:M2; --cmd 1.05:B --out out.bin
-//        [--stall T:US[:CORE]] (core 0 default) [--adc-reset T] [--seed N]
+//        [--stall T:US[:CORE]] (core 1 default: the streaming reader's) [--adc-reset T] [--seed N]
 //        [--cost-scale X] [--no-pulse]
 //        [--board-costs] (Serial/UART costs calibrated to the bench; apply before --cost)
 //        [--cost NAME=US] (one CPU cost, e.g. ser_call=55; names as in struct Costs)
+//        [--idf-log T:TEXT]  (an ESP-IDF component logs "E (ms) TEXT" at T)
 //        [--trace T0:T1]  (one stderr line per reader step between T0 and T1 s)
 #include "Arduino.h"
 #include "SPI.h"
 #include "soc/gpio_reg.h"
 #include "soc/soc.h"
+#include "esp_log.h"
+#include "esp_system.h"
+#include "esp_task_wdt.h"
+#include <set>
 
 #include <array>
 #include <chrono>
@@ -65,7 +70,9 @@ struct Costs {
 // a <= 48 B Serial.write incl. the refill ISR it triggers, lat max ~73 us at
 // OSR 256). Read cost is already close (21-22 us at 8 MHz).
 static void boardCosts() {
-    C.ser_call = 20; C.ser_byte = 0.1; C.uisr = 8; C.uisr_byte = 0.5; C.tick = 3;
+    // tick: ~8 us reproduces bench r3 (C0 reading on core 0, DRDY ISR held back
+    // by core 1's tick: one edgeless + stale read per LCM(1 ms, T))
+    C.ser_call = 20; C.ser_byte = 0.1; C.uisr = 8; C.uisr_byte = 0.5; C.tick = 8;
 }
 
 static double sim_t = 0;                  // virtual time of the running context, us
@@ -73,7 +80,7 @@ static void (*sim_isr)(void) = nullptr;
 static bool sim_isrPending = false;
 static double sim_isrDue = 0;
 static std::mt19937 sim_rng(1);
-// --stall T:US[:CORE]: at T, CORE (default 0) is taken for US (a higher-priority
+// --stall T:US[:CORE]: at T, CORE (default 1) is taken for US (a higher-priority
 // task or an interrupt hog); the ADC and the ISRs of the other core keep
 // running. It can land anywhere, also inside an SPI read (CS low).
 struct SimStall { double t, us; int core; };
@@ -278,6 +285,8 @@ struct SimCore {
     std::deque<SimTask *> queued;           // created while another task had the core
     double nextTick = 1000;
     double busyUntil = 0;                   // an ISR or stall holds the core until then
+    double isrUntil = 0;                    // an ISR (or the tick) runs until then; ISRs of
+                                            // the same level don't nest, the next one waits
 };
 static SimCore sim_core[2];
 static std::mutex sim_mx;
@@ -287,6 +296,8 @@ static bool sim_isrCtx = false;             // running an ISR body (time only, n
 static int sim_drdyCore = 1, sim_uartCore = 1;
 static double sim_endUs = 3e6;
 static std::vector<double> sim_resets;
+static std::vector<std::pair<double, std::string>> sim_idfLogs;   // --idf-log T:TEXT
+static void simIdfLog(const char *fmt, ...);
 static void simFinish();
 
 // An ISR (or a stall) of `cost` us on core k at time te: its task is pushed back.
@@ -298,15 +309,18 @@ static void preempt(int k, double te, double cost) {
     else if (c.t < te + cost) c.t = te + cost;    // a wake-up can't land inside it
 }
 static void runIsr(int k, double te, void (*body)(), double extra) {
+    sim_core[k].isrUntil = te;              // (set properly below, after the body)
     sim_isrCtx = true;
     sim_t = te;
     body();
     double cost = sim_t - te + extra;
     sim_isrCtx = false;
     preempt(k, te, cost);
+    sim_core[k].isrUntil = te + cost;
 }
 static void drdyIsrBody() { sim_isr(); }
 static double sim_uCost = 0;
+static uint64_t sim_isrLate = 0;            // DRDY ISRs held back by another ISR or the tick
 static void uartIsrBody() { sim_uCost = uartIsr(); }
 
 // Device events up to the earliest core clock, then hand the run to that core.
@@ -317,22 +331,35 @@ static void schedule() {
         int kind = -1, arg = 0;
         auto cand = [&](double t, int k, int a = 0) { if (t < te) { te = t; kind = k; arg = a; } };
         cand(adc.nextConv, 0);
-        if (sim_isrPending) cand(sim_isrDue, 1);
-        cand(uartIsrDue(), 2);
+        if (sim_isrPending) cand(std::max(sim_isrDue, sim_core[sim_drdyCore].isrUntil), 1);
+        if (sim_uRing) cand(std::max(uartIsrDue(), sim_core[sim_uartCore].isrUntil), 2);
         if (C.tick > 0) for (int k = 0; k < 2; k++) cand(sim_core[k].nextTick, 3, k);
         for (size_t i = 0; i < sim_stalls.size(); i++) if (sim_stalls[i].us > 0) cand(sim_stalls[i].t, 4, (int)i);
         for (size_t i = 0; i < sim_resets.size(); i++) if (sim_resets[i] > 0) cand(sim_resets[i], 5, (int)i);
+        for (size_t i = 0; i < sim_idfLogs.size(); i++) if (sim_idfLogs[i].first > 0) cand(sim_idfLogs[i].first, 7, (int)i);
         cand(sim_endUs, 6);
         if (te > G) break;
         sim_t = te;
         switch (kind) {
             case 0: adc.complete(); adc.nextConv += adc.T; break;
-            case 1: sim_isrPending = false; runIsr(sim_drdyCore, te, drdyIsrBody, C.isr); break;
+            case 1:
+                if (te > sim_isrDue + 0.5) sim_isrLate++;
+                sim_isrPending = false;
+                runIsr(sim_drdyCore, te, drdyIsrBody, C.isr);
+                break;
             case 2: runIsr(sim_uartCore, te, uartIsrBody, 0); preempt(sim_uartCore, te, sim_uCost); break;
-            case 3: preempt(arg, te, C.tick); sim_core[arg].nextTick += 1000; break;
+            case 3:
+                preempt(arg, te, C.tick);
+                sim_core[arg].isrUntil = std::max(sim_core[arg].isrUntil, te + C.tick);
+                sim_core[arg].nextTick += 1000;
+                break;
             case 4: preempt(sim_stalls[arg].core, te, sim_stalls[arg].us); sim_stalls[arg].us = 0; break;
             case 5: adc.reset(); sim_resets[arg] = 0; break;
             case 6: simFinish(); break;
+            case 7:
+                simIdfLog("E (%lu) %s\r\n", (unsigned long)(te / 1000), sim_idfLogs[arg].second.c_str());
+                sim_idfLogs[arg].first = 0;
+                break;
         }
     }
     // the earliest core runs next (a tie keeps the current one)
@@ -505,6 +532,41 @@ static std::vector<std::pair<double, std::string>> sim_rx;   // (time, bytes)
 static size_t sim_rxItem = 0, sim_rxPos = 0;
 static std::vector<uint8_t> sim_tx;
 static std::string sim_outPath = "sim_out.bin";
+void HardwareSerial::setDebugOutput(bool) {}
+
+// ---------------------------------------------------------------- ESP-IDF log / TWDT
+static vprintf_like_t sim_logHook = nullptr;
+static uint64_t sim_rawLogLines = 0, sim_twdtErrors = 0;
+static std::set<void *> sim_twdtTasks;
+vprintf_like_t esp_log_set_vprintf(vprintf_like_t f) { vprintf_like_t o = sim_logHook; sim_logHook = f; return o; }
+// An ESP-IDF component logs: through the hook, or raw into UART0 (past the driver).
+static void simIdfLog(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    if (sim_logHook) {
+        sim_logHook(fmt, ap);
+    } else {
+        char b[256];
+        int n = vsnprintf(b, sizeof(b), fmt, ap);
+        if (n > 0) sim_tx.insert(sim_tx.end(), b, b + std::min(n, (int)sizeof(b) - 1));
+        sim_rawLogLines++;
+    }
+    va_end(ap);
+}
+esp_err_t esp_task_wdt_add(TaskHandle_t t) { sim_twdtTasks.insert(t ? t : sim_self); return 0; }
+esp_err_t esp_task_wdt_delete(TaskHandle_t t) { sim_twdtTasks.erase(t ? t : sim_self); return 0; }
+esp_err_t esp_task_wdt_reset() {
+    if (sim_twdtTasks.count(sim_self)) return 0;
+    sim_twdtErrors++;
+    simIdfLog("E (%lu) task_wdt: esp_task_wdt_reset(707): task not found\r\n",
+              (unsigned long)(sim_t / 1000));
+    return 0x105;                            // ESP_ERR_NOT_FOUND
+}
+void esp_restart() {
+    fprintf(stderr, "sim: esp_restart() at %.6f s\n", sim_t / 1e6);
+    simFinish();
+    _exit(4);
+}
 size_t HardwareSerial::setTxBufferSize(size_t n) { sim_uRingCap = n; return n; }
 void HardwareSerial::begin(unsigned long) { sim_uartCore = sim_self->core; }
 int HardwareSerial::available() {
@@ -579,12 +641,17 @@ int main(int argc, char **argv) {
         } else if (a == "--stall") {
             std::string v = next();
             double t = 0, us = 0;
-            int core = 0;
+            int core = 1;                    // default: the reader's core when streaming
             sscanf(v.c_str(), "%lf:%lf:%d", &t, &us, &core);
             sim_stalls.push_back({t * 1e6, us, core & 1});
         } else if (a == "--adc-reset") sim_resets.push_back(atof(next().c_str()) * 1e6);
         else if (a == "--no-pulse") sim_pulse = false;
         else if (a == "--board-costs") boardCosts();
+        else if (a == "--idf-log") {
+            std::string v = next();
+            size_t c = v.find(':');
+            sim_idfLogs.push_back({atof(v.substr(0, c).c_str()) * 1e6, v.substr(c + 1)});
+        }
         else if (a == "--cost") {                // --cost ser_call=50 (us), after --cost-scale
             std::string v = next();
             size_t c = v.find('=');
@@ -615,6 +682,7 @@ int main(int argc, char **argv) {
     std::stable_sort(sim_rx.begin(), sim_rx.end(),
                      [](const auto &x, const auto &y) { return x.first < y.first; });
     sim_endUs = endS * 1e6;
+    sim_core[1].nextTick = 1000 + 437;      // each core has its own tick timer: not aligned
     sim_level[P_CS] = 1;
     adc.reset();
     // Arduino's loopTask on core 1: setup(), then loop() for ever
@@ -636,10 +704,13 @@ static void simFinish() {
     fwrite(sim_tx.data(), 1, sim_tx.size(), f);
     fclose(f);
     fprintf(stderr, "sim: %.3f s virtual, %llu conversions, %llu blocked DRDY pulses, %llu FIFO"
-            " overwrites, %llu narrow pulses, %llu UART ISRs, %zu bytes out\n", sim_t / 1e6,
+            " overwrites, %llu narrow pulses, %llu UART ISRs, %llu late DRDY ISRs, %zu bytes out,"
+            " twdt errors %llu, raw log lines %llu\n",
+            sim_t / 1e6,
             (unsigned long long)adc.nConv, (unsigned long long)adc.nBlocked,
             (unsigned long long)adc.nOverwrite, (unsigned long long)adc.nPulse,
-            (unsigned long long)sim_uIsrs, sim_tx.size());
+            (unsigned long long)sim_uIsrs, (unsigned long long)sim_isrLate, sim_tx.size(),
+            (unsigned long long)sim_twdtErrors, (unsigned long long)sim_rawLogLines);
     fflush(stderr);
     _exit(0);
 }

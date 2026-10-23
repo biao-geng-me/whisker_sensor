@@ -47,7 +47,9 @@ struct LockState {
     bool     taint[NUM_SEL];
     uint8_t  scanFlags;             // flags of the scan being taken
     uint8_t  outFlags;              // flags of the last finished scan (send_scan)
-    bool     remote;                // the reader task on core 1 owns the reader (C1)
+    bool     remote;                // the reader task on core 1 owns the reader (streaming)
+    bool     txHost;                // remote: records go to the host core, which sends
+                                    // them (C1); else the reader sends them itself (C0)
     uint32_t txWinUs;               // C1: scan frames are sent this long after the
                                     // scan start (0 = as soon as they are ready)
     LockHealth h;
@@ -89,7 +91,11 @@ void lkMsgText(char *buf, int size, uint32_t code, uint32_t arg, uint8_t mode);
 void lkTaskStart();                 // setup(), on core 1: the reader task, parked
 bool lkRemoteActive();              // host: the reader task owns (or was asked to own)
 bool lkPark(uint32_t timeoutMs);    // host: take the reader back; false = it didn't let go
-void lkRun(uint32_t txWinUs);       // host: hand the reader to core 1 (streaming)
+void lkRun(bool txHost, uint32_t txWinUs);   // host: hand the reader to core 1 (streaming)
+extern volatile uint32_t g_lkBeat;  // the reader task's heartbeat (software watchdog)
+// Host side (whisker_daq.ino): forward up to `max` captured ESP-IDF log lines
+// as TEXT records (the reader calls it from idle time in C0 streaming).
+void logqDrain(int max);
 
 const char *lkConfigure(uint8_t mode, long settle, long osr, long scanUs, long spi);
 void lkClearScan();

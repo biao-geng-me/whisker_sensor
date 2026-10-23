@@ -101,6 +101,8 @@
 #include <esp_random.h>
 #include "soc/gpio_reg.h"
 #include "soc/soc.h"
+#include <esp_log.h>
+#include <esp_system.h>
 
 #include "daq_common.h"   // pins, ADC registers, frame format, shared state
 #include "lk_reader.h"    // the locked-scan reader (M1/M2)
@@ -267,7 +269,7 @@ void send_frame(uint8_t type, const uint8_t *payload, uint8_t len) {
     uint16_t crc = crc16_fast(0xFFFF, f + 2, 2 + len);
     f[4 + len] = (uint8_t)(crc & 0xFF);
     f[5 + len] = (uint8_t)(crc >> 8);
-    if (g_lk.streaming && !g_lk.remote) {     // C0: the reader writes it out from idle time
+    if (g_lk.streaming && !(g_lk.remote && g_lk.txHost)) {   // the reader's paced TX queue
         if (!txqPush(f, 6 + len)) g_lk.h.txDrop++;
     } else {                                   // also C1: the host core may block
         Serial.write(f, 6 + len);
@@ -1594,6 +1596,8 @@ static void hostSetup() {
     crcTabInit();
     Serial.setTxBufferSize(SERIAL_TXBUF);     // must precede begin()
     Serial.begin(SERIAL_BAUD);
+    Serial.setDebugOutput(false);             // no ets_printf / log_x on UART0
+    esp_log_set_vprintf(idfLogHook);          // ESP-IDF logs -> framed TEXT (see above)
     delay(500);
     Serial.println("\n=================================================");
     Serial.println("  whisker_daq — 16 whiskers x 2 gauges = 32 ch");
@@ -1681,8 +1685,72 @@ static void hostSetup() {
     Serial.println("          S<digits>;=scan only these selects (S; = all 8)");
     Serial.println("          M<0|1|2> [settle_us] [osr] [period_us] [spi];=scan mode: 0 legacy"
                    " 76 Hz, 1 quiet 62.5 Hz (OSR 512), 2 wide 250 Hz");
-    Serial.println("          C<0|1> [tx_window_us];=reader core: C0 shared with Serial (boot),"
-                   " C1 own core; C1 <us> sends frames <us> after the scan start");
+    Serial.println("          C<0|1> [tx_window_us];=who sends while streaming: C0 the reader"
+                   " itself (boot), C1 core 0; C1 <us> sends frames <us> after the scan start");
+}
+
+// ── ESP-IDF log capture ─────────────────────────────────────────────────────
+// ESP-IDF components log (ESP_LOGE ...) through vprintf straight into UART0's
+// FIFO, past the Serial driver: in binary mode that corrupts frames (bench r3:
+// "E (292442) task_wdt: ... task not found" lines mid-stream). The hook keeps
+// the lines in a small queue instead (any core or task may log); the sender of
+// the moment forwards them as framed TEXT ("[idf] ..."), at most LOGQ_RATE per
+// second, and reports how many it dropped. ROM / Arduino debug prints
+// (ets_printf, log_x) are switched off with Serial.setDebugOutput(false).
+#define LOGQ_N     8
+#define LOGQ_LEN   100
+#define LOGQ_RATE  10                 // lines per second
+static char     g_logq[LOGQ_N][LOGQ_LEN];
+static uint32_t g_logqHead = 0, g_logqTail = 0, g_logqDrop = 0, g_logqDropSent = 0;
+static uint32_t g_logqT = 0, g_logqBudget = LOGQ_RATE;
+static portMUX_TYPE g_logqMux = portMUX_INITIALIZER_UNLOCKED;
+
+static int idfLogHook(const char *fmt, va_list ap) {
+    char b[LOGQ_LEN];
+    int n = vsnprintf(b, sizeof(b), fmt, ap);
+    if (n < 0) return n;
+    int m = min(n, (int)sizeof(b) - 1);
+    while (m > 0 && (b[m - 1] == '\n' || b[m - 1] == '\r')) m--;
+    b[m] = 0;
+    if (!m) return n;
+    portENTER_CRITICAL_SAFE(&g_logqMux);
+    if (g_logqHead - g_logqTail < LOGQ_N) {
+        memcpy(g_logq[g_logqHead % LOGQ_N], b, m + 1);
+        g_logqHead++;
+    } else {
+        g_logqDrop++;
+    }
+    portEXIT_CRITICAL_SAFE(&g_logqMux);
+    return n;
+}
+
+// Forward up to `max` queued lines (only the task that currently sends calls
+// this: the host core, or the reader in C0 streaming).
+void logqDrain(int max) {
+    uint32_t now = millis();
+    if (now - g_logqT >= 1000) { g_logqT = now; g_logqBudget = LOGQ_RATE; }
+    while (max-- > 0 && g_logqBudget) {
+        char b[LOGQ_LEN];
+        bool got = false;
+        uint32_t drop;
+        portENTER_CRITICAL_SAFE(&g_logqMux);
+        if (g_logqHead != g_logqTail) {
+            memcpy(b, g_logq[g_logqTail % LOGQ_N], LOGQ_LEN);
+            g_logqTail++;
+            got = true;
+        }
+        drop = g_logqDrop;
+        portEXIT_CRITICAL_SAFE(&g_logqMux);
+        if (drop != g_logqDropSent) {
+            logf("[idf] %lu log lines dropped\n", (unsigned long)(drop - g_logqDropSent));
+            g_logqDropSent = drop;
+            g_logqBudget--;
+            continue;
+        }
+        if (!got) return;
+        logf("[idf] %s\n", b);
+        g_logqBudget--;
+    }
 }
 
 // ── Dual-core plumbing (host side) ───────────────────────────────────────────
@@ -1735,8 +1803,24 @@ static bool hostTakeBack() {
         logf("[park timeout] the reader on core 1 did not stop\n");
         return false;
     }
-    hostDrain(false);
+    txqFlushBlocking();                      // what the reader queued in C0
+    hostDrain(false);                        // what it handed over in C1
     return true;
+}
+
+// Software watchdog for the reader task (it is not on the task watchdog): no
+// progress for LK_BEAT_TIMEOUT_MS while it should run -> restart the ESP32.
+#define LK_BEAT_TIMEOUT_MS  3000
+static void hostWatchReader() {
+    static uint32_t lastBeat = 0, lastT = 0;
+    if (!xcWantRun(g_xc)) { lastT = millis(); return; }
+    uint32_t b = g_lkBeat, now = millis();
+    if (b != lastBeat) { lastBeat = b; lastT = now; return; }
+    if (now - lastT < LK_BEAT_TIMEOUT_MS) return;
+    g_lk.streaming = false;                  // straight to Serial (the reader is stuck)
+    logf("[reader watchdog] no progress for %d ms: restarting\n", LK_BEAT_TIMEOUT_MS);
+    Serial.flush();
+    esp_restart();
 }
 
 // C<0|1> [tx_window_us];
@@ -1746,17 +1830,18 @@ static void core_cmd() {
     long v[2] = {-1, 0};
     int n = parseLongs(buf, v, 2);
     if (n < 1 || v[0] < 0 || v[0] > 1 || (v[0] == 1 && v[1] && (v[1] < 100 || v[1] > 60000))) {
-        logf("C: usage C<0|1> [tx_window_us];  C0 reader on the host core (boot), C1 on its own"
-             " core; C1 <100-60000> sends each scan frame that long after the scan start"
-             " (shorter than the scan period)\n");
+        logf("C: usage C<0|1> [tx_window_us];  the reader streams on core 1; C0 (boot) it sends"
+             " its frames itself, C1 core 0 sends them; C1 <100-60000> sends each scan frame"
+             " that long after the scan start (shorter than the scan period)\n");
         return;
     }
     g_core = (uint8_t)v[0];
     g_txWin = g_core ? (uint32_t)v[1] : 0;
     g_hh.txWinUs = (uint16_t)g_txWin;
-    if (g_core) logf("core: C1, reader on core 1, TX %s%lu%s\n", g_txWin ? "at scan start + " : "",
-                     (unsigned long)g_txWin, g_txWin ? " us" : " free (as soon as ready)");
-    else logf("core: C0, reader and Serial on core 0\n");
+    if (g_core) logf("core: C1, reader on core 1, core 0 sends %s%lu%s\n",
+                     g_txWin ? "at scan start + " : "", (unsigned long)g_txWin,
+                     g_txWin ? " us" : " (as soon as ready)");
+    else logf("core: C0, reader on core 1 sends its own frames (single-core TX)\n");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1808,23 +1893,31 @@ static void hostLoop() {
         }
     }
 
+    // Streaming a locked mode: the reader task on core 1 reads (next to the DRDY
+    // ISR). C0: it also sends, as the single-core firmware did. C1: it hands
+    // records to this core, which sends them (optionally in a TX window).
     bool streaming = g_mode == 'B' && g_lk.mode;
-    if (streaming && g_core == 1) {          // C1: core 1 reads, this core sends
+    if (streaming) {
         if (!lkRemoteActive()) {
             txqFlushBlocking();
-            lkRun(g_txWin);
+            lkRun(g_core == 1, g_txWin);
         }
-        hostDrain(true);
-        ulTaskNotifyTake(pdTRUE, 1);         // the next record, or one tick
+        hostWatchReader();
+        if (g_core == 1) {
+            hostDrain(true);
+            logqDrain(2);
+            ulTaskNotifyTake(pdTRUE, 1);     // the next record, or one tick
+        } else {
+            vTaskDelay(2);                   // the reader sends; this core only watches
+        }
         return;
     }
     if (lkRemoteActive() && !hostTakeBack()) { vTaskDelay(1); return; }
+    logqDrain(2);
     if (streaming && !g_lk.streaming) lkHealthReset();   // HEALTH windows cover streaming only
     g_lk.streaming = streaming;
     switch (g_mode) {
-        case 'B': if (g_lk.mode) lkService(20000);           // locked: sends from idle time
-                  else if (scan_all()) send_scan();          // no delay: stream fast
-                  break;
+        case 'B': if (scan_all()) send_scan(); break;      // legacy (locked: the reader task)
         case 'c': calibrate_step(); delay(60); break;
         case 'n': captureBaseline(48); noise_report(); delay(1000); break;
         case 's': if (scan_all()) print_scan();    delay(400); break;
@@ -1843,8 +1936,9 @@ static void hostLoop() {
 // task leaves the task watchdog: in C0 the host task reads without yielding, as
 // loop() did on core 1 before (whose idle task was never watched either).
 static void hostTask(void *) {
-    disableCore0WDT();
+    bool wdt0 = disableCore0WDT();
     hostSetup();
+    if (!wdt0) Serial.println("note: core 0's idle task is still on the task watchdog");
     for (;;) hostLoop();
 }
 

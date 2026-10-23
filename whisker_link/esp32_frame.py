@@ -338,6 +338,8 @@ class Decoder:
         self.n_frames = 0
         self.n_crc_fail = 0
         self.n_skipped = 0
+        self.n_junk = 0               # non-frame bytes after the first frame (binary mode
+                                      # should have none: e.g. raw ESP-IDF log lines)
 
     def feed(self, data: bytes) -> Iterator[Event]:
         buf = self._buf
@@ -376,6 +378,8 @@ class Decoder:
         if not b:
             return
         self.n_skipped += len(b)
+        if self.n_frames:
+            self.n_junk += len(b)
         self._loose += b
         while True:
             j = self._loose.find(b"\n")

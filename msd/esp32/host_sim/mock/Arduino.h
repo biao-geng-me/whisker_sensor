@@ -39,6 +39,10 @@ void vTaskDelay(TickType_t ticks);
 uint32_t ulTaskNotifyTake(BaseType_t clear, TickType_t ticks);
 void xTaskNotifyGive(TaskHandle_t h);
 bool disableCore0WDT();
+typedef int portMUX_TYPE;                       // one runner at a time: no locking needed
+#define portMUX_INITIALIZER_UNLOCKED 0
+#define portENTER_CRITICAL_SAFE(m) ((void)(m))
+#define portEXIT_CRITICAL_SAFE(m) ((void)(m))
 
 uint32_t micros();
 uint32_t millis();
@@ -56,6 +60,7 @@ uint32_t ledcReadFreq(uint8_t pin);
 class HardwareSerial {
   public:
     void begin(unsigned long);
+    void setDebugOutput(bool);
     size_t setTxBufferSize(size_t n);
     int available();
     int read();

@@ -879,7 +879,7 @@ def main(argv=None) -> int:
 
     p = sub.add_parser("stream", parents=[mo], help="stream and print HEALTH + scan stats")
     p.add_argument("--core", type=int, choices=(0, 1),
-                   help="reader core first: 0 shared with Serial (boot default), 1 own core")
+                   help="who sends while streaming: 0 the reader itself (boot default), 1 core 0")
     p.add_argument("--tx-window-us", type=int,
                    help="with --core 1: send each scan frame this long after the scan start"
                         " (100 us .. the scan period; default: as soon as it is ready)")

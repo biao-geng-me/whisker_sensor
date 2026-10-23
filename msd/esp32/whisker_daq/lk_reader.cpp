@@ -4,12 +4,14 @@
 #include "soc/gpio_reg.h"
 #include "soc/soc.h"
 #include "lk_reader.h"
-#include <esp_task_wdt.h>
 
 LockState g_lk = {};
 XQueue<XRec, LK_XQ_N> g_xq;
 XCtl g_xc;
 static TaskHandle_t g_lkTask = nullptr;
+volatile uint32_t g_lkBeat = 0;
+// Records to the host core instead of frames of our own (C1 streaming).
+static inline bool lkToHost() { return g_lk.remote && g_lk.txHost; }
 extern TaskHandle_t g_hostTask;     // whisker_daq.ino
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -203,10 +205,10 @@ void lkMsgText(char *buf, int size, uint32_t code, uint32_t arg, uint8_t mode) {
         snprintf(buf, size, "[reader message %lu %lu]", (unsigned long)code, (unsigned long)arg);
 }
 
-// A message from the reader: logged directly by the host core (C0), queued
-// for the host when the reader runs on core 1 (it must not touch Serial).
+// A message from the reader: logged by whoever sends (the reader itself in C0,
+// into its TX queue), queued for the host core in C1.
 static void lkMsg(uint32_t code, uint32_t arg) {
-    if (g_lk.remote) {
+    if (lkToHost()) {
         XRec r;
         r.kind = XR_MSG; r.mode = g_lk.mode; r.msg[0] = code; r.msg[1] = arg;
         if (g_xq.push(r)) xTaskNotifyGive(g_hostTask);
@@ -251,7 +253,7 @@ static void lkCloseScan(uint32_t tEnd) {
     g_lk.scanFlags = 0;
     g_scans++;
     g_lk.scanDone = true;
-    if (g_lk.remote) {                       // C1: a record for the host core
+    if (lkToHost()) {                        // C1: a record for the host core
         XRec r;
         r.kind = XR_SCAN; r.flags = g_lk.outFlags; r.mode = g_lk.mode;
         r.seq = g_scans; r.tUs = g_scanT0; r.durUs = g_scanDur;
@@ -259,7 +261,6 @@ static void lkCloseScan(uint32_t tEnd) {
         for (int o = 1; o <= NUM_OUT; o++) r.raw[o] = (int32_t)outRaw[o];
         if (g_xq.push(r)) xTaskNotifyGive(g_hostTask);
         else g_lk.h.txDrop++;
-        esp_task_wdt_reset();
     } else if (g_lk.streaming) {
         if (g_lk.pendingSend) g_lk.h.txDrop++;      // the previous one never got idle time
         g_lk.pendingSend = true;
@@ -268,7 +269,7 @@ static void lkCloseScan(uint32_t tEnd) {
     g_lk.tRef += (uint32_t)g_lk.N * g_lk.T;
     g_lk.lastK = -1;
     if (micros() - g_lk.h.t0Us >= 1000000UL) {
-        if (g_lk.remote) {
+        if (lkToHost()) {
             // HEALTH is never dropped: if the queue is full, the window just
             // runs on and goes out at a later scan end
             if (g_xq.full()) return;
@@ -299,11 +300,15 @@ static int lkStep() {
         do { e = g_drdyEdges; t = g_drdyEdgeT; } while (e != g_drdyEdges);
         edge = true;
     } else if (drdyLowFast()) {
-        // DRDY low with no edge: give a just-fired ISR ~3 us to count it,
-        // else it is a conversion whose pulse was blocked by the previous read
-        // (SBAS890D 8.5.1.5) or the FIFO's second slot after an overrun.
-        uint32_t w0 = micros();
-        while (micros() - w0 < 3) {}
+        // DRDY low with no edge: give a just-fired ISR time to count it, else
+        // it is a conversion whose pulse was blocked by the previous read
+        // (SBAS890D 8.5.1.5) or the FIFO's second slot after an overrun. The
+        // ISR is on core 1: on the reader task (same core) ~3 us is plenty; on
+        // the host core (text modes, baseline) core 1's tick can hold it back
+        // ~8 us, so wait longer there (bench 2026-10-23 r3: C0 on core 0 lost
+        // one conversion per LCM(1 ms tick, T) to this).
+        uint32_t w0 = micros(), wait = g_lk.remote ? 3 : 15;
+        while (micros() - w0 < wait) {}
         if ((int32_t)(g_drdyEdges - g_drdyTaken) > 0) return lkStep();
         e = g_drdyTaken; t = g_lk.lastEdgeT + g_lk.T;
         edge = false;
@@ -516,6 +521,9 @@ void lkService(uint32_t budgetUs) {
             uint32_t n = txqWrite(g_lk.T >= 64 ? 48 : 16, true);
             uint32_t dt = micros() - w0;
             if (n && dt > g_lk.h.txMax) g_lk.h.txMax = (uint16_t)min<uint32_t>(dt, 65535);
+        } else if (g_lk.remote) {
+            logqDrain(1);                    // captured ESP-IDF log lines, rate-limited
+            continue;
         } else {
             continue;
         }
@@ -523,17 +531,19 @@ void lkService(uint32_t budgetUs) {
     }
 }
 
-// ── Dual-core (C1) ──────────────────────────────────────────────────────────
+// ── The reader task (streaming, C0 and C1) ──────────────────────────────────
 // The reader task is pinned to core 1 with the DRDY ISR (setup() runs there
-// and attaches it); everything else, Serial included, runs on the host task on
-// core 0. Ownership of the reader (g_lk, SPI, CS, mux, CLKIN) moves with the
-// park/run handshake in lk_xcore.h: the host owns it while the task is parked
-// (text modes, commands, legacy scan, C0), the task while it runs (streaming
-// in C1). The task busy-polls while it runs (core 1 has nothing else to do;
-// its idle task is not watched by the task watchdog in this core build); it
-// subscribes itself to the watchdog instead and feeds it at every scan end and
-// timeout check. Priority 23: above everything of ours, below ipc1 (24), so
-// cross-core IPC calls still get through.
+// and attaches it); everything else runs on the host task on core 0, which
+// also owns Serial (its UART ISR is on core 0). Ownership of the reader (g_lk,
+// SPI, CS, mux, CLKIN) moves with the park/run handshake in lk_xcore.h: the
+// host owns it while the task is parked (text modes, commands, legacy scan),
+// the task while it streams a locked mode. In C0 the task also sends (the
+// paced TX queue, as the single-core firmware did on core 1); in C1 it hands
+// records to the host core. The task busy-polls while it runs; it is NOT on
+// the task watchdog (bench r3: esp_task_wdt_reset from it logged "task not
+// found" into the stream); the host watches g_lkBeat instead and restarts the
+// ESP32 if the reader stops for LK_BEAT_TIMEOUT_MS. Priority 23: above
+// everything of ours, below ipc1 (24), so cross-core IPC calls get through.
 // SPI: the host holds the Arduino transaction (taken in hostSetup), so all
 // SPIClass transfers take the no-lock path; the task never begins or ends a
 // transaction (that mutex belongs to the host task) and never changes the SPI
@@ -546,7 +556,6 @@ static void lkTaskMain(void *) {
     for (;;) {
         XcView v = xcPoll(g_xc);
         if (v.parking || v.ack) {
-            if (v.parking) esp_task_wdt_delete(nullptr);
             xcParkDone(g_xc, v);           // the host owns everything from here
             continue;
         }
@@ -555,15 +564,16 @@ static void lkTaskMain(void *) {
             continue;
         }
         if (v.starting) {
-            esp_task_wdt_add(nullptr);
             lkResume();                    // drop the FIFO, next boundary, same grid
             xcStarted(g_xc, v);
         }
-        if (lkStep()) continue;
-        if (micros() - g_lk.lastActT > LK_TIMEOUT_MS * 1000UL) {
-            lkRecover();
-            esp_task_wdt_reset();
+        g_lkBeat = g_lkBeat + 1;
+        if (!g_lk.txHost) {                // C0: read and send, as the single-core loop
+            lkService(2000);
+            continue;
         }
+        if (lkStep()) continue;
+        if (micros() - g_lk.lastActT > LK_TIMEOUT_MS * 1000UL) lkRecover();
     }
 }
 
@@ -586,17 +596,18 @@ bool lkPark(uint32_t timeoutMs) {
         delayMicroseconds(10);
     }
     g_lk.remote = false;
-    g_lk.streaming = false;
+    g_lk.streaming = false;                // the host flushes what C0 left in the TX queue
     g_hh.parks++;
     return true;
 }
 
 // Host: hand the reader to core 1 for streaming. The queue must be empty.
-void lkRun(uint32_t txWinUs) {
+void lkRun(bool txHost, uint32_t txWinUs) {
     g_lk.remote = true;
+    g_lk.txHost = txHost;
     g_lk.streaming = true;
     g_lk.pendingSend = false;
-    g_lk.txWinUs = txWinUs;
+    g_lk.txWinUs = txHost ? txWinUs : 0;
     lkHealthReset();
     xcRequest(g_xc, XC_RUN);
     xTaskNotifyGive(g_lkTask);

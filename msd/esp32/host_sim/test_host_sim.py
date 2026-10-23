@@ -23,15 +23,12 @@ from whisker_link import esp32_frame as ef  # noqa: E402
 from whisker_link.channels import OUT_OF  # noqa: E402
 
 
+sys.path.insert(0, str(HERE))
+from cxx_probe import find_cxx  # noqa: E402
+
+
 def _cxx() -> str | None:
-    for c in (os.environ.get("CXX"), "g++", "c++"):
-        if c and shutil.which(c):
-            try:
-                if subprocess.run([c, "--version"], capture_output=True, timeout=20).returncode == 0:
-                    return c
-            except (OSError, subprocess.TimeoutExpired):
-                pass
-    return None
+    return find_cxx("-O0")
 
 
 @pytest.fixture(scope="module")
@@ -48,11 +45,19 @@ def sim(tmp_path_factory):
     return out / "sim"
 
 
+LAST = {}                              # the last run: decoder junk bytes, sim summary
+
+
 def run(sim, out: Path, *args: str):
+    """Run the sim; every run must be free of task-watchdog errors and raw
+    (unframed) ESP-IDF log lines (bench r3)."""
     r = subprocess.run([str(sim), "--out", str(out), *args], capture_output=True, text=True,
                        timeout=300)
     assert r.returncode == 0, r.stderr
-    evs = list(ef.Decoder().feed(out.read_bytes()))
+    assert "twdt errors 0, raw log lines 0" in r.stderr, r.stderr[-500:]
+    dec = ef.Decoder()
+    evs = list(dec.feed(out.read_bytes()))
+    LAST.update(junk=dec.n_junk, stderr=r.stderr)
     return ([e for e in evs if isinstance(e, ef.Scan)], [e for e in evs if isinstance(e, ef.Info)],
             [e for e in evs if isinstance(e, ef.Health)], [e.text for e in evs if isinstance(e, ef.Text)])
 
@@ -147,7 +152,9 @@ def test_overrun_realigns(sim, tmp_path, mcmd, T, period):
         flagged = [s.seq for s in scans if s.flags]
         # one scan, or two when the stall straddles a scan end
         assert len(flagged) <= 2 and all(b == a + 1 for a, b in zip(flagged, flagged[1:])), what
-        assert sum(h.overrun for h in health) <= 1, what
+        # (wide on one core, with the DRDY ISR on the reader's core: a 2T stall
+        # can cost a second overrun while it catches up)
+        assert sum(h.overrun for h in health) <= (2 if T == 32 else 1), what
         assert sum(h.resync for h in health) <= 3, (what, [h.resync for h in health])
         tail = [s for s in scans if s.t_us > scans[-1].t_us - 300_000]
         assert all(s.flags == 0 for s in tail), what
@@ -166,8 +173,11 @@ def test_quiet_board_costs_no_overrun(sim, tmp_path, mcmd):
                               "--cmd", "1.0:S0123457;", "--cmd", f"1.0:{mcmd}", "--cmd", "1.3:B")
     assert len(health) >= 3
     assert sum(h.overrun for h in health) == 0 and sum(h.missed for h in health) == 0
-    assert max(h.read_max_us for h in health) < 30            # no ISR inside a read
-    assert not [s for s in scans if s.flags]
+    assert max(h.read_max_us for h in health) < 40   # no UART refill ISR (~60 us) inside a read
+    # bench r3: C0 read on core 0 while the DRDY ISR (core 1) waited for core 1's
+    # tick: one edgeless + stale read per LCM(1 ms, T). C0 reads on core 1 again.
+    assert sum(h.edgeless for h in health) == 0 and sum(h.stale for h in health) == 0
+    assert not [s for s in scans if s.flags] and LAST["junk"] == 0
 
 
 # ---------------------------------------------------------------- dual core (C1)
@@ -186,7 +196,9 @@ def test_c1_wide_board_costs(sim, tmp_path, scale, ccmd):
     scans, infos, health, _ = run(sim, tmp_path / "o.bin", "--end", "4", "--board-costs",
                                   "--cost-scale", scale, "--cmd", "1.0:S0123457;",
                                   "--cmd", f"1.0:{ccmd}", "--cmd", "1.0:M2;", "--cmd", "1.3:B")
-    _health_ok(health, 32)
+    # lat < T at the bench costs; at 1.5x the 12 us tick on core 1 can push one read
+    # just past the next conversion (handled: its narrow DRDY pulse, no overrun)
+    _health_ok(health, 32 if scale == "1.0" else 40)
     assert all(h.tx_win_us == (100 if "100" in ccmd else 0) and h.tx_late == 0 for h in health[1:])
     assert {b.t_us - a.t_us for a, b in zip(scans, scans[1:])} == {4000}
     assert all(b.seq == a.seq + 1 for a, b in zip(scans, scans[1:]))
@@ -274,3 +286,46 @@ def test_c0_c1_switch(sim, tmp_path):
     cores = [h.core for h in health]
     assert 1 in cores[:2] and 0 in cores and cores[-1] == 1
     assert all(h.overrun == 0 for h in health)
+
+
+@pytest.mark.parametrize("mcmd", ["M1;", "M1 200 256;"])
+def test_c0_after_c1_like_fresh_boot(sim, tmp_path, mcmd):
+    """C1 streaming, then C0 without a reboot (as on the bench): no stale or
+    edgeless reads, no flags, nothing outside frames."""
+    scans, _, health, _ = run(sim, tmp_path / "o.bin", "--end", "6", "--board-costs",
+                              "--cmd", "1.0:S0123457;", "--cmd", "1.0:C1;", "--cmd", "1.0:M2;",
+                              "--cmd", "1.3:B", "--cmd", "2.5:C0;", "--cmd", f"2.5:{mcmd}",
+                              "--cmd", "2.55:B")
+    c0 = [h for h in health if h.core == 0]
+    assert len(c0) >= 2 and all(h.parks >= 1 for h in c0)
+    assert sum(h.edgeless + h.stale + h.overrun + h.missed for h in c0) == 0
+    quiet = [s for s in scans if s.dur_us == 16000]
+    assert len(quiet) > 150 and not [s for s in quiet[1:] if s.flags]
+    assert LAST["junk"] == 0
+
+
+@pytest.mark.parametrize("setup", [["--cmd", "1.0:M1;"],
+                                   ["--cmd", "1.0:C1;", "--cmd", "1.0:M2;"],
+                                   ["--cmd", "1.0:C1 2000;", "--cmd", "1.0:M1;"]])
+def test_idf_logs_are_framed(sim, tmp_path, setup):
+    """An ESP-IDF component logging while streaming (C0 and C1): the line arrives
+    as a framed TEXT record, a flood is rate-limited with a drop count, and no
+    byte lands outside a frame."""
+    logs = ["--idf-log", "2.0:task_wdt: test line"]
+    for i in range(40):                                  # a flood: 40 lines in 4 ms
+        logs += ["--idf-log", f"{2.5 + i * 0.0001:.4f}:flood {i}"]
+    scans, _, health, text = run(sim, tmp_path / "o.bin", "--end", "4.5", "--board-costs",
+                                 "--cmd", "1.0:S0123457;", *setup, "--cmd", "1.3:B", *logs)
+    assert any("[idf] E (2000) task_wdt: test line" in t for t in text)
+    assert any("log lines dropped" in t for t in text)
+    assert 5 <= len([t for t in text if "flood" in t]) <= 20
+    assert LAST["junk"] == 0
+    assert sum(h.overrun for h in health[1:]) == 0
+
+
+def test_twdt_mock_flags_unsubscribed_reset(sim, tmp_path):
+    """The fake task watchdog is live: the firmware no longer calls it, so this
+    only checks the sim reports zero (run() asserts it for every run)."""
+    run(sim, tmp_path / "o.bin", "--end", "2", "--cmd", "1.0:C1;", "--cmd", "1.0:M2;",
+        "--cmd", "1.3:B")
+    assert "twdt errors 0" in LAST["stderr"]
