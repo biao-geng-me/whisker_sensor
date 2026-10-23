@@ -179,6 +179,8 @@ def test_mode_command():
     assert ad.mode_command("1", 200, 0, 9000000) == "M1 200 0 0 9000000;"
     assert ad.mode_command("quiet", None, 256, None, 8000) == "M1 200 256 8000;"
     assert ad.mode_command("legacy", 300, 512, None) == "M0;"
+    assert ad.core_command(None, None) == "" and ad.core_command(0, 100) == "C0;"
+    assert ad.core_command(1, None) == "C1;" and ad.core_command(1, 2000) == "C1 2000;"
 
 
 def test_stream_against_fake(tmp_path, capsys):

@@ -114,6 +114,17 @@ def test_info_v4_and_health_roundtrip():
     h = ef.Health(1, 2, 371, 34, 180, 160, 16, 3, 31250, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1000)
     (hv,) = list(ef.Decoder().feed(ef.encode_health(h)))
     assert hv == h and hv.summary()["busy_pct"] == 37.1 and hv.summary()["lat_avg_us"] == 18.0
+    assert hv.core is None and "core" not in hv.summary()
+    # version 2: dual-core fields appended; a v1 reader of the same bytes sees the prefix
+    h2 = ef.Health(2, 2, 650, 24, 180, 160, 16, 3, 31250, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1000,
+                   core=1, q_hwm=3, tx_win_us=100, parks=2, park_timeouts=0, host_tx_max_us=410,
+                   det_max_us=5, tx_late=0)
+    raw = ef.encode_health(h2)
+    (hv2,) = list(ef.Decoder().feed(raw))
+    assert hv2 == h2 and hv2.summary()["core"] == 1 and hv2.summary()["host_tx_max_us"] == 410
+    assert len(raw) == 6 + 42 + 14
+    v1 = ef._HEALTH.unpack_from(raw, 4)
+    assert v1[0] == 2 and v1[20] == 1000
     # a v3 decoder would see an unknown frame type and skip it; v3 INFO still decodes
     v3 = ef.Info(3, 32, 0x2405, 0x0F02, 800000, 3125, 921600, 128, 250, 3, 0xFF)
     (ev3,) = list(ef.Decoder().feed(ef.encode_info(v3)))

@@ -125,7 +125,7 @@ Health:
   - conversions, overruns, missed conversions, edgeless reads (DRDY pulse blocked by a read), CRC errors, stale reads, late switches, TX drops, empty slots, resyncs, re-inits and recoveries
 - **Where it shows.** The status record carries it as `esp32.health`. The daq_server log and the wavi_py status line show busy %, max latency and overruns.
 
-CPU: it's single-core. The reader (`lkStep`) keeps its state in `g_lk`, and frames leave through a TX queue that is written in small chunks only when the next DRDY is ≥ 6 µs away and doesn't end a slot. Moving the reader to its own pinned FreeRTOS task later is then a matter of putting the queue between two tasks. It hasn't been done, because single-core hasn't been shown to fall short yet.
+CPU: see "Reader core: C0 / C1" below. In C0 (the boot default) the reader and the sender share one core. Frames leave through a TX queue, written in small chunks only when the next DRDY is ≥ 6 µs away, the next conversion doesn't end a slot, and the UART FIFO is nearly empty.
 
 What to watch on the bench:
 - **Latency in wide mode.** `lat max` must stay below the 32 µs conversion period. An 18-byte read at 11.4 MHz is ~13 µs of clocking plus the driver and ISR overhead.
@@ -158,7 +158,58 @@ Host simulation: [`host_sim/`](host_sim/) compiles the real sketch (arduino-cli 
 - an ADC reset
 - switching back to legacy
 
-The CPU costs in the model are guesses, so the busy % and latency it reports are only indicative. The bench HEALTH numbers are the real ones.
+- quiet OSR 256/512/125 Hz with `--board-costs`: no overrun (the UART pacing fix)
+- C1: wide with board costs at scale 1.0 and 1.5 (free and windowed TX), quiet windowed, a stall on each core, a full queue (HEALTH still sent), an ADC reset, S/M/text/legacy command spam, C0 ↔ C1 switching
+- `test_xcore_tsan.py`: the queue and handshake of `lk_xcore.h` with two real threads under ThreadSanitizer
+
+The sim runs each FreeRTOS task as a thread, one at a time, on two virtual cores. Each core has a clock; the earliest core runs next, and device events and ISRs are processed in time order (see the top of `sim.cpp`). `--stall T:US:CORE` stalls one core. `--board-costs` sets the Serial and UART-ISR costs calibrated to the bench HEALTH data: tx max 57–59 µs, lat max ~73 µs at OSR 256, plus a 3 µs tick. Other CPU costs are guesses, so the busy % and latency the sim reports are only indicative. The bench HEALTH numbers are the real ones.
+
+## Reader core: C0 / C1 (2026-10-23, bring-up)
+
+`C0;` (the boot default) keeps the reader on the same core as Serial, as before. `C1;` moves the locked reader to its own core for streaming. Wide mode needs it: on one core, Serial writes of up to ~80 µs can't fit in T = 32 µs. `C1 <us>;` additionally holds each scan frame until `<us>` after its scan start (windowed TX, 100 µs up to the scan period), so serial activity stays at a fixed phase of the scan. The setting is RAM only. It is meant for the A/B tests until one variant becomes the default.
+
+Layout:
+- **Core 1.** The reader task (priority 23, `lk_reader.cpp`) and the DRDY ISR (`setup()` attaches it on core 1).
+- **Core 0.** The host task, which runs everything that used to be `loop()`: Serial (`Serial.begin` runs there, so the UART ISR is on core 0), commands, text modes, the legacy scan, and in C0 also the reader. Core 0's idle task is taken off the task watchdog: in C0 the host task reads without yielding, as `loop()` did on core 1 before.
+- **Handover.** Core 1 hands records (scan, HEALTH, message) to core 0 through a single-producer/single-consumer queue (`lk_xcore.h`, 32 slots).
+- **Ownership.** Every command first parks the reader and takes it back to the host core (the park/run handshake in `lk_xcore.h`). Streaming in C1 hands it to core 1 again. While the reader runs, it alone touches SPI, CS, the mux and CLKIN. The host holds the Arduino SPI transaction throughout, so the reader's transfers take the no-lock path and it never changes the SPI clock.
+- **Watchdog.** While running, the reader task subscribes itself to the task watchdog and feeds it at each scan end.
+
+HEALTH version 2 appends the following fields to the version-1 frame, in a format a version-1 decoder can still read:
+- `core`
+- `q_hwm`: the queue's high-water mark
+- `tx_win_us`
+- `parks` and `park_timeouts`: cumulative since boot
+- `host_tx_max_us`: the longest frame write on core 0
+- `det_max_us`: DRDY edge to the start of the read
+- `tx_late`: windowed frames sent > 200 µs late
+
+`adc_diag.py stream` prints them and a totals line.
+
+What changed from the design note (`/scratch/bigeme/whisker_dev/fw_dualcore_design_2026-10-23.md`) while implementing:
+- **C0 location.** The note had C0 as "today's single-core path". C0 now runs on the host task on core 0, with the DRDY ISR on core 1 and the UART ISR on core 0. Before, everything was on core 1. The read and TX logic is unchanged.
+- **Handshake generations.** The handshake carries a generation number. Without it, a RUN followed quickly by a PARK let the host take over while the reader was still acting on the RUN. The ThreadSanitizer test found this.
+- **No transaction hand-off.** The SPI transaction is not handed back and forth (see above).
+- **Notifications.** The host wakes on a task notification from the reader for each record, or every 1 ms tick.
+
+Not verified on the board yet:
+- wide in C1 (lat max, overrun 0)
+- the quiet noise with C1 free TX and windowed TX against C0
+- the stress run
+- whether `micros()` or the cross-core notification costs more on core 1 than the sim assumes (`det_max_us` and `lat_max_us` will show it)
+
+```powershell
+cd C:\Users\Biao\Projects\whisker_sensor\msd\esp32
+# wide on its own core, 20 s and 10 min
+python adc_diag.py stream --port COM4 --selects 0123457 --core 1 --mode wide --secs 20 --out wide_c1.bin
+python adc_diag.py stream --port COM4 --selects 0123457 --core 1 --mode wide --secs 600 --out wide_c1_10min.bin
+# quiet OSR 512, A/B in one session: C0, C1 free TX, C1 windowed TX
+python adc_diag.py stream --port COM4 --selects 0123457 --core 0 --mode quiet --secs 30 --out quiet_c0.bin
+python adc_diag.py stream --port COM4 --selects 0123457 --core 1 --mode quiet --secs 30 --out quiet_c1.bin
+python adc_diag.py stream --port COM4 --selects 0123457 --core 1 --tx-window-us 100 --mode quiet --secs 30 --out quiet_c1w.bin
+# stress: re-send S/C/M/B every second while streaming wide on core 1
+python adc_diag.py stream --port COM4 --selects 0123457 --core 1 --mode wide --secs 60 --resend-every 1 --out stress_c1.bin
+```
 
 ## First board run of the locked modes (bench, 2026-10-23)
 

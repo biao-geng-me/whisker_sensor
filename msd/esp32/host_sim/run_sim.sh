@@ -14,5 +14,5 @@ SK=$(cd "$HERE/../whisker_daq" && pwd)
 for f in "$SK"/*.cpp; do echo "#include \"$f\""; done > "$OUT/sketch_cpp.inc"
 "$CXX" -std=gnu++17 -O2 -w -I"$HERE/mock" -I"$SK" \
     -DSKETCH="\"$OUT/whisker_daq_pp.cpp\"" -DSKETCH_CPP="\"$OUT/sketch_cpp.inc\"" \
-    "$HERE/sim.cpp" -o "$OUT/sim"
+    "$HERE/sim.cpp" -o "$OUT/sim" -pthread
 echo "$OUT/sim"

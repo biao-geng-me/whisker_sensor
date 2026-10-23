@@ -17,8 +17,21 @@
 // its 3T sinc3 window; the input after a mux switch is the new channel plus
 // KICK x (old - new) x exp(-dt/TAU) (the measured charge-sharing tail).
 //
+// Two cores: every FreeRTOS task (Arduino's loopTask, the host task, the reader
+// task) is an OS thread, but only one runs at a time. Each core has a clock,
+// the time of its task's next observable action (advance(dt) = "busy until
+// then"); the core with the smallest clock runs, and device events (ADC
+// conversions, ISRs, ticks, stalls) are processed in time order up to that
+// clock first. An ISR runs on its core (the DRDY ISR where attachInterrupt was
+// called, the UART ISR where Serial.begin was called) and pushes that core's
+// clock back by its cost. So interleavings follow virtual time exactly, runs
+// are deterministic, and the mocks need no locks. Task notifications wake a
+// blocked task C.wake us after the give; ulTaskNotifyTake / vTaskDelay time
+// out on 1 ms tick boundaries.
+//
 // Usage: sim --end 3 --cmd 1.0:S0123457; --cmd 1.0:M2; --cmd 1.05:B --out out.bin
-//        [--stall T:US] [--adc-reset T] [--seed N] [--cost-scale X] [--no-pulse]
+//        [--stall T:US[:CORE]] (core 0 default) [--adc-reset T] [--seed N]
+//        [--cost-scale X] [--no-pulse]
 //        [--board-costs] (Serial/UART costs calibrated to the bench; apply before --cost)
 //        [--cost NAME=US] (one CPU cost, e.g. ser_call=55; names as in struct Costs)
 //        [--trace T0:T1]  (one stderr line per reader step between T0 and T1 s)
@@ -28,7 +41,12 @@
 #include "soc/soc.h"
 
 #include <array>
+#include <chrono>
+#include <condition_variable>
 #include <deque>
+#include <mutex>
+#include <thread>
+#include <unistd.h>
 #include <random>
 #include <string>
 #include <utility>
@@ -40,22 +58,26 @@ struct Costs {
     double isr_lat = 1.0, isr = 2.0, spi_ovh = 3.0, ser_call = 2.0, ser_byte = 0.02;
     double avail = 0.5, loop = 3.0, byte_xfer_ovh = 1.0;
     double uisr = 1.0, uisr_byte = 0.02;   // UART TX ISR: FIFO refill from the driver ring
+    double tick = 0.0;                     // FreeRTOS tick ISR (1 kHz, each core)
+    double notify = 0.5, wake = 5.0;       // xTaskNotifyGive; cross-core wake latency
 } C;
 // --board-costs: calibrated to the 2026-10-23 bench HEALTH (tx max 57-59 us for
 // a <= 48 B Serial.write incl. the refill ISR it triggers, lat max ~73 us at
 // OSR 256). Read cost is already close (21-22 us at 8 MHz).
-static void boardCosts() { C.ser_call = 20; C.ser_byte = 0.1; C.uisr = 8; C.uisr_byte = 0.5; }
+static void boardCosts() {
+    C.ser_call = 20; C.ser_byte = 0.1; C.uisr = 8; C.uisr_byte = 0.5; C.tick = 3;
+}
 
-static double sim_t = 0;                  // virtual time, us
-static bool sim_inIsr = false;
+static double sim_t = 0;                  // virtual time of the running context, us
 static void (*sim_isr)(void) = nullptr;
 static bool sim_isrPending = false;
 static double sim_isrDue = 0;
 static std::mt19937 sim_rng(1);
-// --stall T:US: at T the sketch is preempted for US (a higher-priority task or
-// an interrupt hog); the ADC and the DRDY ISR keep running. It can land
-// anywhere, also inside an SPI read (CS low).
-static std::vector<std::pair<double, double>> sim_stalls;
+// --stall T:US[:CORE]: at T, CORE (default 0) is taken for US (a higher-priority
+// task or an interrupt hog); the ADC and the ISRs of the other core keep
+// running. It can land anywhere, also inside an SPI read (CS low).
+struct SimStall { double t, us; int core; };
+static std::vector<SimStall> sim_stalls;
 static bool sim_pulse = true;            // narrow DRDY pulse after a read that leaves data
 
 // ---------------------------------------------------------------- pins
@@ -220,12 +242,13 @@ struct Adc {
 static const double BAUD_BPS = 92160.0;                     // 10 bits/byte
 static double sim_uFifo = 0, sim_uLast = 0;                 // FIFO bytes at sim_uLast
 static size_t sim_uRing = 0, sim_uRingCap = 256;
+static double sim_uRingT = 0;                               // when the ring got data
 static uint64_t sim_uIsrs = 0;
 static double uFifoNow() { return std::max(0.0, sim_uFifo - (sim_t - sim_uLast) * BAUD_BPS / 1e6); }
 static double uartIsrDue() {
     if (!sim_uRing) return 1e18;
-    double f = uFifoNow();
-    return f <= 10 ? sim_t : sim_t + (f - 10) / BAUD_BPS * 1e6;
+    double drained = sim_uLast + std::max(0.0, sim_uFifo - 10) / BAUD_BPS * 1e6;
+    return std::max(sim_uRingT, drained);
 }
 static double uartIsr() {                // returns its cost, us
     sim_uFifo = uFifoNow();
@@ -237,42 +260,164 @@ static double uartIsr() {                // returns its cost, us
     return C.uisr + C.uisr_byte * m;
 }
 
-// ---------------------------------------------------------------- time
-static void advance(double dt) {
-    double end = sim_t + dt;
-    for (auto &s : sim_stalls)
-        if (s.second > 0 && !sim_inIsr && s.first <= end) {
-            end += s.second;
-            s.second = 0;
-        }
+// ---------------------------------------------------------------- cores and tasks
+static const double INF = 1e18;
+struct SimExit {};                          // unwinds a deleted task's thread
+struct SimTask {
+    void (*fn)(void *);
+    void *arg;
+    int core;
+    const char *name;
+    uint32_t notify = 0;
+    bool waiting = false, dead = false;
+    std::condition_variable cv;
+};
+struct SimCore {
+    double t = INF;                         // its task's next action (INF: no task / blocked)
+    SimTask *task = nullptr;
+    std::deque<SimTask *> queued;           // created while another task had the core
+    double nextTick = 1000;
+    double busyUntil = 0;                   // an ISR or stall holds the core until then
+};
+static SimCore sim_core[2];
+static std::mutex sim_mx;
+static SimTask *sim_baton = nullptr;        // the task allowed to run
+static thread_local SimTask *sim_self = nullptr;
+static bool sim_isrCtx = false;             // running an ISR body (time only, no scheduling)
+static int sim_drdyCore = 1, sim_uartCore = 1;
+static double sim_endUs = 3e6;
+static std::vector<double> sim_resets;
+static void simFinish();
+
+// An ISR (or a stall) of `cost` us on core k at time te: its task is pushed back.
+static void preempt(int k, double te, double cost) {
+    SimCore &c = sim_core[k];
+    c.busyUntil = std::max(c.busyUntil, te + cost);
+    if (!c.task) return;
+    if (!c.task->waiting) c.t += cost;
+    else if (c.t < te + cost) c.t = te + cost;    // a wake-up can't land inside it
+}
+static void runIsr(int k, double te, void (*body)(), double extra) {
+    sim_isrCtx = true;
+    sim_t = te;
+    body();
+    double cost = sim_t - te + extra;
+    sim_isrCtx = false;
+    preempt(k, te, cost);
+}
+static void drdyIsrBody() { sim_isr(); }
+static double sim_uCost = 0;
+static void uartIsrBody() { sim_uCost = uartIsr(); }
+
+// Device events up to the earliest core clock, then hand the run to that core.
+static void schedule() {
     for (;;) {
-        double tc = adc.nextConv;
-        double ti = (!sim_inIsr && sim_isrPending) ? sim_isrDue : 1e18;
-        double tu = !sim_inIsr ? uartIsrDue() : 1e18;
-        double tn = std::min(tc, std::min(ti, tu));
-        if (tn > end) break;
-        if (tn > sim_t) sim_t = tn;
-        if (tc <= ti && tc <= tu) {
-            adc.complete();
-            adc.nextConv += adc.T;
-        } else if (tu < ti) {
-            double t0 = sim_t;
-            sim_inIsr = true;
-            sim_t += uartIsr();
-            sim_inIsr = false;
-            end += sim_t - t0;
-        } else {
-            sim_isrPending = false;
-            double t0 = sim_t;
-            sim_inIsr = true;
-            sim_isr();
-            sim_t += C.isr;
-            sim_inIsr = false;
-            end += sim_t - t0;                     // the ISR preempted the main code
+        double G = std::min(sim_core[0].t, sim_core[1].t);
+        double te = INF;
+        int kind = -1, arg = 0;
+        auto cand = [&](double t, int k, int a = 0) { if (t < te) { te = t; kind = k; arg = a; } };
+        cand(adc.nextConv, 0);
+        if (sim_isrPending) cand(sim_isrDue, 1);
+        cand(uartIsrDue(), 2);
+        if (C.tick > 0) for (int k = 0; k < 2; k++) cand(sim_core[k].nextTick, 3, k);
+        for (size_t i = 0; i < sim_stalls.size(); i++) if (sim_stalls[i].us > 0) cand(sim_stalls[i].t, 4, (int)i);
+        for (size_t i = 0; i < sim_resets.size(); i++) if (sim_resets[i] > 0) cand(sim_resets[i], 5, (int)i);
+        cand(sim_endUs, 6);
+        if (te > G) break;
+        sim_t = te;
+        switch (kind) {
+            case 0: adc.complete(); adc.nextConv += adc.T; break;
+            case 1: sim_isrPending = false; runIsr(sim_drdyCore, te, drdyIsrBody, C.isr); break;
+            case 2: runIsr(sim_uartCore, te, uartIsrBody, 0); preempt(sim_uartCore, te, sim_uCost); break;
+            case 3: preempt(arg, te, C.tick); sim_core[arg].nextTick += 1000; break;
+            case 4: preempt(sim_stalls[arg].core, te, sim_stalls[arg].us); sim_stalls[arg].us = 0; break;
+            case 5: adc.reset(); sim_resets[arg] = 0; break;
+            case 6: simFinish(); break;
         }
     }
-    sim_t = end;
+    // the earliest core runs next (a tie keeps the current one)
+    int me = sim_self->dead ? -1 : sim_self->core;
+    int run = sim_core[0].t < sim_core[1].t ? 0 : sim_core[1].t < sim_core[0].t ? 1 : (me >= 0 ? me : 0);
+    SimTask *next = sim_core[run].task;
+    if (next == sim_self) return;
+    std::unique_lock<std::mutex> lk(sim_mx);
+    sim_baton = next;
+    next->cv.notify_one();
+    if (sim_self->dead) return;
+    sim_self->cv.wait(lk, [] { return sim_baton == sim_self; });
 }
+
+static void advance(double dt) {
+    if (sim_isrCtx) { sim_t += dt; return; }
+    SimCore &c = sim_core[sim_self->core];
+    c.t = sim_t + dt;
+    schedule();
+    sim_t = sim_core[sim_self->core].t;
+}
+
+static void taskThread(SimTask *t) {
+    {
+        std::unique_lock<std::mutex> lk(sim_mx);
+        t->cv.wait(lk, [t] { return sim_baton == t; });
+    }
+    sim_self = t;
+    sim_t = sim_core[t->core].t;
+    try {
+        t->fn(t->arg);
+        vTaskDelete(nullptr);
+    } catch (SimExit &) {
+    }
+}
+
+BaseType_t xTaskCreatePinnedToCore(void (*fn)(void *), const char *name, uint32_t, void *arg,
+                                   UBaseType_t, TaskHandle_t *h, BaseType_t core) {
+    SimTask *t = new SimTask;
+    t->fn = fn; t->arg = arg; t->core = (int)core; t->name = name;
+    if (h) *h = t;
+    SimCore &c = sim_core[core];
+    if (!c.task) { c.task = t; c.t = sim_t; }
+    else c.queued.push_back(t);
+    std::thread(taskThread, t).detach();
+    return 1;
+}
+void vTaskDelete(TaskHandle_t h) {
+    if (h) { fprintf(stderr, "sim: vTaskDelete(other) not modelled\n"); exit(3); }
+    SimTask *me = sim_self;
+    SimCore &c = sim_core[me->core];
+    if (!c.queued.empty()) { c.task = c.queued.front(); c.queued.pop_front(); c.t = sim_t; }
+    else { c.task = nullptr; c.t = INF; }
+    me->dead = true;
+    schedule();
+    throw SimExit();
+}
+static double nextTickAfter(double t, uint32_t ticks) { return (std::floor(t / 1000) + ticks) * 1000; }
+void vTaskDelay(TickType_t ticks) { advance(nextTickAfter(sim_t, ticks ? ticks : 1) - sim_t); }
+uint32_t ulTaskNotifyTake(BaseType_t clear, TickType_t ticks) {
+    SimTask *me = sim_self;
+    advance(C.notify);
+    if (!me->notify && ticks) {
+        me->waiting = true;
+        sim_core[me->core].t = ticks == portMAX_DELAY ? INF : nextTickAfter(sim_t, ticks);
+        schedule();
+        me->waiting = false;
+        sim_t = sim_core[me->core].t;
+    }
+    uint32_t n = me->notify;
+    if (n) me->notify = clear ? 0 : n - 1;
+    return n;
+}
+void xTaskNotifyGive(TaskHandle_t h) {
+    SimTask *t = (SimTask *)h;
+    if (t) {
+        t->notify++;
+        if (t->waiting) {
+            double w = std::max(sim_t + C.wake, sim_core[t->core].busyUntil);
+            if (w < sim_core[t->core].t) sim_core[t->core].t = w;
+        }
+    }
+    advance(C.notify);
+}
+bool disableCore0WDT() { return true; }
 
 uint32_t micros() { advance(C.micros); return (uint32_t)(uint64_t)sim_t; }
 uint32_t millis() { advance(C.micros); return (uint32_t)(uint64_t)(sim_t / 1000); }
@@ -297,7 +442,7 @@ int digitalRead(uint8_t pin) {
     if (sim_mode[pin] == INPUT_PULLUP) return 1;
     return sim_level[pin];
 }
-void attachInterrupt(uint8_t, void (*fn)(void), int) { sim_isr = fn; }
+void attachInterrupt(uint8_t, void (*fn)(void), int) { sim_isr = fn; sim_drdyCore = sim_self->core; }
 static uint32_t sim_ledcFreq = 0;
 bool ledcAttach(uint8_t pin, uint32_t f, uint8_t) {
     if (pin == P_CLKIN) { sim_ledcFreq = f; adc.clkin = f; adc.restartConv(); }
@@ -359,7 +504,9 @@ HardwareSerial Serial;
 static std::vector<std::pair<double, std::string>> sim_rx;   // (time, bytes)
 static size_t sim_rxItem = 0, sim_rxPos = 0;
 static std::vector<uint8_t> sim_tx;
+static std::string sim_outPath = "sim_out.bin";
 size_t HardwareSerial::setTxBufferSize(size_t n) { sim_uRingCap = n; return n; }
+void HardwareSerial::begin(unsigned long) { sim_uartCore = sim_self->core; }
 int HardwareSerial::available() {
     advance(0.1);
     int n = 0;
@@ -383,6 +530,7 @@ size_t HardwareSerial::write(const uint8_t *d, size_t n) {
     advance(C.ser_call + n * C.ser_byte);
     while (sim_uRingCap - sim_uRing < n) advance(20);       // blocks like the driver
     sim_tx.insert(sim_tx.end(), d, d + n);
+    if (!sim_uRing) sim_uRingT = sim_t;
     sim_uRing += n;                                          // the refill ISR is now due
     advance(0);
     return n;
@@ -414,15 +562,13 @@ static double sim_traceFrom = -1, sim_traceTo = -1;          // --trace T0:T1 (s
 // ---------------------------------------------------------------- main
 int main(int argc, char **argv) {
     double endS = 3;
-    std::string outPath = "sim_out.bin";
-    std::vector<double> resets;
     double scale = 1;
     std::vector<std::pair<std::string, double>> costSet;
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         auto next = [&]() { return std::string(i + 1 < argc ? argv[++i] : ""); };
         if (a == "--end") endS = atof(next().c_str());
-        else if (a == "--out") outPath = next();
+        else if (a == "--out") sim_outPath = next();
         else if (a == "--seed") sim_rng.seed(atoi(next().c_str()));
         else if (a == "--cost-scale") scale = atof(next().c_str());
         else if (a == "--rail") sim_railedOuts = (uint32_t)strtoul(next().c_str(), nullptr, 0);
@@ -432,9 +578,11 @@ int main(int argc, char **argv) {
             sim_rx.push_back({atof(v.substr(0, c).c_str()) * 1e6, v.substr(c + 1)});
         } else if (a == "--stall") {
             std::string v = next();
-            size_t c = v.find(':');
-            sim_stalls.push_back({atof(v.substr(0, c).c_str()) * 1e6, atof(v.substr(c + 1).c_str())});
-        } else if (a == "--adc-reset") resets.push_back(atof(next().c_str()) * 1e6);
+            double t = 0, us = 0;
+            int core = 0;
+            sscanf(v.c_str(), "%lf:%lf:%d", &t, &us, &core);
+            sim_stalls.push_back({t * 1e6, us, core & 1});
+        } else if (a == "--adc-reset") sim_resets.push_back(atof(next().c_str()) * 1e6);
         else if (a == "--no-pulse") sim_pulse = false;
         else if (a == "--board-costs") boardCosts();
         else if (a == "--cost") {                // --cost ser_call=50 (us), after --cost-scale
@@ -457,7 +605,8 @@ int main(int argc, char **argv) {
     for (auto &cs : costSet) {
         static const char *names[] = {"micros", "reg", "dwrite", "dread", "isr_lat", "isr",
                                       "spi_ovh", "ser_call", "ser_byte", "avail", "loop",
-                                      "byte_xfer_ovh", "uisr", "uisr_byte"};
+                                      "byte_xfer_ovh", "uisr", "uisr_byte", "tick", "notify",
+                                      "wake"};
         size_t k = 0;
         while (k < sizeof(names) / sizeof(*names) && cs.first != names[k]) k++;
         if (k == sizeof(names) / sizeof(*names)) { fprintf(stderr, "unknown cost %s\n", cs.first.c_str()); return 2; }
@@ -465,22 +614,32 @@ int main(int argc, char **argv) {
     }
     std::stable_sort(sim_rx.begin(), sim_rx.end(),
                      [](const auto &x, const auto &y) { return x.first < y.first; });
+    sim_endUs = endS * 1e6;
     sim_level[P_CS] = 1;
     adc.reset();
-    setup();
-    while (sim_t < endS * 1e6) {
-        loop();
-        advance(C.loop);
-        for (auto &r : resets)
-            if (r > 0 && sim_t >= r) { adc.reset(); r = 0; }
+    // Arduino's loopTask on core 1: setup(), then loop() for ever
+    TaskHandle_t loopTask;
+    sim_t = 0;
+    xTaskCreatePinnedToCore([](void *) { setup(); for (;;) loop(); }, "loopTask", 8192, nullptr, 1,
+                            &loopTask, 1);
+    {
+        std::unique_lock<std::mutex> lk(sim_mx);
+        sim_baton = (SimTask *)loopTask;
+        sim_baton->cv.notify_one();
     }
-    FILE *f = fopen(outPath.c_str(), "wb");
-    if (!f) { perror(outPath.c_str()); return 1; }
+    for (;;) std::this_thread::sleep_for(std::chrono::hours(1));    // simFinish exits
+}
+
+static void simFinish() {
+    FILE *f = fopen(sim_outPath.c_str(), "wb");
+    if (!f) { perror(sim_outPath.c_str()); _exit(1); }
     fwrite(sim_tx.data(), 1, sim_tx.size(), f);
     fclose(f);
     fprintf(stderr, "sim: %.3f s virtual, %llu conversions, %llu blocked DRDY pulses, %llu FIFO"
-            " overwrites, %llu narrow pulses, %llu UART ISRs, %zu bytes out\n", sim_t / 1e6, (unsigned long long)adc.nConv,
-            (unsigned long long)adc.nBlocked, (unsigned long long)adc.nOverwrite,
-            (unsigned long long)adc.nPulse, (unsigned long long)sim_uIsrs, sim_tx.size());
-    return 0;
+            " overwrites, %llu narrow pulses, %llu UART ISRs, %zu bytes out\n", sim_t / 1e6,
+            (unsigned long long)adc.nConv, (unsigned long long)adc.nBlocked,
+            (unsigned long long)adc.nOverwrite, (unsigned long long)adc.nPulse,
+            (unsigned long long)sim_uIsrs, sim_tx.size());
+    fflush(stderr);
+    _exit(0);
 }

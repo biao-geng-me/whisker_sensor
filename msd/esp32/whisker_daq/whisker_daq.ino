@@ -107,6 +107,13 @@
 
 // ── State ────────────────────────────────────────────────────────────────────
 SPIClass vspi(VSPI);
+// Tasks: the host task (core 0) runs everything here; the locked reader can run
+// on its own task on core 1 (C1, see lk_reader.cpp). C0 (boot default): the
+// host task reads too, as the single-core firmware did.
+TaskHandle_t g_hostTask = nullptr;
+HostHealth   g_hh = {};
+static uint8_t  g_core  = 0;          // 'C': 0 = reader on the host core, 1 = own core
+static uint32_t g_txWin = 0;          // 'C1 <us>': windowed TX offset (0 = free)
 
 float outV    [NUM_OUT + 1];   // latest voltage, indexed by OUT number
 long  outRaw  [NUM_OUT + 1];   // latest raw 24-bit code
@@ -260,9 +267,9 @@ void send_frame(uint8_t type, const uint8_t *payload, uint8_t len) {
     uint16_t crc = crc16_fast(0xFFFF, f + 2, 2 + len);
     f[4 + len] = (uint8_t)(crc & 0xFF);
     f[5 + len] = (uint8_t)(crc >> 8);
-    if (g_lk.streaming) {
+    if (g_lk.streaming && !g_lk.remote) {     // C0: the reader writes it out from idle time
         if (!txqPush(f, 6 + len)) g_lk.h.txDrop++;
-    } else {
+    } else {                                   // also C1: the host core may block
         Serial.write(f, 6 + len);
     }
 }
@@ -312,25 +319,34 @@ void send_info() {
 
 static inline bool isRailed(uint8_t o) { return labs(outRaw[o]) >= SAT_CODE; }
 
-void send_scan() {
+// raw: codes by OUT number (index 1..NUM_OUT)
+static void send_scan_codes(uint32_t seq, uint32_t t0, uint32_t dur, uint8_t flags,
+                            const int32_t *raw) {
     // seq u32, t_us u32, dur_us u16, railmask u32, flags u8, nch u8, 32 x i24
     uint8_t p[16 + 3 * NUM_OUT];
     uint32_t rail = 0;
-    for (int o = 1; o <= NUM_OUT; o++) if (isRailed(o)) rail |= (1UL << (o - 1));
-    put_u32(p + 0, g_scans);
-    put_u32(p + 4, g_scanT0);
-    put_u16(p + 8, g_scanDur > 0xFFFF ? 0xFFFF : (uint16_t)g_scanDur);
+    for (int o = 1; o <= NUM_OUT; o++) if (labs((long)raw[o]) >= SAT_CODE) rail |= (1UL << (o - 1));
+    put_u32(p + 0, seq);
+    put_u32(p + 4, t0);
+    put_u16(p + 8, dur > 0xFFFF ? 0xFFFF : (uint16_t)dur);
     put_u32(p + 10, rail);
-    p[14] = (g_scanRecovered ? FLAG_RECOVERED : 0) | (g_scanCrcRetry ? FLAG_CRC_RETRY : 0) |
-            (g_scanStale ? FLAG_STALE : 0) | (g_scanReinit ? FLAG_REINIT : 0) |
-            (g_lk.mode ? g_lk.outFlags : 0);
+    p[14] = flags;
     p[15] = NUM_OUT;
     for (int o = 1; o <= NUM_OUT; o++) {
-        uint32_t c = (uint32_t)outRaw[o] & 0xFFFFFF;
+        uint32_t c = (uint32_t)raw[o] & 0xFFFFFF;
         uint8_t *q = p + 16 + 3 * (o - 1);
         q[0] = c; q[1] = c >> 8; q[2] = c >> 16;
     }
     send_frame(FT_SCAN, p, sizeof(p));
+}
+
+void send_scan() {
+    int32_t raw[NUM_OUT + 1];
+    for (int o = 1; o <= NUM_OUT; o++) raw[o] = (int32_t)outRaw[o];
+    send_scan_codes(g_scans, g_scanT0, g_scanDur,
+                    (g_scanRecovered ? FLAG_RECOVERED : 0) | (g_scanCrcRetry ? FLAG_CRC_RETRY : 0) |
+                    (g_scanStale ? FLAG_STALE : 0) | (g_scanReinit ? FLAG_REINIT : 0) |
+                    (g_lk.mode ? g_lk.outFlags : 0), raw);
 }
 
 // ── Whisker / connector helpers ──────────────────────────────────────────────
@@ -1572,7 +1588,9 @@ static void mode_cmd() {
 // ─────────────────────────────────────────────────────────────────────────────
 //  Setup
 // ─────────────────────────────────────────────────────────────────────────────
-void setup() {
+// Board init and boot banner, on the host task (core 0), so the UART driver
+// and its ISR live on core 0. The DRDY ISR is already attached (setup()).
+static void hostSetup() {
     crcTabInit();
     Serial.setTxBufferSize(SERIAL_TXBUF);     // must precede begin()
     Serial.begin(SERIAL_BAUD);
@@ -1600,8 +1618,6 @@ void setup() {
     }
 
     pinMode(PIN_CS, OUTPUT);  cs_high();
-    pinMode(PIN_DRDY, INPUT);
-    attachInterrupt(digitalPinToInterrupt(PIN_DRDY), drdyISR, FALLING);
     pinMode(PIN_RESET, OUTPUT); digitalWrite(PIN_RESET, HIGH);   // idle = not reset
 
     // ledcAttach returns a BOOL in core 3.x, not a frequency
@@ -1665,6 +1681,82 @@ void setup() {
     Serial.println("          S<digits>;=scan only these selects (S; = all 8)");
     Serial.println("          M<0|1|2> [settle_us] [osr] [period_us] [spi];=scan mode: 0 legacy"
                    " 76 Hz, 1 quiet 62.5 Hz (OSR 512), 2 wide 250 Hz");
+    Serial.println("          C<0|1> [tx_window_us];=reader core: C0 shared with Serial (boot),"
+                   " C1 own core; C1 <us> sends frames <us> after the scan start");
+}
+
+// ── Dual-core plumbing (host side) ───────────────────────────────────────────
+// A record from the reader (C1) -> frames on Serial.
+static void hostSendRecord(const XRec &r) {
+    if (r.kind == XR_SCAN) {
+        send_scan_codes(r.seq, r.tUs, r.durUs, r.flags, r.raw);
+    } else if (r.kind == XR_HEALTH) {
+        uint8_t p[LK_HEALTH_LEN];
+        g_hh.core = 1;
+        g_hh.qHwm = (uint8_t)min<uint32_t>(r.seq, 255);
+        g_hh.txWinUs = (uint16_t)g_lk.txWinUs;
+        lkHealthPayload(p, r.h, r.tUs, r.mode, g_hh);
+        send_frame(FT_HEALTH, p, sizeof(p));
+        g_hh.hostTxMax = 0;                    // per HEALTH window
+        g_hh.txLate = 0;
+    } else if (r.kind == XR_MSG) {
+        char buf[120];
+        lkMsgText(buf, sizeof(buf), r.msg[0], r.msg[1], r.mode);
+        logf("%s\n", buf);
+    }
+}
+
+// Send what the reader queued. window: hold each scan frame until its txAt
+// (C1 <us>); returns early if that is more than ~1.5 ms off (the caller sleeps
+// a tick and comes back).
+#define TX_LATE_US  200
+static void hostDrain(bool window) {
+    while (const XRec *q = g_xq.peek()) {
+        if (window && q->kind == XR_SCAN && g_lk.txWinUs) {
+            int32_t wait = (int32_t)(q->txAt - micros());
+            if (wait > 1500) return;
+            while ((int32_t)(q->txAt - micros()) > 0) {}
+            if (wait < -TX_LATE_US) g_hh.txLate++;
+        }
+        XRec r;
+        g_xq.pop(r);
+        uint32_t w0 = micros();
+        hostSendRecord(r);
+        uint32_t dt = micros() - w0;
+        if (dt > g_hh.hostTxMax) g_hh.hostTxMax = (uint16_t)min<uint32_t>(dt, 65535);
+    }
+}
+
+// Take the reader back from core 1 (before a command or a text mode) and send
+// what it queued. false: it didn't let go (it keeps the ADC; try again later).
+static bool hostTakeBack() {
+    if (!lkRemoteActive()) return true;
+    if (!lkPark(100)) {
+        logf("[park timeout] the reader on core 1 did not stop\n");
+        return false;
+    }
+    hostDrain(false);
+    return true;
+}
+
+// C<0|1> [tx_window_us];
+static void core_cmd() {
+    char buf[32];
+    readCmdLine(buf, sizeof(buf));
+    long v[2] = {-1, 0};
+    int n = parseLongs(buf, v, 2);
+    if (n < 1 || v[0] < 0 || v[0] > 1 || (v[0] == 1 && v[1] && (v[1] < 100 || v[1] > 60000))) {
+        logf("C: usage C<0|1> [tx_window_us];  C0 reader on the host core (boot), C1 on its own"
+             " core; C1 <100-60000> sends each scan frame that long after the scan start"
+             " (shorter than the scan period)\n");
+        return;
+    }
+    g_core = (uint8_t)v[0];
+    g_txWin = g_core ? (uint32_t)v[1] : 0;
+    g_hh.txWinUs = (uint16_t)g_txWin;
+    if (g_core) logf("core: C1, reader on core 1, TX %s%lu%s\n", g_txWin ? "at scan start + " : "",
+                     (unsigned long)g_txWin, g_txWin ? " us" : " free (as soon as ready)");
+    else logf("core: C0, reader and Serial on core 0\n");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1675,7 +1767,9 @@ static void enter_text_mode(char m, const char *banner) {
     Serial.println(banner);
 }
 
-void loop() {
+static void hostLoop() {
+    // A command: the host must own the reader (it may touch the ADC or g_lk).
+    if (Serial.available() && !hostTakeBack()) { vTaskDelay(1); return; }
     while (Serial.available()) {
         char k = Serial.read();
         if (g_lk.streaming) {             // finish the queued frames before anything else
@@ -1709,11 +1803,22 @@ void loop() {
                       if (g_lk.mode) lkStart(); break;
             case 'S': selects_cmd(); break;
             case 'M': mode_cmd(); break;
+            case 'C': core_cmd(); break;
             default: break;    // ignore CR/LF and anything unknown
         }
     }
 
     bool streaming = g_mode == 'B' && g_lk.mode;
+    if (streaming && g_core == 1) {          // C1: core 1 reads, this core sends
+        if (!lkRemoteActive()) {
+            txqFlushBlocking();
+            lkRun(g_txWin);
+        }
+        hostDrain(true);
+        ulTaskNotifyTake(pdTRUE, 1);         // the next record, or one tick
+        return;
+    }
+    if (lkRemoteActive() && !hostTakeBack()) { vTaskDelay(1); return; }
     if (streaming && !g_lk.streaming) lkHealthReset();   // HEALTH windows cover streaming only
     g_lk.streaming = streaming;
     switch (g_mode) {
@@ -1727,3 +1832,27 @@ void loop() {
         default:  if (scan_all()) print_grid();    delay(250); break;
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Tasks
+// ─────────────────────────────────────────────────────────────────────────────
+// setup() runs on core 1 (Arduino's loopTask). It attaches the DRDY ISR here,
+// so the GPIO ISR service lives on core 1 with the reader; starts the reader
+// task (core 1, parked); and hands everything else to the host task on core 0,
+// which calls Serial.begin (the UART ISR then lands on core 0). Core 0's idle
+// task leaves the task watchdog: in C0 the host task reads without yielding, as
+// loop() did on core 1 before (whose idle task was never watched either).
+static void hostTask(void *) {
+    disableCore0WDT();
+    hostSetup();
+    for (;;) hostLoop();
+}
+
+void setup() {
+    pinMode(PIN_DRDY, INPUT);
+    attachInterrupt(digitalPinToInterrupt(PIN_DRDY), drdyISR, FALLING);
+    lkTaskStart();
+    xTaskCreatePinnedToCore(hostTask, "host", 16384, nullptr, 2, &g_hostTask, 0);
+}
+
+void loop() { vTaskDelete(nullptr); }   // the host task has taken over
