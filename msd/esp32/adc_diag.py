@@ -672,6 +672,15 @@ def cmd_selects(a) -> int:
 MODES = {"legacy": 0, "quiet": 1, "wide": 2, "0": 0, "1": 1, "2": 2}
 
 
+def core_command(core: int | None, tx_window_us: int | None) -> str:
+    """The C command: C<0|1> [tx_window_us]; ("" = leave the core as it is)."""
+    if core is None:
+        return ""
+    if core not in (0, 1):
+        raise ValueError("core: 0 or 1")
+    return f"C1 {tx_window_us};" if core == 1 and tx_window_us else f"C{core};"
+
+
 def mode_command(mode: str, settle: int | None, osr: int | None, spi: int | None,
                  period: int | None = None) -> str:
     """The M command: M<mode> [settle_us] [osr] [period_us] [spi_hz]; (0 = default)."""
@@ -722,12 +731,14 @@ def cmd_stream(a) -> int:
     cmd = ""
     if a.selects:
         cmd += "S" + ("" if a.selects.lower() == "all" else a.selects) + ";"
+    cmd += core_command(a.core, a.tx_window_us)
     if a.mode:
         if a.mode.lower() not in MODES:
             print("mode: legacy|quiet|wide (or 0|1|2)", file=sys.stderr)
             return 2
         cmd += mode_command(a.mode, a.settle_us, a.osr, a.spi, a.period_us)
     cmd += "B"
+    resends = 0
     ser = open_port(a.port)
     dec, raw = ef.Decoder(), bytearray()
     scans, infos, health = [], [], []
@@ -735,7 +746,12 @@ def cmd_stream(a) -> int:
         ser.reset_input_buffer()
         ser.write(cmd.encode())
         t0 = time.monotonic()
+        t_resend = t0 + (a.resend_every or 1e9)
         while time.monotonic() - t0 < a.secs:
+            if time.monotonic() >= t_resend:          # stress: the same setup again
+                ser.write(cmd.encode())
+                resends += 1
+                t_resend += a.resend_every
             data = ser.read(ser.in_waiting or 1)
             raw += data
             for ev in dec.feed(data):
@@ -754,7 +770,12 @@ def cmd_stream(a) -> int:
                           f" edgeless {h['edgeless']} crc {h['crc']} stale {h['stale']}"
                           f" late_sw {h['late_switch']} tx_drop {h['tx_drop']} empty"
                           f" {h['empty_slots']} resync {h['resync']} reinit {h['reinit']}"
-                          f" recov {h['recov']}", flush=True)
+                          f" recov {h['recov']}" + (
+                              f" | core {h['core']} q_hwm {h['q_hwm']} tx_win {h['tx_win_us']}"
+                              f" host_tx_max {h['host_tx_max_us']} det_max {h['det_max_us']}"
+                              f" tx_late {h['tx_late']} parks {h['parks']}"
+                              f" park_timeouts {h['park_timeouts']}" if "core" in h else ""),
+                          flush=True)
                 elif isinstance(ev, ef.Text):
                     print("TEXT", ev.text)
         wall = time.monotonic() - t0
@@ -780,6 +801,18 @@ def cmd_stream(a) -> int:
     print(f"{len(scans)} scans in {wall:.1f} s ({len(scans) / wall:.1f}/s on the wire); t_us"
           f" spacing (us: count) {dict(dts.most_common(5))}; seq gaps {gaps};"
           f" flagged scans {dict(flags) or 0}; link CRC failures {dec.n_crc_fail}")
+    if health:
+        hs = [h.summary() for h in health]
+        tot = {k: sum(h[k] for h in hs) for k in ("overrun", "missed", "late_switch", "empty_slots",
+                                                 "tx_drop", "resync", "reinit", "recov")}
+        print(f"HEALTH totals over {len(hs)} frames: {tot}; lat max {max(h['lat_max_us'] for h in hs)}"
+              f" us; busy {min(h['busy_pct'] for h in hs)}-{max(h['busy_pct'] for h in hs)} %"
+              + (f"; core {sorted({h['core'] for h in hs if 'core' in h})}, parks"
+                 f" {hs[-1]['parks']}, park timeouts {hs[-1]['park_timeouts']}" if "core" in hs[-1]
+                 else ""))
+    if resends:
+        print(f"stress: the setup was re-sent {resends} times ({len([x for x in scans if x.flags])}"
+              f" flagged scans in total)")
     return 0
 
 
@@ -845,6 +878,13 @@ def main(argv=None) -> int:
     p.set_defaults(func=cmd_mode)
 
     p = sub.add_parser("stream", parents=[mo], help="stream and print HEALTH + scan stats")
+    p.add_argument("--core", type=int, choices=(0, 1),
+                   help="reader core first: 0 shared with Serial (boot default), 1 own core")
+    p.add_argument("--tx-window-us", type=int,
+                   help="with --core 1: send each scan frame this long after the scan start"
+                        " (100 us .. the scan period; default: as soon as it is ready)")
+    p.add_argument("--resend-every", type=float, default=0,
+                   help="stress: re-send the S/C/M/B setup every this many seconds")
     p.add_argument("--port", required=True)
     p.add_argument("--mode", help="set this mode first: legacy | quiet | wide")
     p.add_argument("--selects", help="set these selects first, e.g. 0123457 or all")

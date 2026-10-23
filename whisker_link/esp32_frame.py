@@ -66,6 +66,14 @@ so diagnostics never corrupt the binary stream.
     u32 conversions, u16 overrun, u16 missed, u16 edgeless, u16 crc, u16 stale,
     u16 late_switch, u16 tx_drop, u16 empty_slots, u16 resync, u16 reinit,
     u16 recov, u16 window_ms
+    version 2 appends (dual-core firmware, 2026-10-23):
+    u8 core (0 = reader and sender share core 0, 1 = reader on its own core 1),
+    u8 q_hwm (most records waiting in the reader -> sender queue),
+    u16 tx_win_us (0 = frames sent as soon as they are ready, else sent at
+    this offset after the scan start), u16 parks (reader handovers to the host
+    core), u16 park_timeouts, u16 host_tx_max_us (longest Serial write on the
+    host core), u16 det_max_us (DRDY edge -> start of the read), u16 tx_late
+    (windowed: frames sent > 200 us after their window)
 
 This module is pure stdlib so it runs on the BlueOS Pi without numpy.
 """
@@ -74,7 +82,7 @@ from __future__ import annotations
 
 import struct
 from dataclasses import dataclass
-from typing import Iterator, Union
+from typing import Iterator, Optional, Union
 
 SYNC = b"\xA5\x5A"
 PROTO_VERSION = 4
@@ -91,6 +99,7 @@ _INFO_EXT = struct.Struct("<HHB")          # appended in version 2
 _INFO_EXT3 = struct.Struct("<B")           # appended in version 3
 _INFO_EXT4 = struct.Struct("<BIH8B")       # appended in version 4
 _HEALTH = struct.Struct("<BBHHHHHHI" + "H" * 12)
+_HEALTH2 = struct.Struct("<BBHHHHHH")      # appended in version 2
 MODE_NAMES = {0: "legacy", 1: "quiet", 2: "wide"}
 FLAG_RECOVERED = 0x01
 FLAG_CRC_RETRY = 0x02
@@ -186,10 +195,19 @@ class Health:
     reinit: int
     recov: int
     window_ms: int
+    # version 2 (None from a version-1 firmware)
+    core: Optional[int] = None
+    q_hwm: Optional[int] = None
+    tx_win_us: Optional[int] = None
+    parks: Optional[int] = None
+    park_timeouts: Optional[int] = None
+    host_tx_max_us: Optional[int] = None
+    det_max_us: Optional[int] = None
+    tx_late: Optional[int] = None
 
     def summary(self) -> dict:
         """The fields a status record carries (busy %, latencies in us)."""
-        d = dict(self.__dict__)
+        d = {k: v for k, v in self.__dict__.items() if v is not None}
         d["busy_pct"] = round(self.busy_permille / 10, 1)
         d["lat_avg_us"] = round(self.lat_avg_x10 / 10, 1)
         d["read_avg_us"] = round(self.read_avg_x10 / 10, 1)
@@ -258,7 +276,11 @@ def info_cfg(info: dict) -> dict:
 
 
 def encode_health(h: Health) -> bytes:
-    return _frame(T_HEALTH, _HEALTH.pack(*(getattr(h, f) for f in Health.__dataclass_fields__)))
+    names = list(Health.__dataclass_fields__)
+    p = _HEALTH.pack(*(getattr(h, f) for f in names[:21]))
+    if h.core is not None:
+        p += _HEALTH2.pack(*(getattr(h, f) or 0 for f in names[21:]))
+    return _frame(T_HEALTH, p)
 
 
 # ----- decoding
@@ -294,7 +316,11 @@ def _parse(ftype: int, p: bytes) -> Event | None:
                     *_INFO_EXT3.unpack_from(p, _INFO.size + _INFO_EXT.size),
                     mode, spi, n_conv, tuple(avg))
     if ftype == T_HEALTH and len(p) >= _HEALTH.size:      # longer = newer firmware
-        return Health(*_HEALTH.unpack_from(p))
+        h = Health(*_HEALTH.unpack_from(p))
+        if h.version >= 2 and len(p) >= _HEALTH.size + _HEALTH2.size:
+            (h.core, h.q_hwm, h.tx_win_us, h.parks, h.park_timeouts, h.host_tx_max_us,
+             h.det_max_us, h.tx_late) = _HEALTH2.unpack_from(p, _HEALTH.size)
+        return h
     return None
 
 

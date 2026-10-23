@@ -8,6 +8,11 @@ OUT=${1:-/tmp/whisker_sim}
 CXX=${CXX:-g++}
 mkdir -p "$OUT"
 arduino-cli compile --fqbn esp32:esp32:esp32 --preprocess "$HERE/../whisker_daq" > "$OUT/whisker_daq_pp.cpp"
-"$CXX" -std=gnu++17 -O2 -w -I"$HERE/mock" -DSKETCH="\"$OUT/whisker_daq_pp.cpp\"" \
-    "$HERE/sim.cpp" -o "$OUT/sim"
+# One translation unit: the preprocessed .ino, then the sketch's .cpp files
+# (sim.cpp includes them), so the sim's hooks (LK_TRACE) reach the reader too.
+SK=$(cd "$HERE/../whisker_daq" && pwd)
+for f in "$SK"/*.cpp; do echo "#include \"$f\""; done > "$OUT/sketch_cpp.inc"
+"$CXX" -std=gnu++17 -O2 -w -I"$HERE/mock" -I"$SK" \
+    -DSKETCH="\"$OUT/whisker_daq_pp.cpp\"" -DSKETCH_CPP="\"$OUT/sketch_cpp.inc\"" \
+    "$HERE/sim.cpp" -o "$OUT/sim" -pthread
 echo "$OUT/sim"

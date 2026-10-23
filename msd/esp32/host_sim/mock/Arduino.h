@@ -23,6 +23,23 @@ using std::min;
 #define FALLING 0x02
 #define digitalPinToInterrupt(p) (p)
 
+// FreeRTOS / ESP-IDF task API (sim.cpp: tasks are threads on two virtual cores)
+typedef void *TaskHandle_t;
+typedef int BaseType_t;
+typedef unsigned UBaseType_t;
+typedef uint32_t TickType_t;
+#define pdTRUE 1
+#define pdFALSE 0
+#define portMAX_DELAY 0xFFFFFFFFu
+#define pdMS_TO_TICKS(ms) ((TickType_t)(ms))     // 1 kHz tick
+BaseType_t xTaskCreatePinnedToCore(void (*fn)(void *), const char *name, uint32_t stack, void *arg,
+                                   UBaseType_t prio, TaskHandle_t *h, BaseType_t core);
+void vTaskDelete(TaskHandle_t h);
+void vTaskDelay(TickType_t ticks);
+uint32_t ulTaskNotifyTake(BaseType_t clear, TickType_t ticks);
+void xTaskNotifyGive(TaskHandle_t h);
+bool disableCore0WDT();
+
 uint32_t micros();
 uint32_t millis();
 void delay(uint32_t ms);
@@ -38,7 +55,7 @@ uint32_t ledcReadFreq(uint8_t pin);
 
 class HardwareSerial {
   public:
-    void begin(unsigned long) {}
+    void begin(unsigned long);
     size_t setTxBufferSize(size_t n);
     int available();
     int read();

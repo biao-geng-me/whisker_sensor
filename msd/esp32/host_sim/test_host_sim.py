@@ -168,3 +168,109 @@ def test_quiet_board_costs_no_overrun(sim, tmp_path, mcmd):
     assert sum(h.overrun for h in health) == 0 and sum(h.missed for h in health) == 0
     assert max(h.read_max_us for h in health) < 30            # no ISR inside a read
     assert not [s for s in scans if s.flags]
+
+
+# ---------------------------------------------------------------- dual core (C1)
+def _health_ok(health, lat_limit):
+    tail = health[1:]                                     # the first window covers the start
+    assert tail and all(h.core == 1 for h in tail)
+    assert sum(h.overrun for h in tail) == 0 and sum(h.missed for h in tail) == 0
+    assert max(h.lat_max_us for h in tail) < lat_limit, [h.lat_max_us for h in tail]
+    assert sum(h.tx_drop for h in tail) == 0 and sum(h.empty_slots for h in tail) == 0
+
+
+@pytest.mark.parametrize("scale", ["1.0", "1.5"])
+@pytest.mark.parametrize("ccmd", ["C1;", "C1 100;"])
+def test_c1_wide_board_costs(sim, tmp_path, scale, ccmd):
+    """Wide on its own core with the bench-calibrated costs: no overrun, lat < T = 32 us."""
+    scans, infos, health, _ = run(sim, tmp_path / "o.bin", "--end", "4", "--board-costs",
+                                  "--cost-scale", scale, "--cmd", "1.0:S0123457;",
+                                  "--cmd", f"1.0:{ccmd}", "--cmd", "1.0:M2;", "--cmd", "1.3:B")
+    _health_ok(health, 32)
+    assert all(h.tx_win_us == (100 if "100" in ccmd else 0) and h.tx_late == 0 for h in health[1:])
+    assert {b.t_us - a.t_us for a, b in zip(scans, scans[1:])} == {4000}
+    assert all(b.seq == a.seq + 1 for a, b in zip(scans, scans[1:]))
+    assert not [s for s in scans if s.flags]
+    for s in scans[2:]:
+        for o in range(1, 33):
+            if o not in SKIPPED6:
+                assert abs(s.raw[o - 1] - expected(o)) < 300
+
+
+def test_c1_quiet_windowed(sim, tmp_path):
+    scans, _, health, _ = run(sim, tmp_path / "o.bin", "--end", "4", "--board-costs",
+                              "--cmd", "1.0:S0123457;", "--cmd", "1.0:C1 2000;", "--cmd", "1.3:B")
+    _health_ok(health, 64)
+    assert {b.t_us - a.t_us for a, b in zip(scans, scans[1:])} == {16000}
+    assert not [s for s in scans if s.flags] and all(h.tx_late == 0 for h in health)
+
+
+def test_c1_stalls_each_core(sim, tmp_path):
+    """Core 1 (the reader) stalled 300 us: one flagged scan. Core 0 (the sender)
+    stalled 30 ms: the queue absorbs it, nothing is flagged or lost."""
+    scans, _, health, _ = run(sim, tmp_path / "o.bin", "--end", "4", "--board-costs",
+                              "--cmd", "1.0:S0123457;", "--cmd", "1.0:C1;", "--cmd", "1.0:M2;",
+                              "--cmd", "1.3:B", "--stall", "2.0021:300:1", "--stall", "2.5:30000:0")
+    assert len([s for s in scans if s.flags]) == 1
+    assert {b.t_us - a.t_us for a, b in zip(scans, scans[1:])} == {4000}
+    assert all(b.seq == a.seq + 1 for a, b in zip(scans, scans[1:]))
+    assert max(h.q_hwm for h in health) >= 7 and sum(h.tx_drop for h in health) == 0
+
+
+def test_c1_queue_full_keeps_health(sim, tmp_path):
+    """The sender stalled 300 ms (> 32 queued scans): scans are dropped and
+    counted, HEALTH frames still arrive, the stream recovers."""
+    scans, _, health, _ = run(sim, tmp_path / "o.bin", "--end", "5", "--board-costs",
+                              "--cmd", "1.0:C1;", "--cmd", "1.0:M2;", "--cmd", "1.3:B",
+                              "--stall", "2.5:300000:0")
+    assert sum(h.tx_drop for h in health) > 0
+    assert len(health) >= 3 and all(h.overrun == 0 for h in health[1:])
+    gaps = [b.seq - a.seq for a, b in zip(scans, scans[1:]) if b.seq != a.seq + 1]
+    assert len(gaps) == 1 and gaps[0] > 1                 # one hole, seq still counts scans
+    tail = [s for s in scans if s.t_us > scans[-1].t_us - 500_000]
+    assert {b.t_us - a.t_us for a, b in zip(tail, tail[1:])} == {4000}
+
+
+def test_c1_adc_reset(sim, tmp_path):
+    scans, _, health, text = run(sim, tmp_path / "o.bin", "--end", "4", "--board-costs",
+                                 "--cmd", "1.0:C1;", "--cmd", "1.0:M2;", "--cmd", "1.3:B",
+                                 "--adc-reset", "2.0")
+    assert any("adc reset" in t for t in text)              # the message crossed to core 0
+    assert any(s.flags & ef.FLAG_REINIT for s in scans)
+    after = [s for s in scans if s.t_us > scans[-1].t_us - 500_000]
+    assert all(s.flags == 0 for s in after)
+    assert {b.t_us - a.t_us for a, b in zip(after, after[1:])} == {4000}
+
+
+def test_c1_command_spam_and_park(sim, tmp_path):
+    """S/M/text/legacy commands while core 1 streams: each one parks the reader
+    and hands it back; nothing hangs and every mode streams cleanly after."""
+    cmds = []
+    t = 1.3
+    for i in range(12):
+        cmds += ["--cmd", f"{t:.3f}:{['S012345;', 'S0123457;', 'M1;', 'M2;'][i % 4]}"]
+        t += 0.15
+    cmds += ["--cmd", f"{t:.3f}:g", "--cmd", f"{t + 0.2:.3f}:M0;", "--cmd", f"{t + 0.3:.3f}:B",
+             "--cmd", f"{t + 0.6:.3f}:M2;", "--cmd", f"{t + 0.65:.3f}:B"]
+    end = t + 2.0
+    scans, infos, health, text = run(sim, tmp_path / "o.bin", "--end", f"{end:.3f}",
+                                     "--board-costs", "--cmd", "1.0:C1;", "--cmd", "1.0:M2;",
+                                     "--cmd", "1.3:B", *cmds)
+    assert not any("park timeout" in x for x in text)
+    assert any("GRID" in x or "W01A" in x for x in text)          # the text mode ran
+    assert {i.mode for i in infos} >= {0, 1, 2}
+    assert health[-1].parks >= 10 and health[-1].park_timeouts == 0
+    tail = [s for s in scans if s.t_us > scans[-1].t_us - 1_000_000]
+    assert {b.t_us - a.t_us for a, b in zip(tail, tail[1:])} == {4000}
+    assert not [s for s in tail if s.flags]
+    _health_ok(health[-1:] * 2, 32)
+
+
+def test_c0_c1_switch(sim, tmp_path):
+    """C1 -> C0 -> C1 while streaming quiet: HEALTH reports the core."""
+    _, _, health, _ = run(sim, tmp_path / "o.bin", "--end", "6", "--cmd", "1.0:C1;",
+                          "--cmd", "1.3:B", "--cmd", "3.0:C0;", "--cmd", "3.05:B",
+                          "--cmd", "4.5:C1;", "--cmd", "4.55:B")
+    cores = [h.core for h in health]
+    assert 1 in cores[:2] and 0 in cores and cores[-1] == 1
+    assert all(h.overrun == 0 for h in health)
