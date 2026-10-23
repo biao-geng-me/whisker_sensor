@@ -151,7 +151,7 @@ python msd\esp32\adc_diag.py mode --port COM4 legacy
 
 On the ROV, `rpi/daq_server.py --selects 0123457 --mode wide` (or `--mode quiet`, `--mode quiet,200,256`, `--mode quiet,200,256,8000`) sends `S…;M…;B` on every stream start. In a serial monitor, type `M2;` etc. directly.
 
-Host simulation: [`host_sim/`](host_sim/) compiles the real sketch (arduino-cli `--preprocess` output) against a mock Arduino layer and a model of the ADS131M04. The model covers the conversion grid, the 2-deep FIFO, DRDY edges and blocked pulses, the narrow DRDY pulse at the end of a read that leaves data in the FIFO (`--no-pulse` turns it off), the mux tail, and SPI frames with CRC. `python -m pytest msd/esp32/host_sim` (needs arduino-cli and a g++, e.g. `CXX=~/app/miniconda/envs/mpi/bin/g++` on the cluster) checks:
+Host simulation: [`host_sim/`](host_sim/) compiles the real sketch (arduino-cli `--preprocess` output of the `.ino`, plus the sketch's `.cpp` files in the same unit) against a mock Arduino layer and a model of the ADS131M04. The model covers the conversion grid, the 2-deep FIFO, DRDY edges and blocked pulses, the narrow DRDY pulse at the end of a read that leaves data in the FIFO (`--no-pulse` turns it off), the mux tail, and SPI frames with CRC. `python -m pytest msd/esp32/host_sim` (needs arduino-cli and a g++, e.g. `CXX=~/app/miniconda/envs/mpi/bin/g++` on the cluster) checks:
 - both modes: exact scan spacing, averages and no flags
 - a 300 µs stall: one SYNC-flagged scan, grid kept
 - an overrun in quiet OSR 256, OSR 512 and wide at several phases: at most one flagged scan, and `resync` doesn't keep counting afterwards (the 2026-10-23 bug)
@@ -197,7 +197,7 @@ Strain: the gauge sits on the top arm, so tension (gauge R up) lowers `StrainPOS
 
 ## Build and flash
 
-Arduino IDE 2.x with the **esp32 by Espressif** core 3.x; board **ESP32 Dev Module**. Open `whisker_daq/whisker_daq.ino`, upload over USB. Compile check from the command line:
+Arduino IDE 2.x with the **esp32 by Espressif** core 3.x; board **ESP32 Dev Module**. Open `whisker_daq/whisker_daq.ino`, upload over USB. The sketch is several files in `whisker_daq/` (`whisker_daq.ino`, `daq_common.h`, `lk_reader.h/.cpp`); the IDE opens them as tabs and builds them together, so keep the folder intact. Compile check from the command line:
 
 ```bash
 arduino-cli compile --fqbn esp32:esp32:esp32 msd/esp32/whisker_daq

@@ -409,6 +409,7 @@ static double sim_traceFrom = -1, sim_traceTo = -1;          // --trace T0:T1 (s
                     (int)(wait), adc.fifo.size(), (int)adc.drdyLow);                         \
     } while (0)
 #include SKETCH
+#include SKETCH_CPP
 
 // ---------------------------------------------------------------- main
 int main(int argc, char **argv) {
