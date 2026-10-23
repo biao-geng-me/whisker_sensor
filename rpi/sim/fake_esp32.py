@@ -4,9 +4,10 @@ Creates a pty, prints its path, and behaves like the firmware: boot banner
 in text, then binary SCAN frames at ~80 Hz once it receives ``B``. Any of the
 text-mode command letters stops the binary stream again.
 
-Scan modes like the firmware: ``M0;`` legacy (--rate, default 80 Hz), ``M1;``
-quiet (62.5 Hz) and ``M2;`` wide (250 Hz), with INFO version 4 and 1 Hz HEALTH
-frames in M1/M2; ``S<digits>;`` limits the mux selects (skipped outputs read
+Scan modes like the firmware: ``M1;`` quiet (62.5 Hz, OSR 512, the boot
+default), ``M0;`` legacy (--rate, default 80 Hz) and ``M2;`` wide (250 Hz),
+with INFO version 4 and 1 Hz HEALTH frames in M1/M2 (``--boot-mode 0`` starts
+in legacy); ``S<digits>;`` limits the mux selects (skipped outputs read
 railed). In M1/M2, t_us advances by exactly 16000 / 4000 us per scan.
 ``kill -USR1 <pid>`` reboots it: boot banner, legacy mode, all selects, text
 mode until the next ``B`` (like a halt or a DTR reset of the real board).
@@ -76,7 +77,9 @@ def info_for(mode: int, sel_mask: int, lk: tuple | None = None) -> ef.Info:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--rate", type=float, default=80.0, help="scans per second")
+    ap.add_argument("--rate", type=float, default=80.0, help="legacy mode: scans per second")
+    ap.add_argument("--boot-mode", type=int, choices=(0, 1), default=1,
+                    help="mode after boot: 1 quiet (as the firmware), 0 legacy")
     ap.add_argument("--live", default="W3_B,W4_B,W8_B", help="connected gauges")
     ap.add_argument("--freq", type=float, default=0.5, help="motion frequency, Hz")
     ap.add_argument("--amp-mv", type=float, default=5.0)
@@ -118,9 +121,9 @@ def main() -> None:
         b"Baseline captured from 16 scans.\r\n")
     binary = False
     seq = 0
-    mode, sel_mask = 0, 0xFF
-    lk = None                            # lock_params() of the current locked mode
-    period = 1.0 / args.rate
+    mode, sel_mask = args.boot_mode, 0xFF
+    lk = lock_params(1) if mode else None   # lock_params() of the current locked mode
+    period = lk[3] / 1e6 if lk else 1.0 / args.rate
     next_t = time.monotonic()
     grid_us = None                       # locked modes: t_us on an exact grid
     last_health = time.monotonic()

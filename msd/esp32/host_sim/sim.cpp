@@ -19,6 +19,7 @@
 //
 // Usage: sim --end 3 --cmd 1.0:S0123457; --cmd 1.0:M2; --cmd 1.05:B --out out.bin
 //        [--stall T:US] [--adc-reset T] [--seed N] [--cost-scale X] [--no-pulse]
+//        [--cost NAME=US] (one CPU cost, e.g. ser_call=55; names as in struct Costs)
 //        [--trace T0:T1]  (one stderr line per reader step between T0 and T1 s)
 #include "Arduino.h"
 #include "SPI.h"
@@ -387,6 +388,7 @@ int main(int argc, char **argv) {
     std::string outPath = "sim_out.bin";
     std::vector<double> resets;
     double scale = 1;
+    std::vector<std::pair<std::string, double>> costSet;
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         auto next = [&]() { return std::string(i + 1 < argc ? argv[++i] : ""); };
@@ -405,6 +407,11 @@ int main(int argc, char **argv) {
             sim_stalls.push_back({atof(v.substr(0, c).c_str()) * 1e6, atof(v.substr(c + 1).c_str())});
         } else if (a == "--adc-reset") resets.push_back(atof(next().c_str()) * 1e6);
         else if (a == "--no-pulse") sim_pulse = false;
+        else if (a == "--cost") {                // --cost ser_call=50 (us), after --cost-scale
+            std::string v = next();
+            size_t c = v.find('=');
+            costSet.push_back({v.substr(0, c), atof(v.substr(c + 1).c_str())});
+        }
         else if (a == "--trace") {
             std::string v = next();
             size_t c = v.find(':');
@@ -416,6 +423,15 @@ int main(int argc, char **argv) {
     if (scale != 1) {
         double *p = &C.micros;
         for (size_t k = 0; k < sizeof(C) / sizeof(double); k++) p[k] *= scale;
+    }
+    for (auto &cs : costSet) {
+        static const char *names[] = {"micros", "reg", "dwrite", "dread", "isr_lat", "isr",
+                                      "spi_ovh", "ser_call", "ser_byte", "avail", "loop",
+                                      "byte_xfer_ovh"};
+        size_t k = 0;
+        while (k < sizeof(names) / sizeof(*names) && cs.first != names[k]) k++;
+        if (k == sizeof(names) / sizeof(*names)) { fprintf(stderr, "unknown cost %s\n", cs.first.c_str()); return 2; }
+        (&C.micros)[k] = cs.second;
     }
     std::stable_sort(sim_rx.begin(), sim_rx.end(),
                      [](const auto &x, const auto &y) { return x.first < y.first; });

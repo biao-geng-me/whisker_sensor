@@ -87,12 +87,12 @@ On the ROV, `rpi/daq_server.py --selects 0123457` sends `S0123457;` before every
 
 ## Locked scan modes: quiet 62.5 Hz, wide 250 Hz (2026-10-22)
 
-Most of the remaining noise is a comb at exact multiples of 62.5 Hz (16 ms, ESP32/USB activity), plus a small 845 Hz line. CLKIN comes from the ESP32 crystal, so a scan that is exactly N conversions of the free-running ADC, with N × T a multiple of 16 ms, folds the whole comb onto 0 Hz, a constant offset per channel. The simulation (`/scratch/bigeme/whisker_dev/sim/sim.py`) gives ~0.012 mV for the quiet mode against ~0.055 mV now. The legacy ~76 Hz scan (`M0`) stays the boot default until both modes are verified on the bench.
+Most of the remaining noise is a comb at exact multiples of 62.5 Hz (16 ms, ESP32/USB activity), plus a small 845 Hz line. CLKIN comes from the ESP32 crystal, so a scan that is exactly N conversions of the free-running ADC, with N × T a multiple of 16 ms, folds the whole comb onto 0 Hz, a constant offset per channel. The simulation (`/scratch/bigeme/whisker_dev/sim/sim.py`) gives ~0.012 mV for the quiet mode against ~0.055 mV now. Since 2026-10-23 quiet (`M1`, OSR 512) is the boot default. The legacy ~76 Hz scan stays available as `M0;`.
 
 | mode | command | CLKIN | OSR (T) | SPI | N per scan | scan | conversions averaged per select (7 selects) |
 |---|---|---|---|---|---|---|---|
 | legacy | `M0;` | 0.8 MHz | 128 (320 µs) | 600 kHz | – | ~13 ms, ~76 Hz | 1 |
-| quiet (default OSR 512 since 2026-10-23) | `M1;` | 8 MHz | 512 (128 µs) | 8 MHz | 125 | 16 ms, 62.5 Hz | 13–14 (drop 4) |
+| quiet (boot default; OSR 512 since 2026-10-23) | `M1;` | 8 MHz | 512 (128 µs) | 8 MHz | 125 | 16 ms, 62.5 Hz | 13–14 (drop 4) |
 | quiet, OSR 256 | `M1 200 256;` | 8 MHz | 256 (64 µs) | 8 MHz | 250 | 16 ms, 62.5 Hz | 29–30 (drop 6) |
 | quiet, OSR 256, 125 Hz (bench comparison) | `M1 200 256 8000;` | 8 MHz | 256 (64 µs) | 8 MHz | 125 | 8 ms, 125 Hz | 11–12 (drop 6) |
 | wide | `M2;` | 8 MHz | 128 (32 µs) | 12 MHz (11.43 actual) | 125 | 4 ms, 250 Hz | 8–9 (drop 9) |

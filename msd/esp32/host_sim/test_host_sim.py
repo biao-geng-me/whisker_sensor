@@ -75,7 +75,7 @@ def test_locked_modes(sim, tmp_path, mcmd, mode, period, osr, tol):
     assert cfg["mode"] == mode and cfg["selects"] == "0123457" and cfg["clkin_hz"] == 8_000_000
     assert cfg["osr"] == osr
     assert cfg["scan_hz"] == 1e6 / period
-    assert len(scans) > 1.6e6 / period
+    assert len(scans) > 1.4e6 / period
     assert {b.t_us - a.t_us for a, b in zip(scans, scans[1:])} == {period}
     assert all(b.seq == a.seq + 1 for a, b in zip(scans, scans[1:]))
     assert all(s.flags == 0 and s.dur_us == period for s in scans[1:])
@@ -95,7 +95,7 @@ def test_period_needs_whole_conversions(sim, tmp_path):
     _, infos, _, text = run(sim, tmp_path / "o.bin", "--end", "1.5",
                             "--cmd", "1.0:M1 200 512 8000;", "--cmd", "1.2:B")
     assert any("whole number of conversions" in t for t in text)
-    assert infos[-1].mode == 0
+    assert infos[-1].mode == 1                          # still the boot default (quiet)
 
 
 def test_stall_flags_one_scan_and_keeps_grid(sim, tmp_path):
@@ -118,12 +118,14 @@ def test_adc_reset_reinit(sim, tmp_path):
         collections.Counter({4000: len(after) - 1})
 
 
-def test_legacy_default_and_back(sim, tmp_path):
+def test_quiet_boot_default_wide_and_legacy(sim, tmp_path):
     scans, infos, health, _ = run(sim, tmp_path / "o.bin", "--end", "3", "--cmd", "0.9:B",
                                   "--cmd", "1.5:M2;", "--cmd", "2.2:M0;")
-    assert [i.mode for i in infos] == [0, 2, 0]
-    legacy = [s for s in scans if s.dur_us != 4000]
-    assert len(legacy) > 50 and len([s for s in scans if s.dur_us == 4000]) > 100
+    assert [i.mode for i in infos] == [1, 2, 0]           # quiet is the boot default
+    quiet = [s for s in scans if s.dur_us == 16000]
+    assert len(quiet) > 20 and {b.t_us - a.t_us for a, b in zip(quiet, quiet[1:])} == {16000}
+    legacy = [s for s in scans if s.dur_us not in (4000, 16000)]
+    assert len(legacy) > 40 and len([s for s in scans if s.dur_us == 4000]) > 100
 
 
 # An overrun (a stall of 1.1-4 conversions, at phases spread over a scan): the

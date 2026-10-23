@@ -13,9 +13,10 @@ Subcommands (the ESP32 on a serial port, e.g. COM5 or /dev/ttyUSB0):
 ``analyze``  Analyze a saved settle capture (.txt or .npz), e.g. on the cluster.
 ``selects``  Set the scanned mux selects (firmware ``S``), e.g. ``0123457`` or
              ``all``. The ESP32 forgets it on reboot.
-``mode``     Set the scan mode (firmware ``M``): legacy (~76 Hz, boot default),
-             quiet (62.5 Hz locked) or wide (250 Hz locked), with optional
-             --settle-us / --osr / --spi. The ESP32 forgets it on reboot.
+``mode``     Set the scan mode (firmware ``M``): quiet (62.5 Hz locked, OSR 512,
+             the boot default), legacy (~76 Hz) or wide (250 Hz locked), with
+             optional --settle-us / --osr / --period-us / --spi. The ESP32
+             forgets it on reboot.
 ``stream``   Optionally set selects and mode, stream for N s and print each
              1 s HEALTH record (busy %, DRDY-to-read latency, overruns, ...) and a
              summary of the scans (rate, t_us spacing, seq gaps, flags).
