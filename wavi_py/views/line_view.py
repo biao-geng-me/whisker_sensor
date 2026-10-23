@@ -41,7 +41,7 @@ _KEYS_HELP = """\
 <tr><td><b>= &nbsp;-</b></td><td>zoom time in / out (all plots; stays live). Keypad + - too</td></tr>
 <tr><td><b>+ &nbsp;_</b></td><td>zoom Y in / out: framed tile (stacked: trace gain)</td></tr>
 <tr><td><b>. &nbsp;,</b></td><td>zoom Y in / out: all tiles (stacked: trace gain)</td></tr>
-<tr><td><b>arrows</b></td><td>pan; Left / Right all plots (leaves live), Up / Down the framed tile</td></tr>
+<tr><td><b>arrows</b></td><td>move the data (Left: traces slide left); Left / Right all plots (leaves live), Up / Down the framed tile</td></tr>
 <tr><td><b>Y</b></td><td>link Y: all grid tiles share one Y range</td></tr>
 <tr><td><b>Z</b></td><td>zoom box mode (drag a rectangle) / pan mode</td></tr>
 <tr><td><b>0</b></td><td>re-zero (re-capture V0)</td></tr>

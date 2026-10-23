@@ -40,7 +40,7 @@ _KEYS_HELP = """\
 <tr><td><b>= &nbsp;-</b></td><td>zoom frequency in / out (all plots). Keypad + - too</td></tr>
 <tr><td><b>+ &nbsp;_</b></td><td>zoom Y in / out: framed tile (stacked: trace gain)</td></tr>
 <tr><td><b>. &nbsp;,</b></td><td>zoom Y in / out: all tiles (stacked: trace gain)</td></tr>
-<tr><td><b>arrows</b></td><td>pan; Left / Right all plots, Up / Down the framed tile</td></tr>
+<tr><td><b>arrows</b></td><td>move the data (Left: traces slide left); Left / Right all plots, Up / Down the framed tile</td></tr>
 <tr><td><b>D</b></td><td>dB / linear amplitude</td></tr>
 <tr><td><b>W</b></td><td>FFT window length: 0.5 / 1 / 2 / 5 s</td></tr>
 <tr><td><b>Y</b></td><td>link Y: all grid tiles share one Y range</td></tr>
