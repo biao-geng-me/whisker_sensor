@@ -15,6 +15,12 @@ spectrogram views work unchanged. Differences:
   its micros() clock) and kept in ``bus`` metadata as ``fs_measured``. Host
   arrival times are useless for this: USB, TCP and the GUI tick deliver
   samples in bursts.
+- INFO frames (the ESP32's scan config, sent when it starts streaming and
+  after a scan-mode command) go in ``bus`` metadata as ``esp32_infos``: the
+  newest few as ``(n, at, info)``, where ``at`` is the bus sample count when
+  it arrived, so the GUI can start its buffers over exactly at a mode switch.
+  ``info_count`` counts them. An INFO also restarts the rate measurement. The
+  firmware's text lines are kept as ``esp32_txt`` = ``(n, msg)``.
 - ``start_tee(path)`` copies the raw stream to a local .jsonl — the same
   format as the recording on the Pi, so ``whisker_link.convert`` reads both.
 """
@@ -67,6 +73,9 @@ class ServerReader:
         self.error: Optional[str] = None   # why _run ended, if not stop()
         self._scan_clock: collections.deque = collections.deque()  # (seq, tus)
         self._last_fs_report = 0.0
+        self._infos: collections.deque = collections.deque(maxlen=8)   # (n, at, info)
+        self._n_info = 0
+        self._n_txt = 0
 
     # ----- lifecycle (same surface as Reader)
 
@@ -178,16 +187,33 @@ class ServerReader:
                     + list(self._attitude), dtype=np.float32))
         elif k == "status":
             self._bus.set_metadata(server_status=ev)
+        elif k == "info":
+            self._flush(rows, imu_rows)       # what came before is the old scan config
+            self._note_info({f: v for f, v in ev.items() if f not in ("k", "t")})
         elif k == "hello":
             self.hello = ev
             self._mv_per_code = float(ev.get("mv_per_code", MV_PER_CODE))
             self._bus.set_metadata(server_hello=ev, t0_unix=time.time())
+            if isinstance(ev.get("esp32"), dict):  # daq_server: the INFO it has so far
+                self._note_info(ev["esp32"])
         elif k == "txt":
             print(f"[{ev.get('src', '?')}] {ev.get('msg', '')}")
+            if ev.get("src") == "esp32":
+                self._n_txt += 1
+                self._bus.set_metadata(esp32_txt=(self._n_txt, str(ev.get("msg", ""))))
         elif k == "ack":
             self._bus.set_metadata(server_ack=ev)
             if not ev.get("ok", True):
                 print(f"[ServerReader] command failed: {ev}")
+
+    def _note_info(self, info: dict) -> None:
+        self._n_info += 1
+        self._infos.append((self._n_info, self._bus.total_published, info))
+        # the scan rate may have changed: measure it afresh, and drop the old figure
+        self._scan_clock.clear()
+        self._last_fs_report = 0.0
+        self._bus.set_metadata(esp32_infos=list(self._infos), info_count=self._n_info,
+                               fs_measured=None)
 
     def _note_scan_clock(self, seq: int, tus: int) -> None:
         hist = self._scan_clock

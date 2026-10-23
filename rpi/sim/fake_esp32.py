@@ -8,6 +8,8 @@ Scan modes like the firmware: ``M0;`` legacy (--rate, default 80 Hz), ``M1;``
 quiet (62.5 Hz) and ``M2;`` wide (250 Hz), with INFO version 4 and 1 Hz HEALTH
 frames in M1/M2; ``S<digits>;`` limits the mux selects (skipped outputs read
 railed). In M1/M2, t_us advances by exactly 16000 / 4000 us per scan.
+``kill -USR1 <pid>`` reboots it: boot banner, legacy mode, all selects, text
+mode until the next ``B`` (like a halt or a DTR reset of the real board).
 
 Signal: the "live" gauges carry ``amp * sin(2*pi*f*t)`` on a shared wall clock
 (``time.time()``) plus noise, so ``fake_autopilot.py`` can put the same motion
@@ -24,6 +26,7 @@ import argparse
 import math
 import os
 import random
+import signal
 import sys
 import time
 import tty
@@ -124,6 +127,8 @@ def main() -> None:
     n_health = 0
     offsets = [random.randint(-200_000, 200_000) for _ in range(len(CHANNEL_NAMES))]
     pending = ""                         # an M / S command waiting for its ';'
+    reboot = []                          # SIGUSR1: reboot at the next loop pass
+    signal.signal(signal.SIGUSR1, lambda *_: reboot.append(1))
 
     def say(msg: str) -> None:
         out(ef.encode_text(msg) if binary else (msg + "\r\n").encode())
@@ -161,6 +166,12 @@ def main() -> None:
             out(ef.encode_info(info_for(mode, sel_mask, lk)))
 
     while True:
+        if reboot:
+            reboot.clear()
+            binary, mode, sel_mask, lk, pending, seq = False, 0, 0xFF, None, "", 0
+            period, grid_us = 1.0 / args.rate, None
+            out(b"\r\n=================================================\r\n"
+                b"  whisker_daq (SIMULATED) rebooted\r\n")
         try:
             cmds = os.read(master, 256)
         except (BlockingIOError, OSError):

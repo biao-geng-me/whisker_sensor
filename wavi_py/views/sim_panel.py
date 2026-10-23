@@ -5,7 +5,8 @@ sine amplitude and frequency, and noise; scan rate, drift and mains hum; the
 noise of all gauges at once; presets; taps (a
 decaying ring on one whisker, by hand or every few seconds); and faults (the
 scan flags, a sequence gap, a link CRC error, a dropout) to exercise the
-status line.
+status line; and a reboot (the array comes back in the legacy scan mode, so
+the control panel's Scan mode re-applies its selection).
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ from whisker_link.channels import NUM_WHISKER
 
 _FAULTS = (("ADC recovered", "recovered"), ("ADC CRC retry", "crc_retry"),
            ("ADC stale", "stale"), ("ADC re-init", "reinit"), ("Seq gap", "seq_gap"),
-           ("Link CRC", "link_crc"), ("Dropout 3 s", "dropout"))
+           ("Link CRC", "link_crc"), ("Dropout 3 s", "dropout"), ("Reboot ESP32", "reboot"))
 
 
 def _spin(lo: float, hi: float, step: float, decimals: int, suffix: str) -> QDoubleSpinBox:
@@ -65,7 +66,9 @@ class SimPanel(ViewWindow):
         grid = QGridLayout(box)
         self._rate = QComboBox()
         self._rate.addItems([f"{r:g} Hz" for r in RATES_HZ])
-        self._rate.setToolTip("Scan rate. The GUI adopts a new measured rate unless recording.")
+        self._rate.setToolTip("Scan rate in the legacy scan mode (the locked modes, set with the "
+                              "control panel's Scan mode, run at their own rate). The GUI "
+                              "adopts a new measured rate.")
         self._rate.currentIndexChanged.connect(lambda i: setattr(self._sig, "rate_hz", RATES_HZ[i]))
         self._noise = _spin(0, 100, 0.1, 2, " mV")
         self._noise.setToolTip("Set the white noise (RMS) of every gauge at once; "

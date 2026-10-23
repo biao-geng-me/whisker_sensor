@@ -20,7 +20,19 @@ streaming (the GUI's signal panel, or a script):
 - faults: the scan flags (ADC recovered / CRC retry / stale / re-init), a
   sequence gap, a link CRC error, and a dropout (no scans for a while);
 - the scan rate (a change restarts the scan counters, as a re-flashed ESP32
-  would, so the reader re-measures the rate in one step).
+  would, so the reader re-measures the rate in one step);
+- a reboot (the ``reboot`` fault): the array comes back in the legacy mode
+  with all selects, and streams again ~2 s later, as when the ESP32 transport
+  kicks it with ``B``.
+
+The ``esp32`` command (raw bytes to the firmware) understands the firmware's
+``S<digits>;`` (mux selects; the outputs of a skipped select read railed),
+``M<mode> [settle_us] [osr] [period_us] [spi_hz];`` (scan mode, checked like
+the firmware: a bad combination is refused with an ``M: ...`` text line) and
+``B`` (an INFO frame). Legacy mode scans at ``SimSignals.rate_hz``; the locked
+modes at their own rate (62.5 / 125 / 250 Hz), with a 1 Hz HEALTH record in
+the status. INFO is sent when streaming starts and after each M, as the
+firmware does.
 
 Scans are generated on demand in ``read_some`` from the monotonic clock, in
 blocks, with the scan timestamps (``tus``) at the nominal rate.
@@ -38,14 +50,16 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from wavi_py.scan_mode import LOCK_DEFAULTS, info_for, lock_params
 from wavi_py.transports.base import Transport
 from whisker_link import esp32_frame as ef
 from whisker_link import wire
-from whisker_link.channels import CHANNEL_NAMES, NCH
+from whisker_link.channels import CHANNEL_NAMES, NCH, channels_of_selects
 
 RAIL_CODE = (1 << 23) - 1           # a railed (open) gauge: positive full scale
 RATES_HZ = (40.0, 80.0, 200.0, 400.0, 1000.0)
 _MAX_BLOCK = 400                    # scans per read_some call at most (catch-up after a stall)
+_REBOOT_S = 2.0                     # a rebooted array streams again after this (the host's kick)
 
 
 @dataclass
@@ -81,6 +95,7 @@ class SimSignals:
     pending_seq_gap: int = 0        # sequence numbers to skip before the next scan
     pending_link_crc: int = 0       # link CRC errors to count
     dropout_until: float = 0.0      # monotonic; no scans before this
+    pending_reboot: bool = False
     t_ref: float = field(default_factory=time.monotonic)    # drift is zero here
 
     def __post_init__(self) -> None:
@@ -169,7 +184,7 @@ class SimSignals:
 
     def fault(self, kind: str, n: int = 1, secs: float = 3.0) -> None:
         """Inject: recovered / crc_retry / stale / reinit (scan flags), seq_gap,
-        link_crc, or dropout (no scans for ``secs``)."""
+        link_crc, dropout (no scans for ``secs``), or reboot (back in legacy)."""
         flags = {"recovered": ef.FLAG_RECOVERED, "crc_retry": ef.FLAG_CRC_RETRY,
                  "stale": ef.FLAG_STALE, "reinit": ef.FLAG_REINIT}
         with self.lock:
@@ -181,6 +196,8 @@ class SimSignals:
                 self.pending_link_crc += n
             elif kind == "dropout":
                 self.dropout_until = time.monotonic() + secs
+            elif kind == "reboot":
+                self.pending_reboot = True
             else:
                 raise ValueError(f"unknown fault {kind!r}")
 
@@ -233,7 +250,14 @@ class SimTransport(Transport):
                    "adc_reinit": 0}
         self._crc_fail = 0
         self._gap_pending = False                  # a dropout ended: count one seq gap
+        # the emulated firmware: scan mode, selects, binary streaming
+        self._fw_in: collections.deque[str] = collections.deque()   # from the GUI thread
+        self._fw_cmd = ""                          # an M / S command waiting for its ';'
+        self._mode, self._sel_mask, self._lk = 0, 0xFF, None
+        self._streaming_at = 0.0                   # rebooted: not streaming before this (monotonic)
+        self._last_health = self._t0
         self._emit(self._hello())
+        self._emit(self._info())                   # the transport's 'B' on connect
 
     # ----- Transport
 
@@ -248,10 +272,23 @@ class SimTransport(Transport):
         if self._next_t > now:
             time.sleep(min(self._next_t - now, 0.01))
             now = time.monotonic()
-        if self.signals.rate_hz != self._rate:
+        while self._fw_in:
+            self._firmware(self._fw_in.popleft(), now)
+        if self.signals.pending_reboot:
+            self._reboot(now)
+        if now < self._streaming_at:               # rebooted, not kicked yet
+            self._next_t = self._streaming_at
+            if now - self._last_status >= 1.0:
+                self._emit(self._status(now))
+            return self._drain()
+        if self._streaming_at:                     # the kick: streaming again
+            self._streaming_at = 0.0
+            self._emit(self._info())
+        rate = 1e6 / self._lk[3] if self._mode else self.signals.rate_hz
+        if rate != self._rate:
             # like re-flashing the ESP32 at a new rate: counters restart, so the reader
             # drops its rate history and re-measures once instead of ramping over 10 s
-            self._rate = self.signals.rate_hz
+            self._rate = rate
             self._next_t = now
             self._seq = self._tus = 0
             self._emit({"k": "txt", "t": now, "src": "sim", "msg": f"rate {self._rate:g} Hz"})
@@ -268,6 +305,9 @@ class SimTransport(Transport):
                 self._gap_pending = True
         if now - self._last_status >= 1.0:
             self._emit(self._status(now))
+        return self._drain()
+
+    def _drain(self) -> bytes:
         parts = []
         while self._out:                           # acks may arrive from the GUI thread
             parts.append(self._out.popleft())
@@ -303,8 +343,76 @@ class SimTransport(Transport):
                 "host": socket.gethostname(), "serial": "sim",
                 "channels": CHANNEL_NAMES, "mv_per_code": ef.MV_PER_CODE}
 
+    # ----- the emulated firmware (reader thread)
+
+    def _info(self) -> dict:
+        info = info_for(self._mode, self._sel_mask, self._lk)
+        return {"k": "info", "t": time.monotonic(), **info.__dict__}
+
+    def _say(self, msg: str, now: float) -> None:
+        self._emit({"k": "txt", "t": now, "src": "esp32", "msg": msg})
+
+    def _firmware(self, data: str, now: float) -> None:
+        """Bytes written to the ESP32: S<digits>; M<args>; B (others are ignored)."""
+        for c in data:
+            if self._fw_cmd:
+                if c in ";\n":
+                    self._fw_arg_cmd(self._fw_cmd, now)
+                    self._fw_cmd = ""
+                elif c != "\r":
+                    self._fw_cmd += c
+            elif c in "MS":
+                self._fw_cmd = c
+            elif c == "B" and now >= self._streaming_at:
+                self._emit(self._info())
+
+    def _fw_arg_cmd(self, c: str, now: float) -> None:
+        if c[0] == "S":
+            digits = {int(d) for d in c[1:] if d in "01234567"}
+            self._sel_mask = sum(1 << d for d in digits) or 0xFF
+            return
+        usage = "M: usage M<0|1|2> [settle_us] [osr] [period_us] [spi_hz];"
+        try:
+            v = [int(x) for x in c[1:].split()[:5]]
+        except ValueError:
+            v = []
+        if not v or v[0] not in (0, 1, 2):
+            self._say(usage, now)
+            return
+        if v[0] in LOCK_DEFAULTS:
+            v += [0] * (5 - len(v))
+            lk = lock_params(*v)
+            if isinstance(lk, str):
+                self._say(f"M: {lk}", now)
+                return
+            self._lk = lk
+        else:
+            self._lk = None
+        self._mode = v[0]
+        self._say(f"mode {self._mode} (simulated)", now)
+        if now >= self._streaming_at:
+            self._emit(self._info())
+
+    def _reboot(self, now: float) -> None:
+        self.signals.pending_reboot = False
+        self._mode, self._sel_mask, self._lk, self._fw_cmd = 0, 0xFF, None, ""
+        self._seq = self._tus = 0
+        self._streaming_at = now + _REBOOT_S
+        self._say("whisker_daq (SIMULATED) rebooted", now)
+
+    def _health(self) -> dict | None:
+        if not self._mode:
+            return None
+        osr, _, n, period = self._lk[:4]
+        return ef.Health(1, self._mode, 380 if self._mode == 2 else 250, 30, 180, 160, 17, 4,
+                         int(1e6 / period * n), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1000).summary()
+
     def _scans(self, t: np.ndarray, now: float) -> None:
         mv, rail = self.signals.block(t)
+        if self._sel_mask != 0xFF:                 # outputs of a skipped select read railed
+            skipped = sorted(set(range(NCH)) - set(channels_of_selects(self._sel_mask)))
+            mv[:, skipped] = np.nan
+            rail |= sum(1 << i for i in skipped)
         codes = np.where(np.isnan(mv), RAIL_CODE, np.rint(np.nan_to_num(mv) / ef.MV_PER_CODE))
         codes = np.clip(codes, -RAIL_CODE - 1, RAIL_CODE).astype(np.int64)
         flags, gap, link_crc = self.signals.take_faults()
@@ -321,7 +429,7 @@ class SimTransport(Transport):
         dt_us = int(round(1e6 / self._rate))
         for k in range(len(t)):
             self._emit({"k": "wsk", "t": now, "seq": self._seq, "tus": self._tus,
-                        "dur": 12_300, "rail": rail, "flg": flags if k == 0 else 0,
+                        "dur": int(1e6 / self._rate) if self._mode else 12_300, "rail": rail, "flg": flags if k == 0 else 0,
                         "raw": codes[k].tolist()})
             self._seq += 1
             self._tus = (self._tus + dt_us) & 0xFFFFFFFF
@@ -333,17 +441,23 @@ class SimTransport(Transport):
         dt = now - self._last_status
         hz = round(self._scans_since_status / dt, 1) if dt > 0 else 0.0
         self._last_status, self._scans_since_status = now, 0
+        health = self._health()
         return {"k": "status", "t": now, "clients": 1,
                 "rec": {"on": False, "path": None, "secs": 0, "events": 0},
                 "hz": {"wsk": hz},
                 "esp32": {**self._n, "crc_fail": self._crc_fail, "skipped": 0,
-                          "streaming": now - self._last_scan < 1.0}}
+                          "streaming": now - self._last_scan < 1.0,
+                          "cfg": ef.info_cfg(info_for(self._mode, self._sel_mask,
+                                                      self._lk).__dict__),
+                          **({"health": health} if health else {})}}
 
     def _command(self, cmd: dict) -> None:
         name = cmd.get("cmd")
         now = time.monotonic()
         reply = {"k": "ack", "t": now, "cmd": name, "ok": True}
-        if name == "mark":
+        if name == "esp32":
+            self._fw_in.append(str(cmd.get("data", "")))    # read by the reader thread
+        elif name == "mark":
             self._emit({"k": "mark", "t": now, "text": str(cmd.get("text", ""))})
         elif name not in ("rec_start", "rec_stop", "status"):
             reply.update(ok=False, error=f"unknown command {name!r}")   # local tee records

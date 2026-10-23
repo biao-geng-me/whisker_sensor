@@ -19,7 +19,8 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-from PyQt6.QtCore import QTimer, Qt
+from PyQt6.QtCore import QRegularExpression, QTimer, Qt
+from PyQt6.QtGui import QRegularExpressionValidator
 from PyQt6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
@@ -31,6 +32,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QSizePolicy,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -52,12 +54,17 @@ from wavi_py.config import (
 )
 from wavi_py.daq.outliers import fill_outliers_linear
 from wavi_py.io.dat_writer import DatWriter, build_datalog_filename
+from wavi_py.scan_mode import (DEFAULT_SELECTS, PRESETS, ModeKeeper, ScanRequest, describe_cfg,
+                               parse_selects)
 from wavi_py.transports.sim_transport import SimSignals
 from wavi_py.views import FftView, ImuView, LineView, SpectrogramView, SpectrumView
 from wavi_py.views.sim_panel import SimPanel
 from wavi_py.views.spectral_base import FFT_WINDOWS_S
 from whisker_link.channels import SAT_CODE
-from whisker_link.esp32_frame import MV_PER_CODE
+from whisker_link.esp32_frame import MV_PER_CODE, info_cfg
+
+
+LEGACY_NOMINAL_HZ = 76.0     # the legacy scan with 7 selects; the measured rate replaces it
 
 
 def _default_outpath() -> Path:
@@ -86,6 +93,8 @@ class MainWindow(QMainWindow):
         t_buffer_s: float = DEFAULT_T_BUFFER_S,
         scale: float = 1.0,
         outpath: Optional[Path] = None,
+        scan_mode: Optional[tuple[int, ...]] = None,
+        selects: str = DEFAULT_SELECTS,
     ):
         super().__init__()
         self.setWindowTitle("Wavi (Python)")
@@ -112,7 +121,27 @@ class MainWindow(QMainWindow):
         # subscriber cursor + counters
         self._last_seq = 0
         self._last_v0_version = 0
+        # Time of sample index i since the stream start: anchor_t + (i - anchor_idx) / fs.
+        # A rate change moves the anchor, so the time axis and the .dat timestamps
+        # stay continuous across a scan-mode switch.
+        self._anchor_idx = 0
+        self._anchor_t = 0.0
         self._set_rate(float(fs))   # derived sizes + rolling buffers
+
+        # ESP32 scan mode: what the user picked (kept and re-applied by the keeper),
+        # the INFO frames seen, and rate switches waiting for their sample index
+        self._keeper = ModeKeeper()
+        if scan_mode is not None:
+            self._keeper.set_wanted(ScanRequest(tuple(scan_mode), selects), connected=False)
+        self._initial_scan_mode = scan_mode
+        self._initial_selects = selects
+        self._esp32_cfg: Optional[dict] = None
+        self._cfg_key: Optional[tuple] = None
+        self._info_seen = 0
+        self._txt_seen = 0
+        self._pending_switches: list[tuple[int, float]] = []    # (sample index, fs)
+        self._legacy_fs: dict[int, float] = {}                  # measured, per select mask
+        self._last_status_rec: dict = {}
 
         # recording state
         self._outpath: Path = outpath if outpath else _default_outpath()
@@ -209,17 +238,28 @@ class MainWindow(QMainWindow):
         self._spec_data, self._spec_cols = new, cols
         self._spec_view.set_span(self._t_spec_s)
 
-    def _maybe_apply_measured_rate(self, fs_measured: Optional[float]) -> None:
-        """Adopt the measured whisker rate when it differs by more than 1%.
+    def _t_of(self, idx: int) -> float:
+        """Seconds since the stream start of sample index ``idx``."""
+        return self._anchor_t + (idx - self._anchor_idx) / self._fs
 
-        Not mid-recording: the .dat timestamps are first_index / fs, so a
-        rate change there would put a step in the file's time axis.
-        """
-        if not self._auto_fs or not fs_measured or self._is_recording:
+    def _switch_rate(self, fs: float, at: int) -> None:
+        """From sample index ``at`` on the rate is ``fs``: move the time anchor
+        there and start the buffers over (no window mixes two rates)."""
+        at = max(at, self._anchor_idx)
+        self._anchor_t = self._t_of(at)
+        self._anchor_idx = at
+        self._set_rate(fs)
+
+    def _maybe_apply_measured_rate(self, fs_measured: Optional[float]) -> None:
+        """Adopt the measured whisker rate when it differs by more than 1%
+        (also while recording: the time anchor keeps the .dat timestamps continuous)."""
+        if not self._auto_fs or not fs_measured or self._pending_switches:
             return
+        if self._esp32_cfg is not None and self._esp32_cfg.get("mode") == 0:
+            self._legacy_fs[self._esp32_cfg.get("sel_mask", 0xFF)] = fs_measured
         if abs(fs_measured - self._fs) <= 0.01 * self._fs:
             return
-        self._set_rate(fs_measured)
+        self._switch_rate(fs_measured, self._last_seq)
         print(f"[MainWindow] whisker rate measured from the ESP32 clock: {fs_measured:.2f} Hz")
 
     # ------------------------------------------------------------------
@@ -240,7 +280,10 @@ class MainWindow(QMainWindow):
 
     def _build_transport_group(self) -> QGroupBox:
         box = QGroupBox("Sensor array")
-        h = QHBoxLayout(box)
+        rows = QVBoxLayout(box)
+        h = QHBoxLayout()
+        rows.addLayout(h)
+        rows.addLayout(self._build_scan_mode_row())
 
         self._transport_combo = QComboBox()
         self._transport_combo.addItems(["Server", "ESP32", "Sim", "TCP", "Serial"])
@@ -282,6 +325,82 @@ class MainWindow(QMainWindow):
 
         self._on_transport_changed(self._transport_combo.currentText())
         return box
+
+    def _build_scan_mode_row(self) -> QHBoxLayout:
+        h = QHBoxLayout()
+        self._mode_combo = QComboBox()
+        self._mode_combo.addItem("as is (don't set)", None)
+        for label, args in PRESETS:
+            self._mode_combo.addItem(label, args)
+        init = self._initial_scan_mode
+        if init is not None:
+            i = self._mode_combo.findData(tuple(init))
+            if i < 0:
+                self._mode_combo.addItem(ScanRequest(tuple(init)).label, tuple(init))
+                i = self._mode_combo.count() - 1
+            self._mode_combo.setCurrentIndex(i)
+        self._mode_combo.setToolTip(
+            "ESP32 scan mode, sent as S<selects>;M<mode>;B (Server, ESP32 and Sim transports).\n"
+            "The ESP32 boots in legacy and forgets the mode on reboot: the mode shown next to\n"
+            "this is what its INFO reports, and if it comes back in another mode the choice is\n"
+            "re-sent once. 'as is' sends nothing. Wide 250 Hz overruns on the current\n"
+            "single-core firmware.")
+        self._mode_combo.activated.connect(lambda _i: self._on_scan_mode_changed(force=True))
+        self._selects_edit = QLineEdit(self._initial_selects)
+        self._selects_edit.setPlaceholderText("all 8")
+        self._selects_edit.setMaxLength(8)
+        self._selects_edit.setFixedWidth(80)
+        self._selects_edit.setValidator(QRegularExpressionValidator(QRegularExpression("[0-7]{0,8}")))
+        self._selects_edit.setToolTip("Mux selects the ESP32 scans, sent with the scan mode "
+                                      "(empty = all 8; the outputs of a skipped select read open)")
+        self._selects_edit.editingFinished.connect(lambda: self._on_scan_mode_changed(force=False))
+        self._mode_label = QLabel()
+        # long notes are cut at the right instead of widening the window (full text: tooltip)
+        self._mode_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        h.addWidget(QLabel("Scan mode:"))
+        h.addWidget(self._mode_combo)
+        h.addWidget(QLabel("Selects:"))
+        h.addWidget(self._selects_edit)
+        h.addWidget(self._mode_label, stretch=1)
+        self._show_mode_note()
+        return h
+
+    def _scan_request(self) -> Optional[ScanRequest]:
+        args = self._mode_combo.currentData()
+        if args is None:
+            return None
+        return ScanRequest(tuple(args), parse_selects(self._selects_edit.text()))
+
+    def _on_scan_mode_changed(self, force: bool) -> None:
+        """The user picked a mode (``force``: send even if it is the same, to retry)
+        or edited the selects."""
+        req = self._scan_request()
+        if not force and req == self._keeper.want:
+            return
+        connected = (self._client is not None and self._client.is_running
+                     and self._client.is_event_stream)
+        self._send_esp32(self._keeper.set_wanted(req, connected))
+        self._show_mode_note()
+
+    def _send_esp32(self, data: Optional[str]) -> None:
+        if data and self._client is not None:
+            print(f"[MainWindow] to the ESP32: {data}")
+            self._client.send_command({"cmd": "esp32", "data": data})
+
+    def _show_mode_note(self) -> None:
+        """The keeper's note (or the reported mode) next to the dropdown and in the
+        stream status line."""
+        note = self._keeper.note
+        if not note and self._esp32_cfg is not None:
+            note = f"ESP32 reports {describe_cfg(self._esp32_cfg)}"
+        if note == self._mode_label.text():
+            return
+        self._mode_label.setText(note)
+        self._mode_label.setToolTip(note)
+        bad = self._keeper.state == "failed"
+        self._mode_label.setStyleSheet("QLabel { color: #c00; }" if bad else "QLabel { color: #555; }")
+        if self._last_status_rec and self._client is not None:
+            self._show_status(self._last_status_rec)
 
     def _build_view_buttons(self) -> QGroupBox:
         box = QGroupBox("Views")
@@ -383,6 +502,9 @@ class MainWindow(QMainWindow):
         self._host_edit.setEnabled(kind in ("TCP", "SERVER"))
         self._port_spin.setEnabled(kind in ("TCP", "SERVER"))
         self._serial_port_edit.setEnabled(kind in ("SERIAL", "ESP32"))
+        array = kind in ("SERVER", "ESP32", "SIM")
+        self._mode_combo.setEnabled(array)
+        self._selects_edit.setEnabled(array)
         self._sim_btn.setEnabled(kind == "SIM")
         if kind != "SIM":
             self._sim_btn.setChecked(False)
@@ -426,6 +548,14 @@ class MainWindow(QMainWindow):
         self._last_v0_version = 0
         self._imu_last_seq = 0
         self._imu_rows = np.empty((0, 9), dtype=np.float32)
+        self._anchor_idx, self._anchor_t = 0, 0.0
+        self._esp32_cfg, self._cfg_key = None, None
+        self._info_seen = self._txt_seen = 0
+        self._pending_switches = []
+        self._last_status_rec = {}
+        if client.is_event_stream:
+            self._keeper.connected()
+        self._show_mode_note()
 
         self._connect_btn.setText("Disconnect")
         self._set_stream_buttons_enabled(True)
@@ -454,6 +584,9 @@ class MainWindow(QMainWindow):
             self._client.stop()
             self._client = None
 
+        self._keeper.set_wanted(self._keeper.want, connected=False)
+        self._esp32_cfg = None
+        self._show_mode_note()
         self._connect_btn.setText("Connect")
         self._pause_btn.setChecked(False)
         self._set_stream_buttons_enabled(False)
@@ -612,25 +745,25 @@ class MainWindow(QMainWindow):
             # caller fell behind — log it once in a while
             print(f"[MainWindow] bus dropped {n_new_published - n_new} samples")
 
-        # Outlier removal on the trailing block, mirroring wavi.m's remove_outliers.
-        cleaned = fill_outliers_linear(samples)
-
-        # Shift the rolling buffer and append cleaned samples.
-        if n_new >= self._ns_tot:
-            self._sig[:] = cleaned[-self._ns_tot:]
-        else:
-            self._sig[:-n_new] = self._sig[n_new:]
-            self._sig[-n_new:] = cleaned
-        self._samples_since_clear = min(self._samples_since_clear + n_new, self._ns_tot)
-
-        # Recording path: write the cleaned samples with their wall-clock timestamps.
-        if self._is_recording and self._dat_writer is not None:
-            self._write_record(cleaned, new_seq)
+        # A scan-mode switch inside this block: the samples before it go into the old
+        # buffers, then the buffers start over at the new rate.
+        first = new_seq - n_new
+        pos = 0
+        while self._pending_switches and self._pending_switches[0][0] < new_seq:
+            at, fs = self._pending_switches.pop(0)
+            cut = min(max(at - first, pos), n_new)
+            if cut > pos:
+                self._ingest(samples[pos:cut], first + pos)
+                pos = cut
+            self._switch_rate(fs, at)
+        if pos < n_new:
+            self._ingest(samples[pos:], first + pos)
+        if self._is_recording:
             self._maybe_auto_stop()
 
-        # Time axis: most recent sample is at t = (new_seq - 1)/fs since stream start.
+        # Time axis: the most recent sample is at t_of(new_seq - 1) since the stream start.
         # We render the whole buffer with x = (i - (ns_tot-1)) / fs + latest_time.
-        latest_t = (new_seq - 1) / self._fs
+        latest_t = self._t_of(new_seq - 1)
         t_axis = latest_t + np.arange(-(self._ns_tot - 1), 1) / self._fs
 
         # Plot updates (skipped while paused, but data still buffered + recorded).
@@ -654,16 +787,67 @@ class MainWindow(QMainWindow):
                 self._update_spectrum()
 
             # FFT / spectrogram: update every batch (mirrors n_update=1 default).
-            self._samples_since_spec_update += n_new
             if self._samples_since_spec_update >= self._ns_spec:
                 self._update_fft_and_spec()
                 self._samples_since_spec_update = 0
+
+    def _ingest(self, samples: np.ndarray, first_idx: int) -> None:
+        """Samples ``first_idx``... (all at the current rate) into the rolling buffer
+        and the recording."""
+        n_new = samples.shape[0]
+        # Outlier removal on the trailing block, mirroring wavi.m's remove_outliers.
+        cleaned = fill_outliers_linear(samples)
+
+        # Shift the rolling buffer and append cleaned samples.
+        if n_new >= self._ns_tot:
+            self._sig[:] = cleaned[-self._ns_tot:]
+        else:
+            self._sig[:-n_new] = self._sig[n_new:]
+            self._sig[-n_new:] = cleaned
+        self._samples_since_clear = min(self._samples_since_clear + n_new, self._ns_tot)
+        self._samples_since_spec_update += n_new
+
+        # Recording path: write the cleaned samples with their wall-clock timestamps.
+        if self._is_recording and self._dat_writer is not None:
+            self._write_record(cleaned, first_idx)
+
+    def _tick_esp32_mode(self, meta: dict) -> None:
+        """New INFO frames: the reported scan config, a rate switch at the sample
+        where it arrived (scan_hz from INFO; legacy: the rate measured before for
+        these selects, else ~76 Hz, until the measured rate comes ~2 s later),
+        and the keeper."""
+        for n, at, info in meta.get("esp32_infos") or ():
+            if n <= self._info_seen:
+                continue
+            self._info_seen = n
+            cfg = info_cfg(info)
+            self._esp32_cfg = cfg
+            key = (cfg.get("mode"), cfg.get("scan_hz"), cfg.get("sel_mask"))
+            if self._auto_fs and key != self._cfg_key:
+                was_locked = bool(self._cfg_key and self._cfg_key[1])
+                fs = (cfg.get("scan_hz")
+                      or (self._legacy_fs.get(cfg.get("sel_mask", 0xFF)) if cfg.get("mode") == 0
+                          else None)
+                      or (LEGACY_NOMINAL_HZ if was_locked else self._fs))
+                if self._cfg_key is not None or abs(fs - self._fs) > 1e-6 * fs:
+                    self._pending_switches.append((int(at), float(fs)))
+                    print(f"[MainWindow] ESP32 scan config {describe_cfg(cfg)}: "
+                          f"{fs:.3f} Hz from sample {at}")
+            self._cfg_key = key
+            self._send_esp32(self._keeper.on_info(cfg))
+        n_txt, msg = meta.get("esp32_txt") or (0, "")
+        if n_txt > self._txt_seen:
+            self._txt_seen = n_txt
+            self._keeper.on_text(msg)
+        self._send_esp32(self._keeper.tick())
+        self._show_mode_note()
 
     def _tick_server_extras(self) -> None:
         """IMU view + a one-line server status (rates, vehicle-side recording)."""
         assert self._client is not None
         rows, seq = self._client.imu_bus.read_since(self._imu_last_seq, block=False)
         meta = self._client.bus.get_metadata()
+        self._tick_esp32_mode(meta)
         self._maybe_apply_measured_rate(meta.get("fs_measured"))
         st = meta.get("server_status") or {}
         if rows is not None:
@@ -676,13 +860,17 @@ class MainWindow(QMainWindow):
                 self._imu_view.update_view(np.arange(-n + 1, 1) / hz, self._imu_rows)
         if st and st.get("t", 0) != self._last_status_t:
             self._last_status_t = st.get("t", 0)
-            text = self._format_status(st)
-            # the line window's status bar always shows it; the panel's label
-            # keeps "Recording -> path" while recording
-            for v in self._stream_views:
-                v.set_stream_status(text)
-            if not self._is_recording:
-                self._path_label.setText(text)
+            self._last_status_rec = st
+            self._show_status(st)
+
+    def _show_status(self, st: dict) -> None:
+        text = self._format_status(st)
+        # the line window's status bar always shows it; the panel's label
+        # keeps "Recording -> path" while recording
+        for v in self._stream_views:
+            v.set_stream_status(text)
+        if not self._is_recording:
+            self._path_label.setText(text)
 
     def _format_status(self, st: dict) -> str:
         """One line from the server / ESP32 status record."""
@@ -709,6 +897,8 @@ class MainWindow(QMainWindow):
                                     f" ovr {h['overrun']}" if h else "")
             if e.get("adc_sync"):
                 errs += f" sync {e['adc_sync']}"
+        if self._keeper.want is not None and self._keeper.note:
+            errs += f" | mode: {self._keeper.note}"
         imu = (f"IMU {hz.get('RAW_IMU', 0):g} Hz | att {hz.get('ATTITUDE', 0):g} Hz | "
                if self._client.transport_kind == "server" else "")
         return (f"{self._client.endpoint_str} | whisker {self._fs:.2f} Hz | {imu}{pi_rec}"
@@ -765,16 +955,13 @@ class MainWindow(QMainWindow):
         if self._spec_view.isVisible():
             self._spec_view.update_view(self._spec_data, self._fs, self._ns_spec / self._fs)
 
-    def _write_record(self, cleaned: np.ndarray, new_seq: int) -> None:
+    def _write_record(self, cleaned: np.ndarray, first_idx: int) -> None:
         assert self._dat_writer is not None
         n = cleaned.shape[0]
         if n == 0 or self._t0_unix is None:
             return
-        first_idx = new_seq - n
-        timestamps = [
-            datetime.fromtimestamp(self._t0_unix + (first_idx + i) / self._fs)
-            for i in range(n)
-        ]
+        t0 = self._t0_unix + self._t_of(first_idx)
+        timestamps = [datetime.fromtimestamp(t0 + i / self._fs) for i in range(n)]
         self._dat_writer.write_batch(timestamps, cleaned)
 
     def _maybe_auto_stop(self) -> None:

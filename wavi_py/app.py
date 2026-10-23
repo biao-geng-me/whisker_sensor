@@ -19,8 +19,20 @@ from wavi_py.config import (
     DEFAULT_TCP_HOST,
     DEFAULT_TCP_PORT,
 )
+from wavi_py.scan_mode import DEFAULT_SELECTS, parse_mode, parse_selects
 from whisker_link.channels import NUM_WHISKER
 from whisker_link.wire import DEFAULT_PORT as SERVER_PORT
+
+
+def _arg(parse):
+    """An argparse type from a parser that raises ValueError."""
+    def f(s: str):
+        try:
+            return parse(s)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(str(exc)) from None
+    f.__name__ = parse.__name__
+    return f
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -47,6 +59,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--t-spec", type=float, default=DEFAULT_T_SPEC_S, help="Spectrogram seconds")
     p.add_argument("--t-buffer", type=float, default=DEFAULT_T_BUFFER_S, help="signal buffer seconds")
     p.add_argument("--scale", type=float, default=1.0, help="line view amplitude scale")
+    p.add_argument("--mode", type=_arg(parse_mode), default=None,
+                   help="ESP32 scan mode to set on connect and keep (server / esp32 / sim; same "
+                        "spelling as daq_server --mode): legacy, quiet (62.5 Hz, OSR 512), wide "
+                        "(250 Hz), optionally ,settle_us,osr,period_us,spi_hz, e.g. quiet,200,256 "
+                        "or quiet,200,256,8000 (125 Hz); default: leave as is. The Scan mode "
+                        "dropdown changes it later")
+    p.add_argument("--selects", type=_arg(parse_selects), default=DEFAULT_SELECTS,
+                   help=f"mux selects sent with the scan mode (default {DEFAULT_SELECTS}; "
+                        "'' = all 8)")
     a = p.parse_args(argv)
     server = a.transport == "server"
     array = a.transport in ("server", "esp32", "sim")
@@ -82,6 +103,8 @@ def main(argv: list[str] | None = None) -> int:
         t_spec_s=args.t_spec,
         t_buffer_s=args.t_buffer,
         scale=args.scale,
+        scan_mode=args.mode,
+        selects=args.selects,
     )
     win.show()
     return app.exec()
