@@ -11,6 +11,11 @@ in legacy); ``S<digits>;`` limits the mux selects (skipped outputs read
 railed). In M1/M2, t_us advances by exactly 16000 / 4000 us per scan.
 ``kill -USR1 <pid>`` reboots it: boot banner, legacy mode, all selects, text
 mode until the next ``B`` (like a halt or a DTR reset of the real board).
+``kill -USR2 <pid>`` toggles an ADC lock-up (``--adc-dead`` starts in one), as
+on the ROV: no scans; legacy reports ``[halt #N] UNRECOVERED ...`` every
+1.5 s, M1/M2 ``[halt] no conversion ...`` every 0.1 s, and a reboot reports
+``CLOCK readback = 0x00FF (NOT accepted)``. The second USR2 is the PCB power
+cycle: ``[halt #N] recovered at L3`` and scans again (RECOVERED flag).
 
 Signal: the "live" gauges carry ``amp * sin(2*pi*f*t)`` on a shared wall clock
 (``time.time()``) plus noise, so ``fake_autopilot.py`` can put the same motion
@@ -87,6 +92,8 @@ def main() -> None:
     ap.add_argument("--t0-us", type=int, default=None,
                     help="initial micros() value; e.g. 4294000000 to test the wrap")
     ap.add_argument("--link", default=None, help="also create this symlink to the pty")
+    ap.add_argument("--adc-dead", action="store_true",
+                    help="start with the ADC locked up (see kill -USR2)")
     args = ap.parse_args()
 
     live = {CHANNEL_NAMES.index(n.strip()) for n in args.live.split(",") if n.strip()}
@@ -116,12 +123,25 @@ def main() -> None:
     def micros() -> int:
         return (int((time.monotonic() - boot_mono) * 1e6) + t_off) & 0xFFFFFFFF
 
+    dead = [args.adc_dead]               # ADC locked up (SIGUSR2 toggles)
+
+    def boot_lines() -> bytes:
+        if dead[0]:
+            return (b"Device ID      = 0x2405  (ADS131M04)\r\n"
+                    b"CLOCK readback = 0x00FF  (NOT accepted)\r\n"
+                    b"DRDY edges/200ms = 0  (NOT toggling)\r\n"
+                    b"quiet mode CLOCK not accepted (0x00FF): legacy scan\r\n"
+                    b"Baseline FAILED \xe2\x80\x94 no valid scans.\r\n")
+        return (b"Device ID      = 0x2405  (ADS131M04)\r\n"
+                b"CLOCK readback = 0x0F02  (config ACCEPTED)\r\n"
+                b"DRDY edges/200ms = 1246  (converting)\r\n"
+                b"Baseline captured from 16 scans.\r\n")
+
     out(b"\r\n=================================================\r\n"
-        b"  whisker_daq (SIMULATED)\r\n"
-        b"Baseline captured from 16 scans.\r\n")
+        b"  whisker_daq (SIMULATED)\r\n" + boot_lines())
     binary = False
     seq = 0
-    mode, sel_mask = args.boot_mode, 0xFF
+    mode, sel_mask = (0 if args.adc_dead else args.boot_mode), 0xFF
     lk = lock_params(1) if mode else None   # lock_params() of the current locked mode
     period = lk[3] / 1e6 if lk else 1.0 / args.rate
     next_t = time.monotonic()
@@ -132,6 +152,11 @@ def main() -> None:
     pending = ""                         # an M / S command waiting for its ';'
     reboot = []                          # SIGUSR1: reboot at the next loop pass
     signal.signal(signal.SIGUSR1, lambda *_: reboot.append(1))
+    toggle = []                          # SIGUSR2: ADC lock-up on / PCB power cycle
+    signal.signal(signal.SIGUSR2, lambda *_: toggle.append(1))
+    n_halt = 0
+    next_halt = 0.0
+    scan_flags = 0                       # OR-ed into the next scan
 
     def say(msg: str) -> None:
         out(ef.encode_text(msg) if binary else (msg + "\r\n").encode())
@@ -174,7 +199,18 @@ def main() -> None:
             binary, mode, sel_mask, lk, pending, seq = False, 0, 0xFF, None, "", 0
             period, grid_us = 1.0 / args.rate, None
             out(b"\r\n=================================================\r\n"
-                b"  whisker_daq (SIMULATED) rebooted\r\n")
+                b"  whisker_daq (SIMULATED) rebooted\r\n" + boot_lines())
+        if toggle:
+            toggle.clear()
+            dead[0] = not dead[0]
+            next_halt = time.monotonic()
+            if not dead[0]:                  # PCB power-cycled with the ESP32 running
+                if not mode:
+                    n_halt += 1
+                    say(f"[halt #{n_halt}] recovered at L3  (L1=0 L2=0 L3=1 fail={n_halt - 1}"
+                        " crcbad=0 stale=0)")
+                scan_flags |= ef.FLAG_RECOVERED
+                grid_us = None
         try:
             cmds = os.read(master, 256)
         except (BlockingIOError, OSError):
@@ -207,6 +243,18 @@ def main() -> None:
             next_t = now + period
         if not binary:
             continue
+        if dead[0]:                          # nothing converts: halt messages, no scans
+            if now >= next_halt:
+                if mode in MODES:
+                    say(f"[halt] no conversion for 50 ms in {ef.MODE_NAMES[mode]} mode:"
+                        " CLKIN restart + re-init")
+                    next_halt = now + 0.1
+                else:
+                    n_halt += 1
+                    say(f"[halt #{n_halt}] UNRECOVERED  ID=0x2405 CLOCKrb=0x00FF crcbad=0"
+                        "  -> power-cycle the PCB with the ESP32 already running")
+                    next_halt = now + 1.5
+            continue
         if mode in MODES:
             grid_us = micros() if grid_us is None else grid_us + lk[3]
             t_us, dur = grid_us & 0xFFFFFFFF, lk[3]
@@ -222,7 +270,8 @@ def main() -> None:
             else:
                 raw.append(RAIL)
                 rail |= 1 << i
-        out(ef.encode_scan(seq, t_us, dur, rail, 0, raw))
+        out(ef.encode_scan(seq, t_us, dur, rail, scan_flags, raw))
+        scan_flags = 0
         seq += 1
         if mode in MODES and now - last_health >= 1.0:
             last_health = now

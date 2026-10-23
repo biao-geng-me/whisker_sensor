@@ -23,6 +23,14 @@ Run from the repo root on the Pi:
 
 Then on the laptop: ``python -m wavi_py --transport server --host 192.168.2.2``
 or just look at it: ``ncat 192.168.2.2 5600``.
+
+ADC / ESP32 faults (``whisker_link/esp32_fault.py``): an ADC that stopped
+converting (UNRECOVERED halt, CLOCK not accepted, no scans for 5 s), a lost
+serial port, and warnings (recovered halts, ADC resets, watchdog reboots,
+[idf] errors, flagged scans) go in the status record as ``esp32.fault``, in
+the log, and as ``mark`` events (fault onset, clear, each warning) in the
+recording and to the clients. A recording started during a fault gets a mark
+with the fault's state first.
 """
 
 from __future__ import annotations
@@ -46,6 +54,7 @@ if _REPO_ROOT not in sys.path:
 
 from whisker_link import esp32_frame as ef  # noqa: E402
 from whisker_link import wire  # noqa: E402
+from whisker_link.esp32_fault import FaultMonitor, mark_event, mark_text  # noqa: E402
 from whisker_link.channels import CHANNEL_NAMES  # noqa: E402
 
 log = logging.getLogger("daq_server")
@@ -295,6 +304,8 @@ class Esp32Source:
         self.n_adc_empty = 0          # scans with FLAG_EMPTY (a slot had no usable conversion)
         self.health: Optional[dict] = None    # latest HEALTH frame (locked scan modes)
         self.info: Optional[dict] = None
+        self.faults = FaultMonitor()             # touched by this thread only, except status()
+        self._fault_lock = threading.Lock()
         self._thread = threading.Thread(target=self._run, name="esp32", daemon=True)
 
     def start(self) -> None:
@@ -323,9 +334,23 @@ class Esp32Source:
             self._ser.rts = True
             time.sleep(0.1)
             self._ser.rts = False
+        with self._fault_lock:
+            self.faults.expect_reset()
         self._unwrap = ef.TimeUnwrapper()
         self.last_seq = None
         return True
+
+    def fault_status(self) -> dict:
+        with self._fault_lock:
+            return self.faults.status()
+
+    def _publish_faults(self, now: float) -> None:
+        with self._fault_lock:
+            self.faults.poll(now)
+            evs = self.faults.take_events()
+        for fev in evs:
+            (log.error if fev["event"] == "fault" else log.warning)("%s", mark_text(fev))
+            self.hub.publish(mark_event(fev, now))
 
     def _open(self):
         import serial  # pyserial
@@ -345,10 +370,13 @@ class Esp32Source:
                     ser = self._open()
                 except Exception as exc:  # noqa: BLE001
                     log.warning("serial %s: %s (retrying)", self.port, exc)
+                    self._publish_faults(time.monotonic())
                     self._stop.wait(2.0)
                     continue
                 with self._wlock:
                     self._ser = ser
+                with self._fault_lock:
+                    self.faults.link(True)
                 log.info("opened %s @ %d", self.port, self.baud)
                 self.hub.publish({"k": "txt", "t": time.monotonic(), "src": "server",
                                   "msg": f"opened {self.port} @ {self.baud}"})
@@ -362,6 +390,8 @@ class Esp32Source:
                     except Exception:  # noqa: BLE001
                         pass
                     self._ser = None
+                with self._fault_lock:
+                    self.faults.link(False)
                 continue
             now = time.monotonic()
             if data:
@@ -371,6 +401,7 @@ class Esp32Source:
             if now - self.last_scan_mono > 2.0 and now - last_kick > 2.0:
                 self.write(self.kick)
                 last_kick = now
+            self._publish_faults(now)
 
     def _handle(self, ev, now: float) -> None:
         if isinstance(ev, ef.Scan):
@@ -378,6 +409,8 @@ class Esp32Source:
                 self.n_seq_gaps += 1
             self.last_seq = ev.seq
             self.last_scan_mono = now
+            with self._fault_lock:
+                self.faults.on_scan(ev.flags, now)
             if ev.flags & ef.FLAG_RECOVERED:
                 self.n_adc_recov += 1
             if ev.flags & ef.FLAG_CRC_RETRY:
@@ -397,6 +430,8 @@ class Esp32Source:
                               "raw": ev.raw})
         elif isinstance(ev, ef.Text):
             self.hub.publish({"k": "txt", "t": now, "src": "esp32", "msg": ev.text})
+            with self._fault_lock:
+                self.faults.on_text(ev.text, now)
         elif isinstance(ev, ef.Info):
             self.info = dict(ev.__dict__)
             if self.info.get("mode") != 1 and self.info.get("mode") != 2:
@@ -524,8 +559,7 @@ class Server:
         t = time.monotonic()
         reply: dict = {"k": "ack", "t": t, "cmd": name, "ok": True}
         if name == "rec_start":
-            reply["path"] = self.hub.rec_start(str(cmd.get("tag", "")))
-            log.info("recording -> %s", reply["path"])
+            reply["path"] = self._rec_start(str(cmd.get("tag", "")))
         elif name == "rec_stop":
             reply["path"] = self.hub.rec_stop()
             log.info("recording stopped: %s", reply["path"])
@@ -540,6 +574,22 @@ class Server:
         else:
             reply.update(ok=False, error=f"unknown command {name!r}")
         self.hub.send_to(client, reply)
+
+    def _rec_start(self, tag: str) -> str:
+        path = self.hub.rec_start(tag)
+        log.info("recording -> %s", path)
+        if self.esp32:
+            st = self.esp32.fault_status()
+            if st["level"] != "ok":                # a fault from before the recording
+                ev = {"event": "state", "level": st["level"], "code": st["code"],
+                      "msg": st["msg"], "action": st.get("action", ""),
+                      "detail": st.get("detail", ""), "count": st["count"],
+                      "unix": st["since"]}
+                since = time.strftime("%H:%M:%S", time.localtime(st["since"]))
+                self.hub.publish({"k": "mark", "t": time.monotonic(), "fault": ev,
+                                  "text": f"at record start: ESP32 {st['level']} {st['code']}:"
+                                          f" {st['msg']} (since {since})"})
+        return path
 
     def _on_client_closed(self, c: _Client) -> None:
         log.info("client %s disconnected (%d left)", c.addr, self.hub.remove_client(c))
@@ -570,6 +620,7 @@ class Server:
                 h = dict(self.esp32.health)
                 h["age_s"] = round(time.monotonic() - h.pop("t"), 1)
                 st["esp32"]["health"] = h
+            st["esp32"]["fault"] = self.esp32.fault_status()
         if self.mav:
             st["mav"] = {"msgs": self.mav.n_msgs, "target": self.mav.target}
         return st
@@ -598,6 +649,11 @@ class Server:
                          f" | {e.get('cfg', {}).get('mode_name', '?')}: busy {h['busy_pct']}%"
                          f" lat max {h['lat_max_us']} us, overrun {h['overrun']}"
                          f" missed {h['missed']}" if h else "")
+                f = e.get("fault")
+                if f and f["level"] == "fault":       # repeated, so a log tail shows it
+                    log.error("ESP32 FAULT %s since %s: %s -> %s", f["code"],
+                              time.strftime("%H:%M:%S", time.localtime(f["since"])), f["msg"],
+                              f.get("action", ""))
 
     # ----- lifecycle
 
@@ -608,7 +664,7 @@ class Server:
             self.mav.start()
         threading.Thread(target=self._status_loop, name="status", daemon=True).start()
         if self.args.record:
-            log.info("recording -> %s", self.hub.rec_start(self.args.tag))
+            self._rec_start(self.args.tag)
         while not self._stop.is_set():
             try:
                 conn, addr = self._ls.accept()

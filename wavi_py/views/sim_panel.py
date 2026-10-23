@@ -26,7 +26,8 @@ from whisker_link.channels import NUM_WHISKER
 
 _FAULTS = (("ADC recovered", "recovered"), ("ADC CRC retry", "crc_retry"),
            ("ADC stale", "stale"), ("ADC re-init", "reinit"), ("Seq gap", "seq_gap"),
-           ("Link CRC", "link_crc"), ("Dropout 3 s", "dropout"), ("Reboot ESP32", "reboot"))
+           ("Link CRC", "link_crc"), ("Dropout 3 s", "dropout"), ("Reboot ESP32", "reboot"),
+           ("ADC lock-up", "adc_lockup"), ("Power-cycle PCB", "pcb_power_cycle"))
 
 
 def _spin(lo: float, hi: float, step: float, decimals: int, suffix: str) -> QDoubleSpinBox:
