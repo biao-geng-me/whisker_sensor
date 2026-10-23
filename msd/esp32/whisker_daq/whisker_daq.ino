@@ -1805,20 +1805,35 @@ static bool hostTakeBack() {
     }
     txqFlushBlocking();                      // what the reader queued in C0
     hostDrain(false);                        // what it handed over in C1
+    if (g_mode == 'B') lkFlushHealth();      // the partial HEALTH window
     return true;
 }
 
 // Software watchdog for the reader task (it is not on the task watchdog): no
 // progress for LK_BEAT_TIMEOUT_MS while it should run -> restart the ESP32.
+// Armed per RUN request (its generation): bench r4 (6d90c76) fired on the
+// first check after every start, because lastT began at 0 (boot), not at the
+// RUN, and streaming started > 3 s after boot. The report and the reset note
+// (kept over the restart in RTC memory, printed at boot) explain the next one.
 #define LK_BEAT_TIMEOUT_MS  3000
+#define WD_MAGIC            0x57444F47UL
+RTC_NOINIT_ATTR static uint32_t g_wdMagic;
+RTC_NOINIT_ATTR static char     g_wdNote[300];
 static void hostWatchReader() {
-    static uint32_t lastBeat = 0, lastT = 0;
-    if (!xcWantRun(g_xc)) { lastT = millis(); return; }
-    uint32_t b = g_lkBeat, now = millis();
+    static uint32_t armedReq = 0, lastBeat = 0, lastT = 0;
+    uint32_t req = __atomic_load_n(&g_xc.req, __ATOMIC_RELAXED), now = millis();
+    if (!(req & 1)) { armedReq = 0; return; }
+    uint32_t b = g_lkBeat;
+    if (req != armedReq) { armedReq = req; lastBeat = b; lastT = now; return; }
     if (b != lastBeat) { lastBeat = b; lastT = now; return; }
     if (now - lastT < LK_BEAT_TIMEOUT_MS) return;
+    char st[260];
+    lkStateText(st, sizeof(st));
+    snprintf(g_wdNote, sizeof(g_wdNote), "no progress for %lu ms: %s",
+             (unsigned long)(now - lastT), st);
+    g_wdMagic = WD_MAGIC;
     g_lk.streaming = false;                  // straight to Serial (the reader is stuck)
-    logf("[reader watchdog] no progress for %d ms: restarting\n", LK_BEAT_TIMEOUT_MS);
+    logf("[reader watchdog] %s; restarting\n", g_wdNote);
     Serial.flush();
     esp_restart();
 }
@@ -1838,9 +1853,10 @@ static void core_cmd() {
     g_core = (uint8_t)v[0];
     g_txWin = g_core ? (uint32_t)v[1] : 0;
     g_hh.txWinUs = (uint16_t)g_txWin;
-    if (g_core) logf("core: C1, reader on core 1, core 0 sends %s%lu%s\n",
-                     g_txWin ? "at scan start + " : "", (unsigned long)g_txWin,
-                     g_txWin ? " us" : " (as soon as ready)");
+    if (g_core && g_txWin)
+        logf("core: C1, reader on core 1, core 0 sends at scan start + %lu us\n",
+             (unsigned long)g_txWin);
+    else if (g_core) logf("core: C1, reader on core 1, core 0 sends as soon as ready\n");
     else logf("core: C0, reader on core 1 sends its own frames (single-core TX)\n");
 }
 
@@ -1897,7 +1913,7 @@ static void hostLoop() {
     // ISR). C0: it also sends, as the single-core firmware did. C1: it hands
     // records to this core, which sends them (optionally in a TX window).
     bool streaming = g_mode == 'B' && g_lk.mode;
-    if (streaming) {
+    if (streaming && lkTaskOk()) {
         if (!lkRemoteActive()) {
             txqFlushBlocking();
             lkRun(g_core == 1, g_txWin);
@@ -1917,7 +1933,9 @@ static void hostLoop() {
     if (streaming && !g_lk.streaming) lkHealthReset();   // HEALTH windows cover streaming only
     g_lk.streaming = streaming;
     switch (g_mode) {
-        case 'B': if (scan_all()) send_scan(); break;      // legacy (locked: the reader task)
+        case 'B': if (g_lk.mode) lkService(20000);       // only if the reader task is missing
+                  else if (scan_all()) send_scan();      // legacy
+                  break;
         case 'c': calibrate_step(); delay(60); break;
         case 'n': captureBaseline(48); noise_report(); delay(1000); break;
         case 's': if (scan_all()) print_scan();    delay(400); break;
@@ -1935,18 +1953,30 @@ static void hostLoop() {
 // which calls Serial.begin (the UART ISR then lands on core 0). Core 0's idle
 // task leaves the task watchdog: in C0 the host task reads without yielding, as
 // loop() did on core 1 before (whose idle task was never watched either).
+static bool g_lkTaskStarted = false;
 static void hostTask(void *) {
     bool wdt0 = disableCore0WDT();
     hostSetup();
     if (!wdt0) Serial.println("note: core 0's idle task is still on the task watchdog");
+    if (!g_lkTaskStarted)
+        Serial.println("*** reader task NOT created (xTaskCreatePinnedToCore failed): locked"
+                       " modes stream from the host core (old C0 path), C1 unavailable");
+    Serial.printf("reset reason %d\n", (int)esp_reset_reason());
+    if (g_wdMagic == WD_MAGIC) {
+        Serial.printf("previous reset: [reader watchdog] %s\n", g_wdNote);
+        g_wdMagic = 0;
+    }
     for (;;) hostLoop();
 }
 
 void setup() {
     pinMode(PIN_DRDY, INPUT);
     attachInterrupt(digitalPinToInterrupt(PIN_DRDY), drdyISR, FALLING);
-    lkTaskStart();
-    xTaskCreatePinnedToCore(hostTask, "host", 16384, nullptr, 2, &g_hostTask, 0);
+    g_lkTaskStarted = lkTaskStart();
+    if (xTaskCreatePinnedToCore(hostTask, "host", 16384, nullptr, 2, &g_hostTask, 0) != pdPASS) {
+        g_hostTask = nullptr;
+        hostTask(nullptr);                   // no host task: run it here (core 1), never returns
+    }
 }
 
 void loop() { vTaskDelete(nullptr); }   // the host task has taken over

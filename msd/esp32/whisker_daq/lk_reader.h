@@ -5,7 +5,10 @@
 #include "lk_xcore.h"
 
 #define LK_CLKIN           8000000UL
-#define LK_LAT_ALLOW_US    10      // switch latency allowed for in the discard count
+#define LK_LAT_ALLOW_US    20      // switch latency allowed for in the discard count (20:
+                                   // core 1's ~8-12 us tick can land on a slot end every
+                                   // scan in wide mode; same discard counts as 10 at settle
+                                   // 200 for OSR 128/256/512)
 #define LK_SETTLE_DEFAULT  200
 #define LK_TX_GUARD_US     6       // idle work only if the next DRDY is this far off (a
                                    // slightly late read is harmless except at a slot end,
@@ -88,7 +91,13 @@ void lkHealthPayload(uint8_t *p, const LockHealth &h, uint32_t winUs, uint8_t mo
 // Text of a reader message (XR_MSG), for the host to log.
 void lkMsgText(char *buf, int size, uint32_t code, uint32_t arg, uint8_t mode);
 
-void lkTaskStart();                 // setup(), on core 1: the reader task, parked
+bool lkTaskStart();                 // setup(), on core 1: the reader task, parked (false: failed)
+bool lkTaskOk();                    // the reader task exists
+// Host, after taking the reader back: send the HEALTH window streamed so far
+// (frequent commands would otherwise never let a 1 s window complete).
+void lkFlushHealth();
+// One line with the reader's state (ownership, flags, counters) for reports.
+void lkStateText(char *buf, int size);
 bool lkRemoteActive();              // host: the reader task owns (or was asked to own)
 bool lkPark(uint32_t timeoutMs);    // host: take the reader back; false = it didn't let go
 void lkRun(bool txHost, uint32_t txWinUs);   // host: hand the reader to core 1 (streaming)

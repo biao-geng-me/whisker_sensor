@@ -30,6 +30,8 @@ typedef unsigned UBaseType_t;
 typedef uint32_t TickType_t;
 #define pdTRUE 1
 #define pdFALSE 0
+#define pdPASS 1
+#define RTC_NOINIT_ATTR                         // RTC memory kept over esp_restart (sim: plain)
 #define portMAX_DELAY 0xFFFFFFFFu
 #define pdMS_TO_TICKS(ms) ((TickType_t)(ms))     // 1 kHz tick
 BaseType_t xTaskCreatePinnedToCore(void (*fn)(void *), const char *name, uint32_t stack, void *arg,

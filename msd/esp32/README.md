@@ -193,15 +193,26 @@ Bench round 3 (2026-10-23, firmware 158c314, captures in `/scratch/bigeme/whiske
 - **Raw log lines.** `E (…) task_wdt: esp_task_wdt_reset(707): task not found` lines appeared in the stream. The reader task called `esp_task_wdt_reset()` at every scan end without being subscribed (`esp_task_wdt_add`'s return value wasn't checked, so why it wasn't subscribed is unknown). Each failure printed a ~60-byte line synchronously from core 1, ~0.65 ms of UART time. In C1 wide that starved the reader (overruns, extra scan ends, more resets), saturating at the line rate of ~1 line/ms, which is why C1 gave no usable output. The C0 captures start with the tail of that backlog (timestamps 292 s and 423 s after boot; no reboot). Fix: no task watchdog in the reader; the log hook above.
 - **C0 stale reads.** C0 had one stale + edgeless + resync per LCM(1 ms tick, T): 63/s at OSR 512, 126/s at OSR 256. 158c314 ran C0 on core 0 while the DRDY ISR sat on core 1. When core 1's FreeRTOS tick (~8 µs) delayed the ISR, the reader saw DRDY low with no edge counted after its 3 µs wait, claimed the conversion edgeless, and the late edge then gave a resync and a stale re-read. Fix: C0 streams on the reader task on core 1 again. When the host core reads (text modes, baseline), the edgeless wait is 15 µs. host_sim reproduces it: ISRs of one core don't nest, the cores' ticks aren't aligned, and `--board-costs` has an 8 µs tick. The previous firmware gives exactly 63 per HEALTH frame there; the fix gives 0.
 
+Bench round 4 (2026-10-23, firmware 6d90c76, `/scratch/bigeme/whisker_dev/bench_1023/r4/`): no locked run ever streamed. Every run gave one INFO, then `[reader watchdog]` and a reboot, after which the board showed the text grid. The reader was fine; the watchdog was wrong. Its "last progress" time started at 0 (boot) instead of at the RUN request, and it is only checked while streaming. A first `B` more than 3 s after boot therefore tripped it on the first check, before the reader had run one step. After a software restart, the stress loop's next re-send came < 3 s after boot, so that path happened to work. host_sim missed it because every test started streaming at ~1.3 s uptime; the tests now send `adc_diag`'s exact bytes at 5 s, and 6d90c76 fails there exactly as on the board.
+
+Fixes in this round:
+- **Watchdog.** It is armed per RUN request. Before restarting it sends a framed TEXT with the reader state: handshake request/state, flags, conversions, time since the last step, DRDY edges, heartbeat. A note survives the restart (RTC memory) and is printed after the boot banner as `previous reset: ...`, together with `reset reason N`.
+- **Task creation.** Creating either task is checked: a missing reader task is reported, and locked modes then stream from the host core. A missing host task runs in setup's task.
+- **HEALTH and commands.** Each command parks the reader. The host now sends the HEALTH window streamed so far when it takes the reader back, so HEALTH keeps coming when commands arrive more often than once a second (the r4 stress run had none).
+- **Seq numbering.** In the r4 stress run each re-send of `M2;` re-initialised the ADC and started a new conversion grid. `seq` counts scans of the current grid, so a re-init shows as a `t_us` jump (~67 ms there), not as a seq gap.
+- **Mux-switch allowance.** `LK_LAT_ALLOW_US` is now 20 µs (was 10). In wide mode, core 1's ~8–12 µs tick hits the same conversion positions every 4 ms scan. If that lands on a slot end, every scan's switch was "late". With settle 200 the discard counts don't change (wide 9, OSR 256 6, OSR 512 4). host_sim sweeps the tick phase (`--tick-phase`).
+- **Scan flags.** They no longer carry over into the first streamed scan.
+- **adc_diag stream.** It now fails loudly: it stops with an error if no SCAN arrives within 2 s of B, and exits non-zero (3) if a reboot banner, `[reader watchdog]`, a crash line or a park timeout appears.
+
 Not verified on the board yet:
-- the round-3 fixes
+- the round-3 and round-4 fixes
 - wide in C1 (lat max, overrun 0)
 - the quiet noise with C1 free TX and windowed TX against C0
 - the stress run
 
 In host_sim, the core-1 tick is the remaining risk for wide C1: at 1.5× costs one read per tick collision ends 1 µs after the next conversion. That is handled (no overrun), but it is the margin to watch in `lat_max_us`.
 
-Board test sequence. Power-cycle (or press EN) before each numbered step, so no C1 → C0 switch is involved unless stated:
+Board test sequence. Power-cycle (or press EN) before each numbered step, so no C1 → C0 switch is involved unless stated. Wait > 3 s after boot before starting a step (the r4 failure needed that). A step is only valid if `adc_diag` exits 0 with no `ERROR:` lines:
 
 ```powershell
 cd C:\Users\Biao\Projects\whisker_sensor

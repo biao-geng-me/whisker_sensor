@@ -201,3 +201,20 @@ def test_stream_against_fake(tmp_path, capsys):
     assert '"mode_name": "wide"' in out and "HEALTH busy" in out
     assert "{4000:" in out and "seq gaps 0" in out
     assert (tmp_path / "s.bin").stat().st_size > 10000
+
+
+def test_stream_watch_fails_loudly():
+    """Bench r4: a reboot looked like a working run (the text grid scrolled)."""
+    w = ad.StreamWatch()
+    w.kicked(0.0)
+    assert not w.no_scan(1.0)
+    assert w.no_scan(2.5) and "no SCAN" in w.problems[-1]
+    assert not w.no_scan(3.0)                         # once per kick
+    w.kicked(4.0)
+    w.scan()
+    assert not w.no_scan(9.0)
+    for line in ("[reader watchdog] no progress for 3000 ms: req 3/RUN ...",
+                 "  whisker_daq \u2014 16 whiskers x 2 gauges = 32 ch",
+                 "Commands: B=binary stream  g=grid", "ok line"):
+        w.text(line)
+    assert len(w.problems) == 4

@@ -150,6 +150,7 @@ void lkRearm(bool newGrid) {
     g_lk.curSel = 0xFF;
     g_lk.pendingSend = false;
     lkClearScan();
+    g_lk.scanFlags = 0;                      // nothing of an interrupted scan carries over
     drdyResync();
     g_lk.lastActT = g_lk.lastEdgeT = micros();
 }
@@ -432,9 +433,9 @@ static int lkStep() {
     else if ((st >> 8) & STATUS_RESET) {
         // the ADC reset behind our back: same re-init as boot, new grid
         h.reinit++; g_adcReinits++;
-        g_lk.scanFlags |= FLAG_REINIT;
         lkMsg(LKM_ADC_RESET, g_adcReinits);
         lkStart();
+        g_lk.scanFlags |= FLAG_REINIT;       // (after lkStart: its rearm clears the flags)
         h.busyUs += micros() - tIn;
         return 1;
     } else if (((st >> 8) & STATUS_DRDY_ALL) != STATUS_DRDY_ALL) {
@@ -478,11 +479,11 @@ static void lkResume() {
 static void lkRecover() {
     g_lk.h.recov++;
     g_halts++;
-    g_lk.scanFlags |= FLAG_RECOVERED;
     lkMsg(LKM_HALT, 0);
     spiFlush();
     setClkin(LK_CLKIN);
     lkStart();
+    g_lk.scanFlags |= FLAG_RECOVERED;        // (after lkStart: its rearm clears the flags)
 }
 
 // Run the reader for about budgetUs (it returns right after a conversion, so
@@ -577,9 +578,38 @@ static void lkTaskMain(void *) {
     }
 }
 
-void lkTaskStart() {
-    xTaskCreatePinnedToCore(lkTaskMain, "lkReader", LK_TASK_STACK, nullptr, LK_TASK_PRIO,
-                            &g_lkTask, 1);
+bool lkTaskStart() {
+    if (xTaskCreatePinnedToCore(lkTaskMain, "lkReader", LK_TASK_STACK, nullptr, LK_TASK_PRIO,
+                                &g_lkTask, 1) != pdPASS)
+        g_lkTask = nullptr;
+    return g_lkTask != nullptr;
+}
+
+bool lkTaskOk() { return g_lkTask != nullptr; }
+
+void lkFlushHealth() {
+    if (!g_lk.mode || g_lk.h.conv == 0 || micros() - g_lk.h.t0Us < 100000UL) return;
+    uint8_t p[LK_HEALTH_LEN];
+    g_hh.core = g_lk.txHost ? 1 : 0;
+    g_hh.qHwm = (uint8_t)min<uint32_t>(g_xq.hwm, 255);
+    lkHealthPayload(p, g_lk.h, micros() - g_lk.h.t0Us, g_lk.mode, g_hh);
+    send_frame(FT_HEALTH, p, sizeof(p));
+    g_hh.hostTxMax = 0;
+    g_hh.txLate = 0;
+    lkHealthReset();
+}
+
+void lkStateText(char *buf, int size) {
+    uint32_t req = __atomic_load_n(&g_xc.req, __ATOMIC_ACQUIRE);
+    uint32_t st = __atomic_load_n(&g_xc.state, __ATOMIC_ACQUIRE);
+    snprintf(buf, size, "req %lu/%s state %lu/%s remote %d txHost %d streaming %d mode %u"
+             " haveRef %d waitBoundary %d lastK %ld conv %lu last step %lu us ago drdy edges %lu"
+             " taken %lu beat %lu task %s",
+             (unsigned long)(req >> 1), (req & 1) ? "RUN" : "PARK", (unsigned long)(st >> 1),
+             (st & 1) ? "RUNNING" : "PARKED", g_lk.remote, g_lk.txHost, g_lk.streaming, g_lk.mode,
+             g_lk.haveRef, g_lk.waitBoundary, (long)g_lk.lastK, (unsigned long)g_lk.h.conv,
+             (unsigned long)(micros() - g_lk.lastActT), (unsigned long)g_drdyEdges,
+             (unsigned long)g_drdyTaken, (unsigned long)g_lkBeat, g_lkTask ? "ok" : "MISSING");
 }
 
 bool lkRemoteActive() { return xcWantRun(g_xc) || !xcParked(g_xc); }
@@ -603,6 +633,7 @@ bool lkPark(uint32_t timeoutMs) {
 
 // Host: hand the reader to core 1 for streaming. The queue must be empty.
 void lkRun(bool txHost, uint32_t txWinUs) {
+    if (!g_lkTask) return;
     g_lk.remote = true;
     g_lk.txHost = txHost;
     g_lk.streaming = true;

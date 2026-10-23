@@ -189,11 +189,15 @@ def _health_ok(health, lat_limit):
     assert sum(h.tx_drop for h in tail) == 0 and sum(h.empty_slots for h in tail) == 0
 
 
+@pytest.mark.parametrize("phase", ["0", "137", "437", "731"])
 @pytest.mark.parametrize("scale", ["1.0", "1.5"])
 @pytest.mark.parametrize("ccmd", ["C1;", "C1 100;"])
-def test_c1_wide_board_costs(sim, tmp_path, scale, ccmd):
-    """Wide on its own core with the bench-calibrated costs: no overrun, lat < T = 32 us."""
+def test_c1_wide_board_costs(sim, tmp_path, scale, ccmd, phase):
+    """Wide on its own core with the bench-calibrated costs: no overrun, lat < T = 32 us.
+    Core 1's tick hits the same conversions every 4 ms scan; its phase (random per
+    boot on the board) is swept: a tick on a slot end must not flag every scan."""
     scans, infos, health, _ = run(sim, tmp_path / "o.bin", "--end", "4", "--board-costs",
+                                  "--tick-phase", phase,
                                   "--cost-scale", scale, "--cmd", "1.0:S0123457;",
                                   "--cmd", f"1.0:{ccmd}", "--cmd", "1.0:M2;", "--cmd", "1.3:B")
     # lat < T at the bench costs; at 1.5x the 12 us tick on core 1 can push one read
@@ -329,3 +333,76 @@ def test_twdt_mock_flags_unsubscribed_reset(sim, tmp_path):
     run(sim, tmp_path / "o.bin", "--end", "2", "--cmd", "1.0:C1;", "--cmd", "1.0:M2;",
         "--cmd", "1.3:B")
     assert "twdt errors 0" in LAST["stderr"]
+
+
+# ---------------------------------------------------------------- bench r4
+def _adc_diag_cmd(selects, core, win, mode, osr=None):
+    """The exact bytes adc_diag.py stream sends (its own builders)."""
+    sys.path.insert(0, str(HERE.parent))
+    import adc_diag as ad
+    return ("S" + selects + ";" + ad.core_command(core, win)
+            + ad.mode_command(mode, None, osr, None, None) + "B")
+
+
+@pytest.mark.parametrize("core,win,mode", [(0, None, "quiet"), (1, None, "quiet"),
+                                           (1, 100, "quiet"), (1, None, "wide")])
+def test_adc_diag_sequence_late_start(sim, tmp_path, core, win, mode):
+    """Bench r4 (6d90c76): every run sent S..;C..;M..;B more than 3 s after boot,
+    got one INFO and no SCAN/HEALTH, then '[reader watchdog]' and a reboot: the
+    watchdog's clock started at boot, not at the RUN. Start late, as the bench."""
+    cmd = _adc_diag_cmd("0123457", core, win, mode)
+    scans, infos, health, text = run(sim, tmp_path / "o.bin", "--end", "9", "--board-costs",
+                                     "--cmd", f"5.0:{cmd}")
+    assert not any("watchdog" in t for t in text), [t for t in text if "watchdog" in t]
+    period = 4000 if mode == "wide" else 16000
+    assert len(scans) > 0.7 * 3.5e6 / period and len(health) >= 2
+    assert all(h.core == core for h in health)
+    assert sum(h.overrun + h.stale + h.edgeless for h in health[1:]) == 0
+    assert {b.t_us - a.t_us for a, b in zip(scans, scans[1:])} == {period}
+    assert LAST["junk"] == 0
+
+
+def test_second_run_after_late_restart_of_stream(sim, tmp_path):
+    """Stop (text mode) and start streaming again much later: re-armed, no watchdog."""
+    cmd = _adc_diag_cmd("0123457", 1, None, "quiet")
+    scans, _, health, text = run(sim, tmp_path / "o.bin", "--end", "16", "--cmd", f"4.0:{cmd}",
+                                 "--cmd", "6.0:g", "--cmd", f"11.0:{cmd}")
+    assert not any("watchdog" in t for t in text)
+    assert len([s for s in scans if s.t_us > 11.3e6]) > 200
+
+
+def test_reader_watchdog_reports_state(sim, tmp_path):
+    """A reader that really stops (core 1 stalled 4 s): the watchdog sends its
+    state as framed TEXT, then restarts (the sim exits with code 4)."""
+    out = tmp_path / "o.bin"
+    r = subprocess.run([str(sim), "--out", str(out), "--end", "12", "--cmd", "1.0:C1;",
+                        "--cmd", "1.3:B", "--stall", "3.0:4000000:1"],
+                       capture_output=True, text=True, timeout=300)
+    assert r.returncode == 4 and "esp_restart" in r.stderr
+    text = [e.text for e in ef.Decoder().feed(out.read_bytes()) if isinstance(e, ef.Text)]
+    wd = [t for t in text if "[reader watchdog]" in t]
+    assert wd and "req" in wd[0] and "beat" in wd[0] and "drdy edges" in wd[0]
+
+
+def test_reader_task_creation_fails(sim, tmp_path):
+    """xTaskCreatePinnedToCore fails for the reader: reported, and locked modes
+    still stream from the host core."""
+    scans, _, health, text = run(sim, tmp_path / "o.bin", "--end", "5", "--fail-task", "lkReader",
+                                 "--cmd", "4.0:S0123457;B")
+    assert any("reader task NOT created" in t for t in text)
+    assert len([s for s in scans if s.dur_us == 16000]) > 40
+
+
+def test_stress_resend_late_start_keeps_health(sim, tmp_path):
+    """adc_diag --resend-every 1, first command 5 s after boot (bench r4 stress_c1):
+    streams from the first B, and HEALTH still arrives although no 1 s window
+    completes between re-sends (the partial window goes out at each park)."""
+    cmd = _adc_diag_cmd("0123457", 1, None, "wide")
+    cmds = []
+    for i in range(6):
+        cmds += ["--cmd", f"{5.0 + i:.1f}:{cmd}"]
+    scans, _, health, text = run(sim, tmp_path / "o.bin", "--end", "11.5", "--board-costs", *cmds)
+    assert not any("watchdog" in t for t in text)
+    assert len(health) >= 5 and all(h.core == 1 for h in health)
+    assert all(200 <= h.window_ms <= 1100 for h in health)
+    assert len([s for s in scans if s.t_us < 6.0e6]) > 150      # the first B streams

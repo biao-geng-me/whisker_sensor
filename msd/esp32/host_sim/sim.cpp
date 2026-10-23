@@ -34,6 +34,8 @@
 //        [--cost-scale X] [--no-pulse]
 //        [--board-costs] (Serial/UART costs calibrated to the bench; apply before --cost)
 //        [--cost NAME=US] (one CPU cost, e.g. ser_call=55; names as in struct Costs)
+//        [--tick-phase US] (core 1's tick offset vs core 0's, default 437)
+//        [--fail-task NAME]  (xTaskCreatePinnedToCore fails for that task)
 //        [--idf-log T:TEXT]  (an ESP-IDF component logs "E (ms) TEXT" at T)
 //        [--trace T0:T1]  (one stderr line per reader step between T0 and T1 s)
 #include "Arduino.h"
@@ -292,7 +294,10 @@ static SimCore sim_core[2];
 static std::mutex sim_mx;
 static SimTask *sim_baton = nullptr;        // the task allowed to run
 static thread_local SimTask *sim_self = nullptr;
-static bool sim_isrCtx = false;             // running an ISR body (time only, no scheduling)
+static bool sim_isrCtx = false;
+static std::string sim_failTask;
+static double sim_tickPhase = 437;          // --tick-phase US: core 1's tick vs core 0's
+static int sim_exitCode = 0;            // --fail-task NAME: its creation fails             // running an ISR body (time only, no scheduling)
 static int sim_drdyCore = 1, sim_uartCore = 1;
 static double sim_endUs = 3e6;
 static std::vector<double> sim_resets;
@@ -398,6 +403,7 @@ static void taskThread(SimTask *t) {
 
 BaseType_t xTaskCreatePinnedToCore(void (*fn)(void *), const char *name, uint32_t, void *arg,
                                    UBaseType_t, TaskHandle_t *h, BaseType_t core) {
+    if (sim_failTask == name) { if (h) *h = nullptr; return 0; }   // --fail-task NAME
     SimTask *t = new SimTask;
     t->fn = fn; t->arg = arg; t->core = (int)core; t->name = name;
     if (h) *h = t;
@@ -562,10 +568,11 @@ esp_err_t esp_task_wdt_reset() {
               (unsigned long)(sim_t / 1000));
     return 0x105;                            // ESP_ERR_NOT_FOUND
 }
+esp_reset_reason_t esp_reset_reason() { return ESP_RST_POWERON; }
 void esp_restart() {
     fprintf(stderr, "sim: esp_restart() at %.6f s\n", sim_t / 1e6);
+    sim_exitCode = 4;                        // the run ends here (no reboot modelled)
     simFinish();
-    _exit(4);
 }
 size_t HardwareSerial::setTxBufferSize(size_t n) { sim_uRingCap = n; return n; }
 void HardwareSerial::begin(unsigned long) { sim_uartCore = sim_self->core; }
@@ -647,6 +654,8 @@ int main(int argc, char **argv) {
         } else if (a == "--adc-reset") sim_resets.push_back(atof(next().c_str()) * 1e6);
         else if (a == "--no-pulse") sim_pulse = false;
         else if (a == "--board-costs") boardCosts();
+        else if (a == "--fail-task") sim_failTask = next();
+        else if (a == "--tick-phase") sim_tickPhase = atof(next().c_str());
         else if (a == "--idf-log") {
             std::string v = next();
             size_t c = v.find(':');
@@ -682,7 +691,7 @@ int main(int argc, char **argv) {
     std::stable_sort(sim_rx.begin(), sim_rx.end(),
                      [](const auto &x, const auto &y) { return x.first < y.first; });
     sim_endUs = endS * 1e6;
-    sim_core[1].nextTick = 1000 + 437;      // each core has its own tick timer: not aligned
+    sim_core[1].nextTick = 1000 + sim_tickPhase;   // each core has its own tick timer
     sim_level[P_CS] = 1;
     adc.reset();
     // Arduino's loopTask on core 1: setup(), then loop() for ever
@@ -712,5 +721,5 @@ static void simFinish() {
             (unsigned long long)sim_uIsrs, (unsigned long long)sim_isrLate, sim_tx.size(),
             (unsigned long long)sim_twdtErrors, (unsigned long long)sim_rawLogLines);
     fflush(stderr);
-    _exit(0);
+    _exit(sim_exitCode);
 }

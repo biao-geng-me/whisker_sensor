@@ -724,6 +724,45 @@ def cmd_mode(a) -> int:
     return 0
 
 
+# Lines that mean the run is not what it looks like (bench r4: the ESP32 had
+# rebooted and streamed the text-mode grid, which looked like a working run).
+STREAM_FAIL_MARKS = ("[reader watchdog]", "whisker_daq \u2014", "Commands: B=", "previous reset:",
+                     "Guru Meditation", "abort()", "Backtrace:", "rst:0x", "[park timeout]",
+                     "reader task NOT created")
+NO_SCAN_TIMEOUT_S = 2.0
+
+
+class StreamWatch:
+    """Fails a stream run loudly: no SCAN within NO_SCAN_TIMEOUT_S of B (of each
+    re-send), or a reboot / watchdog / crash line anywhere."""
+
+    def __init__(self) -> None:
+        self.problems: list[str] = []
+        self.t_kick = None
+        self.first_scan_after_kick = True
+
+    def kicked(self, t: float) -> None:
+        self.t_kick = t
+        self.first_scan_after_kick = False
+
+    def scan(self) -> None:
+        self.first_scan_after_kick = True
+
+    def text(self, line: str) -> None:
+        for m in STREAM_FAIL_MARKS:
+            if m in line:
+                self.problems.append(f"the ESP32 printed {line.strip()[:120]!r}")
+                break
+
+    def no_scan(self, t: float) -> bool:
+        """True (and records it) if the last B got no SCAN in time."""
+        if self.first_scan_after_kick or self.t_kick is None or t - self.t_kick < NO_SCAN_TIMEOUT_S:
+            return False
+        self.problems.append(f"no SCAN frame within {NO_SCAN_TIMEOUT_S:.0f} s of B")
+        self.first_scan_after_kick = True            # report once per kick
+        return True
+
+
 def cmd_stream(a) -> int:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     from whisker_link import esp32_frame as ef
@@ -742,21 +781,28 @@ def cmd_stream(a) -> int:
     ser = open_port(a.port)
     dec, raw = ef.Decoder(), bytearray()
     scans, infos, health = [], [], []
+    watch = StreamWatch()
     try:
         ser.reset_input_buffer()
         ser.write(cmd.encode())
         t0 = time.monotonic()
+        watch.kicked(t0)
         t_resend = t0 + (a.resend_every or 1e9)
         while time.monotonic() - t0 < a.secs:
             if time.monotonic() >= t_resend:          # stress: the same setup again
                 ser.write(cmd.encode())
                 resends += 1
                 t_resend += a.resend_every
+                watch.kicked(time.monotonic())
+            if watch.no_scan(time.monotonic()) and not a.resend_every:
+                print(f"ERROR: {watch.problems[-1]}; stopping", file=sys.stderr, flush=True)
+                break
             data = ser.read(ser.in_waiting or 1)
             raw += data
             for ev in dec.feed(data):
                 if isinstance(ev, ef.Scan):
                     scans.append(ev)
+                    watch.scan()
                 elif isinstance(ev, ef.Info):
                     infos.append(ev)
                     print("INFO", json.dumps(ef.info_cfg(dict(ev.__dict__))))
@@ -778,6 +824,10 @@ def cmd_stream(a) -> int:
                           flush=True)
                 elif isinstance(ev, ef.Text):
                     print("TEXT", ev.text)
+                    n = len(watch.problems)
+                    watch.text(ev.text)
+                    if len(watch.problems) > n:
+                        print(f"ERROR: {watch.problems[-1]}", file=sys.stderr, flush=True)
         wall = time.monotonic() - t0
         ser.write(b"g")                      # leave binary mode
     finally:
@@ -786,7 +836,7 @@ def cmd_stream(a) -> int:
         a.out.write_bytes(bytes(raw))
         print(f"saved the raw stream to {a.out}")
     if not scans:
-        print("no scans received")
+        print("ERROR: no scans received", file=sys.stderr)
         return 1
     import collections
     dts = collections.Counter(b.t_us - c.t_us for c, b in zip(scans, scans[1:]))
@@ -813,6 +863,11 @@ def cmd_stream(a) -> int:
     if resends:
         print(f"stress: the setup was re-sent {resends} times ({len([x for x in scans if x.flags])}"
               f" flagged scans in total)")
+    if watch.problems:
+        print(f"ERROR: this run is NOT valid ({len(watch.problems)} problem(s)):", file=sys.stderr)
+        for p in dict.fromkeys(watch.problems):
+            print(f"  - {p}", file=sys.stderr)
+        return 3
     return 0
 
 
