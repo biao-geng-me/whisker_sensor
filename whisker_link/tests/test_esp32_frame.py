@@ -129,3 +129,42 @@ def test_info_v4_and_health_roundtrip():
     v3 = ef.Info(3, 32, 0x2405, 0x0F02, 800000, 3125, 921600, 128, 250, 3, 0xFF)
     (ev3,) = list(ef.Decoder().feed(ef.encode_info(v3)))
     assert ev3.mode is None and "mode" not in ef.info_cfg(dict(ev3.__dict__))
+
+
+def _beat(**kw):
+    d = dict(version=1, uptime_ms=123456, mode=2, core=1, host_mode="B", flags=ef.BEAT_BOOT_CLOCK_OK,
+             window_ms=1000, drdy_edges=31250, halts=2, unrecovered=0, adc_reinits=1,
+             clock_rb=0xFF02, device_id=0x2405, scans=9999, reset_reason=3, boot_clock_rb=0xFF02)
+    d.update(kw)
+    return ef.Beat(**d)
+
+
+def test_beat_frame_and_text_line():
+    b = _beat()
+    line = ef.beat_text(ef.Beat(**{**b.__dict__, "host_mode": "g"}))
+    # what the firmware prints in a text mode (beatService's format), as loose text
+    fw = ("#BEAT v1 up_ms=123456 mode=2 core=1 hmode=g flags=0x08 window_ms=1000 edges=31250"
+          " halts=2 unrec=0 reinit=1 clock_rb=0xFF02 id=0x2405 scans=9999 reset=3"
+          " boot_clock_rb=0xFF02")
+    assert line == fw
+    evs = list(ef.Decoder().feed(b"banner\r\n" + fw.encode() + b"\r\n" + ef.encode_beat(b)))
+    assert evs[0] == ef.Text("banner")
+    assert evs[1] == ef.Beat(**{**b.__dict__, "host_mode": "g"}) and evs[2] == b
+    assert len(ef.encode_beat(b)) == 6 + 38                 # BEAT_LEN in whisker_daq.ino
+    s = b.summary()
+    assert s["conv_hz"] == 31250 and s["converting"] and s["reset_name"] == "sw"
+    dead = _beat(drdy_edges=0, flags=ef.BEAT_ADC_DOWN, window_ms=1450)
+    assert dead.adc_down and not dead.summary()["converting"] and dead.conv_hz == 0
+    assert ef.beat_from_text("#BEAT v1 up_ms=1") is None   # truncated: not a beat
+    assert ef.beat_from_text("#BURST v1 sel=2") is None
+
+
+def test_unknown_frame_type_and_longer_payloads_are_safe():
+    """Old decoders skip a frame type they don't know (BEAT for them); this one
+    decodes longer INFO / BEAT payloads (newer firmware) as far as it knows them."""
+    info = ef.Info(4, 32, 0x2405, 0xFF0A, 8_000_000, 7812, 921600, 512, 200, 4, 0xBF, 1,
+                   8_000_000, 125, (18, 18, 18, 18, 17, 17, 0, 17))
+    longer = ef._frame(ef.T_INFO, ef.encode_info(info)[4:-2] + b"\x01\x02\x03")
+    beat = ef._frame(ef.T_BEAT, ef.encode_beat(_beat())[4:-2] + b"\x00" * 4)
+    evs = list(ef.Decoder().feed(ef._frame(0x7E, b"future") + longer + beat))
+    assert evs == [info, _beat()]

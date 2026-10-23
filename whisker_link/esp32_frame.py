@@ -75,6 +75,26 @@ so diagnostics never corrupt the binary stream.
     host core), u16 det_max_us (DRDY edge -> start of the read), u16 tx_late
     (windowed: frames sent > 200 us after their window)
 
+``BEAT`` (0x05) — heartbeat, about once a second in every mode (also legacy,
+and while nothing streams, e.g. a dead ADC; firmware since 2026-10-23 brief 6;
+older decoders skip the unknown type)::
+
+    u8 version (1), u32 uptime_ms, u8 mode (0 legacy, 1 quiet, 2 wide),
+    u8 core (the C setting), u8 host_mode (ASCII: 'B' binary stream, else the
+    text mode), u8 flags (BEAT_*), u16 window_ms, u32 drdy_edges (DRDY falling
+    edges in the window: the ADC converts iff > 0), u32 halts, u32 unrecovered
+    (UNRECOVERED reports), u32 adc_reinits, u16 clock_rb (last CLOCK readback),
+    u16 device_id, u32 scans, u8 reset_reason (ESP-IDF esp_reset_reason_t),
+    u16 boot_clock_rb (CLOCK readback of the boot init)
+
+In the text modes the firmware prints the same fields as a line
+``#BEAT v1 up_ms=.. mode=.. core=.. hmode=g flags=0x.. window_ms=.. edges=..
+halts=.. unrec=.. reinit=.. clock_rb=0x.... id=0x.... scans=.. reset=..
+boot_clock_rb=0x....``; ``Decoder`` turns it into a ``Beat`` too.
+
+INFO and HEALTH payloads longer than this module knows (newer firmware) are
+decoded as far as it knows them.
+
 This module is pure stdlib so it runs on the BlueOS Pi without numpy.
 """
 
@@ -91,6 +111,7 @@ T_SCAN = 0x01
 T_TEXT = 0x02
 T_INFO = 0x03
 T_HEALTH = 0x04
+T_BEAT = 0x05
 
 NCH = 32
 _SCAN_HDR = struct.Struct("<IIHIBB")       # seq, t_us, dur_us, railmask, flags, nch
@@ -100,6 +121,7 @@ _INFO_EXT3 = struct.Struct("<B")           # appended in version 3
 _INFO_EXT4 = struct.Struct("<BIH8B")       # appended in version 4
 _HEALTH = struct.Struct("<BBHHHHHHI" + "H" * 12)
 _HEALTH2 = struct.Struct("<BBHHHHHH")      # appended in version 2
+_BEAT = struct.Struct("<BIBBBBHIIIIHHIBH")
 MODE_NAMES = {0: "legacy", 1: "quiet", 2: "wide"}
 FLAG_RECOVERED = 0x01
 FLAG_CRC_RETRY = 0x02
@@ -107,6 +129,17 @@ FLAG_STALE = 0x04
 FLAG_REINIT = 0x08
 FLAG_SYNC = 0x10
 FLAG_EMPTY = 0x20
+# BEAT flags
+BEAT_ADC_DOWN = 0x01        # an UNRECOVERED halt was declared, no conversion since
+BEAT_NO_READER = 0x02       # the reader task wasn't created (locked modes on core 0)
+BEAT_PREV_WD = 0x04         # the previous reset was the reader watchdog
+BEAT_BOOT_CLOCK_OK = 0x08   # the boot CLOCK write was accepted
+BEAT_BOOT_RECOVERY = 0x10   # the ADC was stuck at boot and needed a recovery
+BEAT_BOOT_REC_FAIL = 0x20   # ... which failed
+# esp_reset_reason_t (ESP-IDF 5)
+RESET_REASONS = {0: "unknown", 1: "poweron", 2: "ext", 3: "sw", 4: "panic", 5: "int_wdt",
+                 6: "task_wdt", 7: "wdt", 8: "deepsleep", 9: "brownout", 10: "sdio", 11: "usb",
+                 12: "jtag", 13: "efuse", 14: "pwr_glitch", 15: "cpu_lockup"}
 
 # Physical conversion: code -> volts at the ADC input (PGA gain 1).
 VREF_V = 1.2
@@ -216,7 +249,63 @@ class Health:
         return d
 
 
-Event = Union[Scan, Text, Info, Health]
+@dataclass
+class Beat:
+    version: int
+    uptime_ms: int
+    mode: int
+    core: int
+    host_mode: str          # 'B' binary stream, else the text mode letter
+    flags: int
+    window_ms: int
+    drdy_edges: int
+    halts: int
+    unrecovered: int
+    adc_reinits: int
+    clock_rb: int
+    device_id: int
+    scans: int
+    reset_reason: int
+    boot_clock_rb: int
+
+    @property
+    def conv_hz(self) -> float:
+        """DRDY edges per second over the window (~the ADC conversion rate)."""
+        return self.drdy_edges * 1000.0 / self.window_ms if self.window_ms else 0.0
+
+    @property
+    def adc_down(self) -> bool:
+        return bool(self.flags & BEAT_ADC_DOWN)
+
+    def summary(self) -> dict:
+        """The fields a status record carries."""
+        d = dict(self.__dict__)
+        d.pop("version")
+        d["conv_hz"] = round(self.conv_hz, 1)
+        d["converting"] = self.drdy_edges > 0 and not self.adc_down
+        d["reset_name"] = RESET_REASONS.get(self.reset_reason, str(self.reset_reason))
+        d["mode_name"] = MODE_NAMES.get(self.mode, str(self.mode))
+        return d
+
+
+_BEAT_KEYS = ("up_ms", "mode", "core", "hmode", "flags", "window_ms", "edges", "halts", "unrec",
+              "reinit", "clock_rb", "id", "scans", "reset", "boot_clock_rb")
+
+
+def beat_from_text(line: str) -> Optional[Beat]:
+    """A text-mode ``#BEAT v1 key=value ...`` line, or None."""
+    parts = line.split()
+    if len(parts) < 2 or parts[0] != "#BEAT" or not parts[1].startswith("v"):
+        return None
+    kv = dict(p.split("=", 1) for p in parts[2:] if "=" in p)
+    try:
+        v = [kv[k] if k == "hmode" else int(kv[k], 0) for k in _BEAT_KEYS]
+        return Beat(int(parts[1][1:]), *v)
+    except (KeyError, ValueError):
+        return None
+
+
+Event = Union[Scan, Text, Info, Health, Beat]
 
 
 # ----- encoding (firmware does this in C; Python copy is for simulators/tests)
@@ -275,6 +364,23 @@ def info_cfg(info: dict) -> dict:
     return cfg
 
 
+def encode_beat(b: Beat) -> bytes:
+    return _frame(T_BEAT, _BEAT.pack(b.version, b.uptime_ms & 0xFFFFFFFF, b.mode, b.core,
+                                     ord(b.host_mode[:1] or "B"), b.flags, b.window_ms,
+                                     b.drdy_edges, b.halts, b.unrecovered, b.adc_reinits,
+                                     b.clock_rb, b.device_id, b.scans & 0xFFFFFFFF,
+                                     b.reset_reason, b.boot_clock_rb))
+
+
+def beat_text(b: Beat) -> str:
+    """The text-mode line of a Beat (as the firmware prints it)."""
+    return (f"#BEAT v{b.version} up_ms={b.uptime_ms} mode={b.mode} core={b.core}"
+            f" hmode={b.host_mode} flags=0x{b.flags:02X} window_ms={b.window_ms}"
+            f" edges={b.drdy_edges} halts={b.halts} unrec={b.unrecovered}"
+            f" reinit={b.adc_reinits} clock_rb=0x{b.clock_rb:04X} id=0x{b.device_id:04X}"
+            f" scans={b.scans} reset={b.reset_reason} boot_clock_rb=0x{b.boot_clock_rb:04X}")
+
+
 def encode_health(h: Health) -> bytes:
     names = list(Health.__dataclass_fields__)
     p = _HEALTH.pack(*(getattr(h, f) for f in names[:21]))
@@ -310,7 +416,7 @@ def _parse(ftype: int, p: bytes) -> Event | None:
         return Info(*_INFO.unpack_from(p), *_INFO_EXT.unpack_from(p, _INFO.size),
                     *_INFO_EXT3.unpack_from(p, _INFO.size + _INFO_EXT.size))
     n3 = _INFO.size + _INFO_EXT.size + _INFO_EXT3.size
-    if ftype == T_INFO and len(p) == n3 + _INFO_EXT4.size:
+    if ftype == T_INFO and len(p) >= n3 + _INFO_EXT4.size:   # longer = newer firmware
         mode, spi, n_conv, *avg = _INFO_EXT4.unpack_from(p, n3)
         return Info(*_INFO.unpack_from(p), *_INFO_EXT.unpack_from(p, _INFO.size),
                     *_INFO_EXT3.unpack_from(p, _INFO.size + _INFO_EXT.size),
@@ -321,6 +427,10 @@ def _parse(ftype: int, p: bytes) -> Event | None:
             (h.core, h.q_hwm, h.tx_win_us, h.parks, h.park_timeouts, h.host_tx_max_us,
              h.det_max_us, h.tx_late) = _HEALTH2.unpack_from(p, _HEALTH.size)
         return h
+    if ftype == T_BEAT and len(p) >= _BEAT.size:          # longer = newer firmware
+        v = list(_BEAT.unpack_from(p))
+        v[4] = chr(v[4])
+        return Beat(*v)
     return None
 
 
@@ -387,6 +497,11 @@ class Decoder:
                 break
             line = bytes(self._loose[:j]).rstrip(b"\r").decode("utf-8", errors="replace")
             del self._loose[:j + 1]
+            if line.startswith("#BEAT "):         # text-mode heartbeat
+                b = beat_from_text(line)
+                if b is not None:
+                    yield b
+                    continue
             if line.strip():
                 yield Text(line)
         if len(self._loose) > 4096:          # binary noise with no newline
