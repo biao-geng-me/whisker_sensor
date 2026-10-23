@@ -137,7 +137,7 @@ svg.blk { width: 100%; height: auto; display: block; min-width: 760px; }
       </section>
       <section class="card" id="s2">
         <h2>2 · Scan timeline: mux slots, ADC inputs, conversions</h2>
-        <p class="expl">One scan: the mux steps through the selects (shaded slots). Lines: voltage at each ADC pin. Boxes below: every conversion, kept (green) or read and discarded.</p>
+        <p class="expl">One scan: the mux steps through the selects (shaded slots). Lines: voltage at each ADC pin. Boxes below: every conversion, kept (green) or read and discarded. Grey “not drawn” slots stand for selects the real board also scans but this small view leaves out (the “extra selects” setting, 0 in the 8×4 preset); they take the same time on the board, so they are kept here.</p>
         <div class="status" id="st2"></div>
         <canvas id="c1"></canvas>
       </section>
@@ -668,7 +668,7 @@ function applyPreset(name) {
 }
 function rebuild(first) {
   const frac = SIM ? (tNow - SIM.tStart) / (SIM.tEnd - SIM.tStart) : 0;
-  SIM = simulate(P); simGen++;
+  SIM = simulate(structuredClone(P)); simGen++;   // a snapshot: edits to P reach SIM only through a rebuild
   tNow = SIM.slots[0].tSw + SIM.scanPeriod * 1.02;   // start just inside scan 1
   if (!first && frac > 0 && frac < 1) tNow = clamp(SIM.tStart + frac * (SIM.tEnd - SIM.tStart), SIM.tStart, simEnd());
   computeStats(); zoomDefault(); syncSettings(); updateDerived(); buildBlock(); buildConvBox(); buildFrameTable(); sizeLanes(); updateNote();
@@ -725,7 +725,7 @@ function setText(el, s) { if (el && el._t !== s) { el.textContent = s; el._t = s
 function setHTML(el, s) { if (el && el._h !== s) { el.innerHTML = s; el._h = s; } }
 function setStatus(id, s) { const el = $(id); if (el && el._t !== s) { el.textContent = s; el._t = s; el.title = s; } }
 function selName(sel, long) {
-  if (sel < 0) return long ? "other (not modelled)" : "other";
+  if (sel < 0) return long ? "board sel, not drawn" : "not drawn";
   const p = SIM.p, w = p.nch <= 2 && !(p.nsel === 8 && p.nch === 4);
   return w ? (long ? `sel ${sel} · W${sel + 1}` : `W${sel + 1}`) : `sel ${sel}`;
 }
@@ -757,7 +757,7 @@ function drawScanBase(g, W, H, Q) {
   const Y = v => clamp(bot - (v - lo) / (hi - lo) * (bot - top), top - 6, bot);
   for (let i = s0; i <= s1; i++) {
     const s = slots[i]; g.fillStyle = A(SELC(s.sel), 0.13); g.fillRect(X(s.tSw), top - 14, X(s.tEnd) - X(s.tSw), bot - top + 14);
-    g.fillStyle = SELC(s.sel); g.textAlign = "left"; g.fillText(X(s.tEnd) - X(s.tSw) > 110 ? selName(s.sel, true).replace(" (not modelled)", "") : selName(s.sel), X(s.tSw) + 3, top - 7);
+    g.fillStyle = SELC(s.sel); g.textAlign = "left"; const sw = X(s.tEnd) - X(s.tSw), lb = selName(s.sel, true); g.fillText(g.measureText(lb).width + 6 < sw ? lb : selName(s.sel), X(s.tSw) + 3, top - 7);
     g.strokeStyle = cssv("--mut"); g.setLineDash([3, 3]); g.beginPath(); g.moveTo(X(s.tSw), top - 14); g.lineTo(X(s.tSw), H - 6); g.stroke(); g.setLineDash([]);
   }
   g.fillStyle = cssv("--mut"); g.textAlign = "right";
@@ -795,7 +795,7 @@ function drawScan() {
 }
 function textScan() {
   const p = SIM.p, si = Math.max(0, slotAt(tNow)), sc = SIM.slots[si].scan;
-  setStatus("st2", `scan ${sc + 1} of ${p.scans} · ${fmtT(SIM.scanPeriod)} per scan · ${[...Array(p.nch).keys()].map(c => ["red", "blue", "green", "orange"][c] + " AIN" + c).join(", ")} · grey band: bit-level window (4) · railed inputs clip at the top`);
+  setStatus("st2", `scan ${sc + 1} of ${p.scans} · ${fmtT(SIM.scanPeriod)} per scan · ${[...Array(p.nch).keys()].map(c => ["red", "blue", "green", "orange"][c] + " AIN" + c).join(", ")} · grey band: bit-level window (4) · railed inputs clip at the top${SIM.d.nmod < SIM.d.nsel ? ` · grey slots: board selects outside this view` : ""}`);
 }
 
 // ───────────────────────────── lane 3: settle and keep ─────────────────────────────
@@ -1126,7 +1126,7 @@ function textBlock() {
   const fi = frameAt(tNow), ng = NG(p);
   for (let i = 0; i < BL.hn; i++) { const f = fi >= 0 ? frames[fi].g[i] : null; setText(BL.hf[i], fi >= 0 ? `${gaugeLabel(p, i)} ${f ? (f.out * 1000).toFixed(2) : "—"}` : ""); }
   setText(BL.hfn, fi >= 0 ? (ng > BL.hn ? `+${ng - BL.hn} more (lane 6)` : `scan ${fi + 1}, mV`) : "no frame yet");
-  setStatus("st1", s ? `select ${s.sel < 0 ? "other" : s.sel}: ` + [...Array(p.nch).keys()].map(c => `AIN${c} ← ${s.sel < 0 ? "other" : gaugeLabel(p, s.sel * p.nch + c)}`).join(", ") : "");
+  setStatus("st1", s ? `select ${s.sel < 0 ? "not drawn (board select outside this view)" : s.sel}: ` + [...Array(p.nch).keys()].map(c => `AIN${c} ← ${s.sel < 0 ? "other" : gaugeLabel(p, s.sel * p.nch + c)}`).join(", ") : "");
 }
 
 // ───────────────────────────── notes ─────────────────────────────
@@ -1175,13 +1175,17 @@ function updateTexts() {
 }
 function draw(text) { drawAll(text); }
 function advance(dtS) { tNow += dtS * speedUs(); if (tNow > simEnd()) tNow = SIM.slots[0].tSw + 0.5 * SIM.d.T; }
+let drawErr = null;
 function frame(ts) {
-  if (SIM && !PERF_RUNNING) {
-    if (playing && lastFrame !== null) { advance(Math.min(0.1, (ts - lastFrame) / 1000)); dirty = true; }
+  requestAnimationFrame(frame);   // first, so an error below cannot stop the loop
+  const dt = lastFrame === null ? 0 : (ts - lastFrame) / 1000; lastFrame = ts;
+  if (!SIM || PERF_RUNNING) return;
+  try {
+    if (playing) { advance(Math.min(0.1, dt)); dirty = true; }
     if (dirty) { const f = forceText; dirty = false; forceText = false; drawAll(f); }
+  } catch (e) {
+    if (String(e) !== drawErr) { drawErr = String(e); console.error(e); setText($("clock"), "draw error: " + e.message); }
   }
-  lastFrame = ts;
-  requestAnimationFrame(frame);
 }
 function setPlaying(on) { playing = on; $("play").textContent = on ? "❚❚ pause" : "▶ play"; $("play").classList.toggle("on", on); requestDraw(true); }
 function stepBy(kind) {
@@ -1230,6 +1234,28 @@ function perfRun(hp) {
   const el = $("selftest"); el.textContent = JSON.stringify(out); el.hidden = false;
 }
 
+// ───────────────────────────── UI check (#uitest) ─────────────────────────────
+// Drives the real controls: each edit is followed by frames drawn before the debounced rebuild runs
+// (the gap where the settings and the simulation disagree), then the rebuild and more frames, with
+// every lane and text node drawn. Any exception is recorded; the speed label must follow the slider.
+function uiTest() {
+  const R = { errors: [], steps: 0, speedLbl: [] };
+  ALLVIS = true;
+  const frames = n => { for (let i = 0; i < n; i++) { advance(0.1); drawAll(true); } };
+  const run = (name, f) => { try { f(); R.steps++; } catch (e) { R.errors.push(`${name}: ${e.message} | ${String(e.stack).split("\n")[1]}`); } };
+  const field = (k, v) => run(`${k}=${v}`, () => {
+    const el = $("f_" + k); if (el.type === "checkbox") el.checked = !!v; else el.value = v;
+    el.dispatchEvent(new Event(el.type === "text" ? "change" : "input", { bubbles: true }));
+    frames(5); clearTimeout(rebuildTimer); rebuild(); frames(20);
+  });
+  const preset = name => run(`preset ${name}`, () => { const ps = $("preset"); ps.value = name; ps.dispatchEvent(new Event("change")); frames(20); });
+  for (const [k, v] of [["nsel", 5], ["nsel", 3], ["nsel", 8], ["nsel", 1], ["nch", 1], ["nch", 4], ["nch", 3], ["sels", "210"], ["sels", "7"], ["sels", ""],
+    ["extra", 0], ["policy", "legacy"], ["osr", 16], ["order", 1], ["rc", false], ["scans", 2]]) field(k, v);
+  for (const name of Object.keys(PRESETS)) { preset(name); field("nsel", 6); preset(name); run(`steps ${name}`, () => { for (const k of ["bit", "conv", "slot", "scan"]) for (let i = 0; i < 40; i++) { stepBy(k); drawAll(true); } }); }
+  for (const v of [1, 2.5, 4]) run(`speed ${v}`, () => { const el = $("speed"); el.value = v; el.dispatchEvent(new Event("input")); drawAll(false); R.speedLbl.push($("speedlbl").textContent); });
+  return R;
+}
+
 // ───────────────────────────── boot ─────────────────────────────
 function boot() {
   const hp = new URLSearchParams(location.hash.slice(1));
@@ -1251,13 +1277,14 @@ function boot() {
   ps.addEventListener("change", () => { if (ps.value !== "custom") { applyPreset(ps.value); scheduleRebuild(); } });
   $("play").addEventListener("click", () => setPlaying(!playing));
   document.querySelectorAll("[data-step]").forEach(b => b.addEventListener("click", () => stepBy(b.dataset.step)));
-  $("speed").value = speedLog; $("speed").addEventListener("input", e => { speedLog = +e.target.value; requestDraw(true); });
+  $("speed").value = speedLog; $("speed").addEventListener("input", e => { speedLog = +e.target.value; setText($("speedlbl"), `1 s on screen = ${fmtT(speedUs())} of signal`); requestDraw(true); });
   $("zoom").addEventListener("input", e => { zoomF = +e.target.value; zoomUser = true; requestDraw(true); });
   $("zch").addEventListener("change", e => { zch = +e.target.value; requestDraw(true); });
   $("theme").addEventListener("click", () => { const r = document.documentElement, dark = r.dataset.theme ? r.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches; r.dataset.theme = dark ? "light" : "dark"; themeChanged(); });
   document.addEventListener("keydown", e => { if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return; if (e.key === " ") { e.preventDefault(); setPlaying(!playing); } else if (e.key === "ArrowRight") stepBy(e.shiftKey ? "conv" : "bit"); });
   observe();
   if (hp.has("perf")) { perfRun(hp); return; }
+  if (hp.has("uitest")) { const el = $("selftest"); el.textContent = JSON.stringify(uiTest()); el.hidden = false; return; }
   if (hp.has("goto")) requestAnimationFrame(() => $(hp.get("goto")).scrollIntoView({ block: "start" }));
   drawAll(true);
   requestAnimationFrame(frame);
