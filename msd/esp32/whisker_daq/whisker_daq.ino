@@ -66,7 +66,7 @@
  *            Host: msd/esp32/adc_diag.py spi. See spi_sweep.
  *    S<digits>;  scan only these mux selects, e.g. S0123457; ("S;" = all 8,
  *            also the boot default). Skipped outputs read as railed/open.
- *    M<0|1|2> [settle_us] [osr] [period_us] [spi_hz];   SCAN MODE (boot default M0)
+ *    M<0|1|2> [settle_us] [osr] [period_us] [spi_hz];   SCAN MODE (boot default M1)
  *            M0 legacy ~76 Hz scan (below). M1 quiet: locked scan, CLKIN
  *            8 MHz, OSR 512, SPI 8 MHz, 125 conversions = 16 ms, 62.5 Hz.
  *            M2 wide: OSR 128, SPI 12 MHz, 125 conversions = 4 ms, 250 Hz.
@@ -2283,6 +2283,18 @@ void setup() {
     uint32_t t0 = millis();
     while (millis() - t0 < 200) { int c = digitalRead(PIN_DRDY); if (c != last) { edges++; last = c; } }
     Serial.printf("DRDY edges/200ms = %d  (%s)\n", edges, edges > 0 ? "converting" : "NOT toggling");
+
+    // Boot default: the quiet locked scan (M1;, OSR 512, 62.5 Hz) since
+    // 2026-10-23; M0; gives the legacy scan.
+    if (const char *err = lkConfigure(1, LK_SETTLE_DEFAULT, LK_OSR[1], LK_SCAN[1], LK_SPI[1])) {
+        Serial.printf("quiet mode not available (%s): legacy scan\n", err);
+    } else if (!lkStart()) {
+        Serial.printf("quiet mode CLOCK not accepted (0x%04X): legacy scan\n", g_clockRb);
+        lkStop();
+    } else {
+        lkHealthReset();
+        lkPrintMode();
+    }
 
     Serial.println("\nCapturing baseline — keep all whiskers still...");
     captureBaseline(16);

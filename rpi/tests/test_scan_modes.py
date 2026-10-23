@@ -75,6 +75,18 @@ def test_wide_mode_framing(fake_esp32):
     assert health[-1].summary()["busy_pct"] == 38.0
 
 
+def test_boot_default_is_quiet(fake_esp32):
+    fd = os.open(fake_esp32, os.O_RDWR | os.O_NOCTTY)
+    try:
+        os.write(fd, b"B")
+        evs = _read_events(fd, 1.0)
+    finally:
+        os.close(fd)
+    cfg = ef.info_cfg(dict([e for e in evs if isinstance(e, ef.Info)][0].__dict__))
+    assert cfg["mode_name"] == "quiet" and cfg["osr"] == 512 and cfg["scan_hz"] == 62.5
+    assert {e.dur_us for e in evs if isinstance(e, ef.Scan)} == {16000}
+
+
 def test_back_to_legacy(fake_esp32):
     fd = os.open(fake_esp32, os.O_RDWR | os.O_NOCTTY)
     try:
