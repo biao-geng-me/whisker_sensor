@@ -19,6 +19,7 @@
 //
 // Usage: sim --end 3 --cmd 1.0:S0123457; --cmd 1.0:M2; --cmd 1.05:B --out out.bin
 //        [--stall T:US] [--adc-reset T] [--seed N] [--cost-scale X] [--no-pulse]
+//        [--board-costs] (Serial/UART costs calibrated to the bench; apply before --cost)
 //        [--cost NAME=US] (one CPU cost, e.g. ser_call=55; names as in struct Costs)
 //        [--trace T0:T1]  (one stderr line per reader step between T0 and T1 s)
 #include "Arduino.h"
@@ -38,7 +39,12 @@ struct Costs {
     double micros = 0.15, reg = 0.03, dwrite = 1.0, dread = 0.5;
     double isr_lat = 1.0, isr = 2.0, spi_ovh = 3.0, ser_call = 2.0, ser_byte = 0.02;
     double avail = 0.5, loop = 3.0, byte_xfer_ovh = 1.0;
+    double uisr = 1.0, uisr_byte = 0.02;   // UART TX ISR: FIFO refill from the driver ring
 } C;
+// --board-costs: calibrated to the 2026-10-23 bench HEALTH (tx max 57-59 us for
+// a <= 48 B Serial.write incl. the refill ISR it triggers, lat max ~73 us at
+// OSR 256). Read cost is already close (21-22 us at 8 MHz).
+static void boardCosts() { C.ser_call = 20; C.ser_byte = 0.1; C.uisr = 8; C.uisr_byte = 0.5; }
 
 static double sim_t = 0;                  // virtual time, us
 static bool sim_inIsr = false;
@@ -207,6 +213,30 @@ struct Adc {
     }
 } adc;
 
+// ---------------------------------------------------------------- UART0 TX
+// The driver's ring buffer (Serial.setTxBufferSize) feeds the 128-byte FIFO
+// from the TX-empty ISR, which fires when the FIFO is at or below 10 bytes
+// (IDF default threshold) and the ring has data; the FIFO drains at 921600 baud.
+static const double BAUD_BPS = 92160.0;                     // 10 bits/byte
+static double sim_uFifo = 0, sim_uLast = 0;                 // FIFO bytes at sim_uLast
+static size_t sim_uRing = 0, sim_uRingCap = 256;
+static uint64_t sim_uIsrs = 0;
+static double uFifoNow() { return std::max(0.0, sim_uFifo - (sim_t - sim_uLast) * BAUD_BPS / 1e6); }
+static double uartIsrDue() {
+    if (!sim_uRing) return 1e18;
+    double f = uFifoNow();
+    return f <= 10 ? sim_t : sim_t + (f - 10) / BAUD_BPS * 1e6;
+}
+static double uartIsr() {                // returns its cost, us
+    sim_uFifo = uFifoNow();
+    sim_uLast = sim_t;
+    size_t m = std::min(sim_uRing, (size_t)(128 - std::ceil(sim_uFifo)));
+    sim_uRing -= m;
+    sim_uFifo += m;
+    sim_uIsrs++;
+    return C.uisr + C.uisr_byte * m;
+}
+
 // ---------------------------------------------------------------- time
 static void advance(double dt) {
     double end = sim_t + dt;
@@ -218,12 +248,19 @@ static void advance(double dt) {
     for (;;) {
         double tc = adc.nextConv;
         double ti = (!sim_inIsr && sim_isrPending) ? sim_isrDue : 1e18;
-        double tn = std::min(tc, ti);
+        double tu = !sim_inIsr ? uartIsrDue() : 1e18;
+        double tn = std::min(tc, std::min(ti, tu));
         if (tn > end) break;
         if (tn > sim_t) sim_t = tn;
-        if (tc <= ti) {
+        if (tc <= ti && tc <= tu) {
             adc.complete();
             adc.nextConv += adc.T;
+        } else if (tu < ti) {
+            double t0 = sim_t;
+            sim_inIsr = true;
+            sim_t += uartIsr();
+            sim_inIsr = false;
+            end += sim_t - t0;
         } else {
             sim_isrPending = false;
             double t0 = sim_t;
@@ -322,15 +359,7 @@ HardwareSerial Serial;
 static std::vector<std::pair<double, std::string>> sim_rx;   // (time, bytes)
 static size_t sim_rxItem = 0, sim_rxPos = 0;
 static std::vector<uint8_t> sim_tx;
-static double sim_txPending = 0, sim_txLast = 0;
-static size_t sim_txCap = 128;
-static const double BAUD_BPS = 92160.0;                     // 921600 baud, 10 bits/byte
-
-size_t HardwareSerial::setTxBufferSize(size_t n) { sim_txCap = n + 128; return n; }
-static void txDrain() {
-    sim_txPending = std::max(0.0, sim_txPending - (sim_t - sim_txLast) * BAUD_BPS / 1e6);
-    sim_txLast = sim_t;
-}
+size_t HardwareSerial::setTxBufferSize(size_t n) { sim_uRingCap = n; return n; }
 int HardwareSerial::available() {
     advance(0.1);
     int n = 0;
@@ -348,15 +377,14 @@ int HardwareSerial::read() {
 }
 int HardwareSerial::availableForWrite() {
     advance(C.avail);
-    txDrain();
-    return (int)(sim_txCap - sim_txPending);
+    return (int)(sim_uRingCap - sim_uRing);
 }
 size_t HardwareSerial::write(const uint8_t *d, size_t n) {
     advance(C.ser_call + n * C.ser_byte);
-    txDrain();
-    while (sim_txCap - sim_txPending < n) { advance(20); txDrain(); }   // blocks like the driver
+    while (sim_uRingCap - sim_uRing < n) advance(20);       // blocks like the driver
     sim_tx.insert(sim_tx.end(), d, d + n);
-    sim_txPending += n;
+    sim_uRing += n;                                          // the refill ISR is now due
+    advance(0);
     return n;
 }
 size_t HardwareSerial::printf(const char *fmt, ...) {
@@ -368,7 +396,7 @@ size_t HardwareSerial::printf(const char *fmt, ...) {
     if (n < 0) return 0;
     return write((const uint8_t *)buf, std::min(n, (int)sizeof(buf) - 1));
 }
-void HardwareSerial::flush() { while (sim_txPending > 0) { advance(20); txDrain(); } }
+void HardwareSerial::flush() { while (sim_uRing > 0 || uFifoNow() > 0) advance(20); }
 
 // ---------------------------------------------------------------- the sketch
 static double sim_traceFrom = -1, sim_traceTo = -1;          // --trace T0:T1 (s)
@@ -407,6 +435,7 @@ int main(int argc, char **argv) {
             sim_stalls.push_back({atof(v.substr(0, c).c_str()) * 1e6, atof(v.substr(c + 1).c_str())});
         } else if (a == "--adc-reset") resets.push_back(atof(next().c_str()) * 1e6);
         else if (a == "--no-pulse") sim_pulse = false;
+        else if (a == "--board-costs") boardCosts();
         else if (a == "--cost") {                // --cost ser_call=50 (us), after --cost-scale
             std::string v = next();
             size_t c = v.find('=');
@@ -427,7 +456,7 @@ int main(int argc, char **argv) {
     for (auto &cs : costSet) {
         static const char *names[] = {"micros", "reg", "dwrite", "dread", "isr_lat", "isr",
                                       "spi_ovh", "ser_call", "ser_byte", "avail", "loop",
-                                      "byte_xfer_ovh"};
+                                      "byte_xfer_ovh", "uisr", "uisr_byte"};
         size_t k = 0;
         while (k < sizeof(names) / sizeof(*names) && cs.first != names[k]) k++;
         if (k == sizeof(names) / sizeof(*names)) { fprintf(stderr, "unknown cost %s\n", cs.first.c_str()); return 2; }
@@ -449,8 +478,8 @@ int main(int argc, char **argv) {
     fwrite(sim_tx.data(), 1, sim_tx.size(), f);
     fclose(f);
     fprintf(stderr, "sim: %.3f s virtual, %llu conversions, %llu blocked DRDY pulses, %llu FIFO"
-            " overwrites, %llu narrow pulses, %zu bytes out\n", sim_t / 1e6, (unsigned long long)adc.nConv,
+            " overwrites, %llu narrow pulses, %llu UART ISRs, %zu bytes out\n", sim_t / 1e6, (unsigned long long)adc.nConv,
             (unsigned long long)adc.nBlocked, (unsigned long long)adc.nOverwrite,
-            (unsigned long long)adc.nPulse, sim_tx.size());
+            (unsigned long long)adc.nPulse, (unsigned long long)sim_uIsrs, sim_tx.size());
     return 0;
 }

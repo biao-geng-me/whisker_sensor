@@ -1,0 +1,23 @@
+
+=================================================
+  whisker_daq — 16 whiskers x 2 gauges = 32 ch
+=================================================
+Select-line probe: 0 of 6 read LOW with pull-up.
+CLKIN: on, 800000 Hz    SCLK: 600000 Hz    fDATA ~ 3125 SPS
+Device ID      = 0x2405  (ADS131M04)
+CLOCK readback = 0xFF02  (config ACCEPTED)
+MODE readback  = 0x0110  (RESET flag cleared)
+DRDY edges/200ms = 0  (NOT toggling)
+mode 1 (quiet): CLKIN 8000000 Hz, OSR 512 (T 128 us), SPI 8000000 Hz (8000000), N 125 = 16000 us (62.50 scans/s), 8 selects, settle 200 us -> drop 4, average 12,12,12,12,12,11,11,11 per slot
+
+Capturing baseline — keep all whiskers still...
+Baseline captured from 16 scans.
+
+Commands: B=binary stream  g=grid  x=profile  s=table  b=rebaseline
+          v=abs/delta  m=map  c=calibrate  n=noise  [ ]=scale  0=auto
+          d<0-7>=mux settling diagnostic for that select
+          r<sel> [n] [osr] [clkin_hz] [spi_hz];=raw burst (see header)
+          D<from> <to> [clkin] [osr] [spi] [reps] [win] [dither] [dwell] [jitter];=fine settle
+          p[clkin] [osr] [secs] [spi ...];=SPI speed sweep
+          S<digits>;=scan only these selects (S; = all 8)
+          M<0|1|2> [settle_us] [osr] [period_us] [spi];=scan mode: 0 legacy 76 Hz, 1 quiet 62.5 Hz (OSR 512), 2 wide 250 Hz
