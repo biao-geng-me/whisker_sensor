@@ -247,6 +247,31 @@ The host's ADC fault alarm ([`whisker_link/esp32_fault.py`](../../whisker_link/e
 
 What the board can't show on demand is a real lock-up. On a healthy board, `adc_diag beat` checks the heartbeat and the boot fields, and the stream runs check that the beat doesn't disturb the locked timing. If CLKIN (P1 pin 6 → GPIO16) is a jumper on the bench, pulling it while streaming stops the ADC (it has no oscillator of its own). That gives the halt → UNRECOVERED → back-off sequence, and putting it back gives `[adc ok]`. Whether the CLOCK write then sticks without CLKIN is not known, so CLOCKrb may read the configured value.
 
+Board check (round 7, firmware 2e9d8dc). It needs fw-drdy's `adc_diag.py` and `whisker_link` on the PC (the BEAT decoder). Power-cycle where it says so and wait > 3 s after boot. Steps 1–4 are valid only if `adc_diag` exits 0 with no `ERROR:` lines:
+
+```powershell
+cd C:\Users\Biao\Projects\whisker_sensor
+git fetch origin; git switch fw-drdy; git pull
+cd msd\esp32
+python -m esptool --chip esp32 --port COM4 --baud 921600 write_flash 0x0 whisker_daq_2e9d8dc_quietboot_c1_beat.merged.bin
+# 1. power-cycle first: heartbeat in a text mode, then in binary mode, and the boot fields
+python adc_diag.py beat --port COM4 --secs 6
+# 2. no power-cycle needed: quiet default (C1), 30 s, a BEAT line each second
+python adc_diag.py stream --port COM4 --selects 0123457 --secs 30 --out r7_quiet_beat.bin
+# 3. no power-cycle needed: wide C1, 2 min (the beat must not disturb the 4 ms timing)
+python adc_diag.py stream --port COM4 --selects 0123457 --core 1 --mode wide --secs 120 --out r7_wide_c1_beat.bin
+# 4. no power-cycle needed: legacy, 10 s
+python adc_diag.py stream --port COM4 --selects 0123457 --mode legacy --secs 10 --out r7_legacy_beat.bin
+# 5. optional, only if CLKIN (P1 pin 6 -> GPIO16) is a jumper: power-cycle first, quiet 40 s;
+#    pull the CLKIN jumper at ~10 s, put it back at ~25 s
+python adc_diag.py stream --port COM4 --selects 0123457 --secs 40 --out r7_clkin_pull.bin
+```
+
+Expected:
+- **Step 1.** `heartbeat OK`, beats ~1000 ms apart with host `'g'`, then `'B'`. The boot line should read `reset reason 1 (poweron)`, the boot CLOCK readback should equal the banner's `CLOCK readback` (config ACCEPTED), and the flags should be `BOOT_CLOCK_OK` only.
+- **Steps 2–4.** One `BEAT` line per second with DRDY ≈ 7812/s (quiet), 31250/s (wide) or 3125/s (legacy), halts 0, and the `heartbeat:` summary. The HEALTH totals should stay as in round 6 (overrun, missed, late_switch 0 in wide).
+- **Step 5.** Five `[halt] no conversion` lines in ~2.3 s, then `[halt #6] UNRECOVERED ...` and one more every 5 s. Beats keep coming with DRDY 0 and `ADC_DOWN`. After the jumper is back, `[adc ok]` (or an `[adc reset #n]` first) within ≤ 5 s, and scans resume. adc_diag may exit 0 here: halts aren't in its failure list.
+
 ## First board run of the locked modes (bench, 2026-10-23)
 
 Captures and analysis are in `/scratch/bigeme/whisker_dev/bench_1023/`. Quiet timing was clean: 62.500 Hz, every step exactly 16000 µs, no seq gaps. Noise on W2_A/W2_B was 0.025/0.027 mV at OSR 256 and 0.019/0.016 mV at OSR 512, against 0.065 mV in the legacy scan. OSR 512 matches the floor emulated from a raw burst (~1 µV/√Hz input noise seen for ~1.9 ms of every 16 ms), so it is now the quiet default. A comb burst put the interference at multiples of 125 Hz, locked to the ESP32 clock, so 8 ms periods fold it too. Wide failed on one core (overrun ~15 %, latency max 113 µs against T = 32 µs). A dual-core reader is in design.
