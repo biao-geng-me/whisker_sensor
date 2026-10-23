@@ -303,6 +303,7 @@ class Esp32Source:
         self.n_adc_sync = 0           # scans with FLAG_SYNC (locked scan lost/regained the grid)
         self.n_adc_empty = 0          # scans with FLAG_EMPTY (a slot had no usable conversion)
         self.health: Optional[dict] = None    # latest HEALTH frame (locked scan modes)
+        self.beat: Optional[dict] = None      # latest heartbeat (BEAT, every mode)
         self.info: Optional[dict] = None
         self.faults = FaultMonitor()             # touched by this thread only, except status()
         self._fault_lock = threading.Lock()
@@ -440,6 +441,10 @@ class Esp32Source:
             self.hub.publish({"k": "info", "t": now, **self.info})
         elif isinstance(ev, ef.Health):
             self.health = {"t": now, **ev.summary()}
+        elif isinstance(ev, ef.Beat):
+            self.beat = {"t": now, **ev.summary()}
+            with self._fault_lock:
+                self.faults.on_beat(ev, now)
 
 
 class MavSource:
@@ -609,7 +614,7 @@ class Server:
             dec = self.esp32.decoder
             st["esp32"] = {"scans": self.esp32.n_scans, "seq_gaps": self.esp32.n_seq_gaps,
                            "crc_fail": dec.n_crc_fail, "skipped": dec.n_skipped,
-                           "adc_recov": self.esp32.n_adc_recov, "adc_crc": self.esp32.n_adc_crc,
+                           "junk": dec.n_junk, "adc_recov": self.esp32.n_adc_recov, "adc_crc": self.esp32.n_adc_crc,
                            "adc_stale": self.esp32.n_adc_stale,
                            "adc_reinit": self.esp32.n_adc_reinit,
                            "adc_sync": self.esp32.n_adc_sync, "adc_empty": self.esp32.n_adc_empty,
@@ -620,6 +625,10 @@ class Server:
                 h = dict(self.esp32.health)
                 h["age_s"] = round(time.monotonic() - h.pop("t"), 1)
                 st["esp32"]["health"] = h
+            if self.esp32.beat:
+                b = dict(self.esp32.beat)
+                b["age_s"] = round(time.monotonic() - b.pop("t"), 1)
+                st["esp32"]["beat"] = b
             st["esp32"]["fault"] = self.esp32.fault_status()
         if self.mav:
             st["mav"] = {"msgs": self.mav.n_msgs, "target": self.mav.target}

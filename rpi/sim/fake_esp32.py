@@ -13,9 +13,14 @@ railed). In M1/M2, t_us advances by exactly 16000 / 4000 us per scan.
 mode until the next ``B`` (like a halt or a DTR reset of the real board).
 ``kill -USR2 <pid>`` toggles an ADC lock-up (``--adc-dead`` starts in one), as
 on the ROV: no scans; legacy reports ``[halt #N] UNRECOVERED ...`` every
-1.5 s, M1/M2 ``[halt] no conversion ...`` every 0.1 s, and a reboot reports
-``CLOCK readback = 0x00FF (NOT accepted)``. The second USR2 is the PCB power
-cycle: ``[halt #N] recovered at L3`` and scans again (RECOVERED flag).
+1.5 s, M1/M2 five ``[halt] no conversion ...`` 0.45 s apart, then ``[halt #N]
+UNRECOVERED ...`` every 5 s (the firmware since 2026-10-23 brief 6), and a
+reboot reports ``CLOCK readback = 0x00FF (NOT accepted)``. The second USR2 is
+the PCB power cycle: ``[halt #N] recovered at L3`` and scans again (RECOVERED
+flag). Like that firmware it sends a 1 Hz heartbeat in every mode (a BEAT
+frame in binary mode, a ``#BEAT`` line in text mode) with no DRDY edges and
+the ADC-down flag while the ADC is locked up; ``--no-beat`` leaves it out
+(older firmware). ``kill -STOP <pid>`` is a hung ESP32 (``-CONT`` resumes).
 
 Signal: the "live" gauges carry ``amp * sin(2*pi*f*t)`` on a shared wall clock
 (``time.time()``) plus noise, so ``fake_autopilot.py`` can put the same motion
@@ -94,6 +99,8 @@ def main() -> None:
     ap.add_argument("--link", default=None, help="also create this symlink to the pty")
     ap.add_argument("--adc-dead", action="store_true",
                     help="start with the ADC locked up (see kill -USR2)")
+    ap.add_argument("--no-beat", action="store_true",
+                    help="no heartbeat (as firmware before 2026-10-23 brief 6)")
     args = ap.parse_args()
 
     live = {CHANNEL_NAMES.index(n.strip()) for n in args.live.split(",") if n.strip()}
@@ -155,8 +162,12 @@ def main() -> None:
     toggle = []                          # SIGUSR2: ADC lock-up on / PCB power cycle
     signal.signal(signal.SIGUSR2, lambda *_: toggle.append(1))
     n_halt = 0
+    n_lk_halt = 0                        # locked-mode halts in a row (UNRECOVERED after 5)
+    n_unrec = 0
     next_halt = 0.0
     scan_flags = 0                       # OR-ed into the next scan
+    next_beat = time.monotonic() + 1.0
+    n_beat_scans = 0
 
     def say(msg: str) -> None:
         out(ef.encode_text(msg) if binary else (msg + "\r\n").encode())
@@ -204,6 +215,7 @@ def main() -> None:
             toggle.clear()
             dead[0] = not dead[0]
             next_halt = time.monotonic()
+            n_lk_halt = 0
             if not dead[0]:                  # PCB power-cycled with the ESP32 running
                 if not mode:
                     n_halt += 1
@@ -235,6 +247,15 @@ def main() -> None:
                 binary = False
                 out(b"\r\n-- TEXT MODE (simulated) --\r\n")
         now = time.monotonic()
+        if not args.no_beat and now >= next_beat:
+            next_beat = now + 1.0
+            b = ef.Beat(1, int((now - boot_mono) * 1000), mode, 1, "B" if binary else "g",
+                        (ef.BEAT_ADC_DOWN if dead[0] and n_unrec else 0)
+                        | (0 if dead[0] else ef.BEAT_BOOT_CLOCK_OK), 1000,
+                        0 if dead[0] else (3125 if not mode else int(8e6 / 2 / lk[0])),
+                        n_halt, n_unrec, 0, 0x00FF if dead[0] else 0xFF0A, 0x2405, n_beat_scans,
+                        1, 0x00FF if args.adc_dead else 0xFF02)
+            out(ef.encode_beat(b) if binary else (ef.beat_text(b) + "\r\n").encode())
         if now < next_t:
             time.sleep(min(next_t - now, 0.005))
             continue
@@ -245,15 +266,17 @@ def main() -> None:
             continue
         if dead[0]:                          # nothing converts: halt messages, no scans
             if now >= next_halt:
-                if mode in MODES:
+                n_halt += 1
+                if mode in MODES and n_lk_halt < 5:
+                    n_lk_halt += 1
                     say(f"[halt] no conversion for 50 ms in {ef.MODE_NAMES[mode]} mode:"
                         " CLKIN restart + re-init")
-                    next_halt = now + 0.1
+                    next_halt = now + 0.45           # a recovery takes ~0.45 s
                 else:
-                    n_halt += 1
+                    n_unrec += 1
                     say(f"[halt #{n_halt}] UNRECOVERED  ID=0x2405 CLOCKrb=0x00FF crcbad=0"
                         "  -> power-cycle the PCB with the ESP32 already running")
-                    next_halt = now + 1.5
+                    next_halt = now + (5.0 if mode in MODES else 1.5)
             continue
         if mode in MODES:
             grid_us = micros() if grid_us is None else grid_us + lk[3]
@@ -273,6 +296,7 @@ def main() -> None:
         out(ef.encode_scan(seq, t_us, dur, rail, scan_flags, raw))
         scan_flags = 0
         seq += 1
+        n_beat_scans += 1
         if mode in MODES and now - last_health >= 1.0:
             last_health = now
             osr, _, n, scan_us = lk[:4]

@@ -19,6 +19,12 @@ Levels:
                          and ``CLKIN: *** FAILED`` are ``adc_not_converting``;
     ``adc_not_converting`` locked modes: repeated ``[halt] no conversion ...`` lines
                          and no scan for ``HALT_STALL_S``;
+    ``adc_unrecovered`` / ``adc_not_converting`` also from the heartbeat (BEAT frame,
+                         firmware since 2026-10-23 brief 6): its ADC-down flag, or no
+                         DRDY edges in ``DEAD_BEATS`` beats in a row (the ESP32 is
+                         alive, the ADC isn't);
+    ``esp32_hung``       the firmware sends heartbeats, the link is up, and nothing
+                         (no beat, scan or text) came for ``BEAT_LOST_S``;
     ``no_scans``         no scan for ``NO_SCAN_S`` while the link is up;
     ``link_down``        (daq_server) the serial port has been gone for ``NO_SCAN_S``.
     A later INFO does not clear it (the transports re-send ``B`` while nothing
@@ -28,12 +34,13 @@ Levels:
     (the firmware then recovers by itself) or after a full power cycle.
 ``warn`` (amber, for ``WARN_HOLD_S`` after the last one)
     recovered halts (text, or a RECOVERED / REINIT scan flag with no text),
-    ADC resets, reader-watchdog reboots, other ESP32 reboots, ``[idf] E``
+    ADC resets, reader-watchdog reboots, other ESP32 reboots (the banner, or
+    the heartbeat's uptime going back, with its reset reason), ``[idf] E``
     lines (and raw ``E (...)`` lines from older firmware), dropped IDF log
     lines, and SYNC / EMPTY flagged scans above ``FLAG_WARN_FRAC`` over
     ``FLAG_WINDOW_S``.
 
-Feed it ``link``, ``on_scan``, ``on_text``, ``expect_reset`` and ``poll``;
+Feed it ``link``, ``on_scan``, ``on_text``, ``on_beat``, ``expect_reset`` and ``poll``;
 ``take_events`` returns what happened since the last call (fault onsets and
 clears, warnings, at most one warning per code per ``WARN_EVERY_S``), each
 ready to go out as a ``mark`` (``mark_event``). ``status()`` is the
@@ -62,9 +69,12 @@ FLAG_WINDOW_S = 10.0
 FLAG_WARN_FRAC = 0.01
 FLAG_MIN_SCANS = 100
 HISTORY_N = 10           # events kept in status()["history"]
+BEAT_LOST_S = 5.0        # heartbeat firmware: nothing at all this long: ESP32 hung
+DEAD_BEATS = 2           # beats in a row with no DRDY edge: ADC not converting
 
 ACTION_PCB = "power-cycle the whisker PCB (vehicle power)"
 ACTION_LINK = "check the ESP32 USB cable to the Pi; if it persists, power-cycle the vehicle"
+ACTION_HUNG = "reset the ESP32 (esp32_reset / EN); if it persists, power-cycle the vehicle"
 
 # (regex, level, code, message); first match wins. Lines starting with '#' are
 # the bench diagnostics' machine output (#BURSTERR ...), not the scan.
@@ -99,9 +109,9 @@ _RESET_REASON = re.compile(r"^reset reason (\d+)")
 _BAD_RESETS = {4: "panic", 5: "interrupt watchdog", 6: "task watchdog", 7: "watchdog",
                9: "brownout"}
 # a more specific fault replaces a vaguer one
-_PRIORITY = {"link_down": 0, "no_scans": 1, "adc_not_converting": 2, "adc_no_response": 3,
-             "clock_rejected": 3, "adc_unrecovered": 3}
-_ACTIONS = {"no_scans": ACTION_LINK, "link_down": ACTION_LINK}
+_PRIORITY = {"link_down": 0, "no_scans": 1, "esp32_hung": 2, "adc_not_converting": 3,
+             "adc_no_response": 4, "clock_rejected": 4, "adc_unrecovered": 4}
+_ACTIONS = {"no_scans": ACTION_LINK, "link_down": ACTION_LINK, "esp32_hung": ACTION_HUNG}
 
 
 def classify(msg: str) -> Optional[tuple[str, str, str]]:
@@ -143,6 +153,11 @@ class FaultMonitor:
         self._last_flag_check = -1e9
         self._history: collections.deque = collections.deque(maxlen=HISTORY_N)
         self._events: list[dict] = []
+        self._beats = False                          # the firmware sends heartbeats
+        self._last_rx = -1e9                         # last beat, scan or text
+        self._last_beat = -1e9
+        self._beat: Optional[ef.Beat] = None         # the latest heartbeat
+        self._zero_beats = 0                         # beats in a row with no DRDY edge
 
     # ----- inputs
 
@@ -161,6 +176,7 @@ class FaultMonitor:
 
     def on_scan(self, flags: int, now: Optional[float] = None) -> None:
         now = self._clock() if now is None else now
+        self._last_rx = now
         if self._last_scan is None or now - self._last_scan > GAP_S or not self._streamed:
             self._clean_since = now
         self._last_scan = now
@@ -178,6 +194,7 @@ class FaultMonitor:
 
     def on_text(self, msg: str, now: Optional[float] = None) -> None:
         now = self._clock() if now is None else now
+        self._last_rx = now
         s = msg.strip()
         if _BANNER.match(s):
             self._clean_since = None
@@ -215,6 +232,33 @@ class FaultMonitor:
         else:
             self._warn(now, code, text, s)
 
+    def on_beat(self, b: ef.Beat, now: Optional[float] = None) -> None:
+        """A heartbeat (BEAT frame, or a text-mode ``#BEAT`` line)."""
+        now = self._clock() if now is None else now
+        self._last_rx = self._last_beat = now
+        self._beats = True
+        prev, self._beat = self._beat, b
+        if prev is not None and b.uptime_ms + 1000 < prev.uptime_ms:
+            # it rebooted; the banner (if we saw it) reports it, else this does
+            if (now > self._expect_reset_until and now - self._alive > 30.0
+                    and now - self._warn_sent.get("esp32_reboot", -1e9) > 15.0):
+                name = ef.RESET_REASONS.get(b.reset_reason, str(b.reset_reason))
+                self._warn(now, "esp32_reboot", f"ESP32 rebooted (reset reason {name})",
+                           f"uptime {b.uptime_ms} ms")
+            self._alive = now
+        detail = (f"heartbeat: {ef.MODE_NAMES.get(b.mode, b.mode)} mode, {b.conv_hz:.0f} DRDY/s,"
+                  f" halts {b.halts}, unrecovered {b.unrecovered}, CLOCKrb=0x{b.clock_rb:04X}")
+        if b.adc_down:
+            self._raise(now, "adc_unrecovered", "ADC not converting (halt not recovered)", detail)
+        if b.drdy_edges == 0 and b.window_ms >= 500:
+            self._zero_beats += 1
+            if self._zero_beats >= DEAD_BEATS:
+                self._raise(now, "adc_not_converting",
+                            f"ADC not converting: no DRDY for {self._zero_beats} s (ESP32 alive)",
+                            detail)
+        else:
+            self._zero_beats = 0
+
     def poll(self, now: Optional[float] = None) -> None:
         """Time-based rules; call a few times a second."""
         now = self._clock() if now is None else now
@@ -226,12 +270,17 @@ class FaultMonitor:
             if now - self._last_halt_text > 3.0:
                 self._warn(now, "adc_halt", "ADC halt recovered (scan flag; no text line)", "")
         silent = now - max(self._last_scan or -1e9, self._up_since, self._alive)
+        quiet = now - max(self._last_rx, self._up_since, self._alive)
+        if self._up and self._beats and quiet > BEAT_LOST_S:
+            self._raise(now, "esp32_hung", f"ESP32 not responding: no heartbeat for {quiet:.0f} s"
+                        " (serial link up)", "")
         if self._up:
             if self._halts_since_scan >= HALT_STALL_N and silent > HALT_STALL_S:
                 self._raise(now, "adc_not_converting",
                             f"ADC not converting: {self._halts_since_scan} halts and no scan"
                             f" for {silent:.0f} s", "")
-            elif silent > NO_SCAN_S:
+            elif silent > NO_SCAN_S and not (self._beats and now - self._last_beat > 2.0):
+                # (a heartbeat overdue: wait for the hung / not-hung verdict)
                 self._raise(now, "no_scans", f"no whisker scans for {silent:.0f} s"
                             " (ESP32 connected)", "")
         elif now - self._up_since > NO_SCAN_S:
@@ -271,6 +320,8 @@ class FaultMonitor:
         now = self._clock() if now is None else now
         st: dict = {"level": "ok", "count": self._n_faults,
                     "warns": dict(self._warn_counts), "history": list(self._history)}
+        if self._beats:
+            st["beat_age_s"] = round(now - self._last_beat, 1)
         cur = self._fault
         if cur is None and self._last_warn is not None and now - self._last_warn["t"] < WARN_HOLD_S:
             cur = self._last_warn
@@ -289,7 +340,7 @@ class FaultMonitor:
             if code == f["code"]:
                 f["repeats"] += 1
                 f["detail"] = detail or f["detail"]
-                if code in ("no_scans", "link_down", "adc_not_converting"):
+                if code in ("no_scans", "link_down", "adc_not_converting", "esp32_hung"):
                     f["msg"] = msg                 # the silence keeps growing
                 return
             if _PRIORITY[code] <= _PRIORITY[f["code"]]:

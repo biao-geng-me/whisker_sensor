@@ -316,3 +316,86 @@ def test_r5_clean_runs():
         mon, evs = replay(path, _secs(path))
         bad = [e for e in evs if e["event"] == "fault" or e["code"] not in ("scan_flags",)]
         assert not bad, (path, bad)
+
+
+# ---------------------------------------------------------------- heartbeat (BEAT)
+def _beat(t_ms, edges=7812, flags=ef.BEAT_BOOT_CLOCK_OK, halts=0, unrec=0, reset=1):
+    return ef.Beat(1, t_ms, 1, 1, "B", flags, 1000, edges, halts, unrec, 0,
+                   0x00FF if not edges else 0xFF0A, 0x2405, 0, reset, 0xFF02)
+
+
+def beats(clk, mon, secs, start_ms, **kw):
+    """`secs` of 1 Hz heartbeats (no scans), polling at 10 Hz."""
+    for i in range(int(secs)):
+        idle(clk, mon, 1.0)
+        mon.on_beat(_beat(start_ms + 1000 * i, **kw))
+
+
+def test_beat_dead_adc_vs_hung_esp32():
+    clk, mon = make()
+    mon.link(True)
+    stream(clk, mon, 3)
+    mon.on_beat(_beat(3000))
+    # the ADC dies, no text at all (lost / older line format): the beats say why
+    beats(clk, mon, 3, 4000, edges=0)
+    st = mon.status()
+    assert st["level"] == "fault" and st["code"] == "adc_not_converting", st
+    assert "ESP32 alive" in st["msg"] and "0 DRDY/s" in st["detail"] and st["beat_age_s"] < 1.1
+    beats(clk, mon, 2, 7000, edges=0, flags=ef.BEAT_ADC_DOWN, unrec=1)
+    assert mon.status()["code"] == "adc_unrecovered"         # the firmware gave up: refined
+    assert [e["code"] for e in mon.take_events() if e["event"] == "fault"] == \
+        ["adc_not_converting", "adc_unrecovered"]
+    # PCB power cycle: clears after clean streaming
+    stream(clk, mon, 11)
+    assert mon.status()["level"] != "fault"
+    # now the ESP32 itself stops: nothing at all
+    mon.take_events()
+    idle(clk, mon, 4.9)
+    assert mon.status()["level"] != "fault"                 # no_scans waits for the verdict
+    idle(clk, mon, 1.0)
+    st = mon.status()
+    assert st["code"] == "esp32_hung" and "reset the ESP32" in st["action"]
+    assert [e["code"] for e in mon.take_events() if e["event"] == "fault"] == ["esp32_hung"]
+
+
+def test_beat_keeps_alive_without_scans_and_old_firmware_is_no_scans():
+    clk, mon = make()
+    mon.link(True)
+    stream(clk, mon, 2)
+    beats(clk, mon, 8, 2000)                  # alive, converting, but not streaming
+    assert mon.status()["code"] == "no_scans"           # the old verdict, not hung
+    clk2, old = make()                        # no beats at all: never "hung"
+    old.link(True)
+    stream(clk2, old, 2)
+    idle(clk2, old, 8)
+    assert old.status()["code"] == "no_scans"
+
+
+def test_beat_uptime_going_back_is_a_reboot():
+    clk, mon = make()
+    mon.link(True)
+    stream(clk, mon, 1)
+    for i in range(3):
+        mon.on_beat(_beat(50_000 + 1000 * i))
+        stream(clk, mon, 1)
+    mon.on_beat(_beat(1200, reset=4))         # the banner was lost; the beat tells
+    ev = [e for e in mon.take_events() if e["code"] == "esp32_reboot"]
+    assert len(ev) == 1 and "panic" in ev[0]["msg"]
+    clk.t += 40
+    mon.on_text("  whisker_daq — 16 whiskers x 2 gauges = 32 ch")   # banner seen this time
+    mon.on_beat(_beat(900))
+    assert not [e for e in mon.take_events() if e["code"] == "esp32_reboot" and "reason" in e["msg"]]
+
+
+def test_firmware_unrecovered_text_in_locked_mode():
+    """The locked modes now end a halt storm with the legacy UNRECOVERED line."""
+    clk, mon = make()
+    mon.link(True)
+    stream(clk, mon, 3)
+    for _ in range(5):
+        mon.on_text(LK_HALT)
+        idle(clk, mon, 0.45)
+    mon.on_text("[halt #6] UNRECOVERED  ID=0x2405 CLOCKrb=0x00FF crcbad=0"
+                "  -> power-cycle the PCB with the ESP32 already running")
+    assert mon.status()["code"] == "adc_unrecovered"
+    assert classify("[adc ok] quiet mode: converting again after 7 halt recoveries") is None

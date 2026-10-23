@@ -161,3 +161,42 @@ def test_record_start_during_a_fault(tmp_path):
     marks = [e for e in first if e["k"] == "mark"]
     assert marks and marks[0]["fault"]["event"] == "state", first
     assert marks[0]["text"].startswith("at record start: ESP32 fault")
+
+
+def test_hung_esp32_vs_dead_adc(tmp_path):
+    """Heartbeat firmware: a stopped ESP32 (SIGSTOP, the pty stays open) is
+    esp32_hung; a dead ADC with the ESP32 alive is an ADC fault, and the beat
+    in the status says why (no DRDY, ADC down)."""
+    rig = Rig(tmp_path, "quiet")
+    try:
+        st = rig.wait_for(lambda e: e["k"] == "status" and e["esp32"]["streaming"]
+                          and "beat" in e["esp32"], 8)
+        assert st["esp32"]["beat"]["converting"] and st["esp32"]["beat"]["reset_name"] == "poweron"
+        rig.fake.send_signal(signal.SIGSTOP)
+        t0 = time.monotonic()
+        m = rig.wait_for(lambda e: e["k"] == "mark" and e.get("fault", {}).get("event") == "fault", 9)
+        hung_s = time.monotonic() - t0
+        assert m["fault"]["code"] == "esp32_hung", m
+        assert "reset the ESP32" in m["text"]
+        rig.fake.send_signal(signal.SIGCONT)
+        rig.wait_for(lambda e: e["k"] == "mark" and e.get("fault", {}).get("event") == "clear", 16)
+        rig.usr2()                                       # now the ADC locks up
+        st = rig.wait_for(lambda e: _fault(e).get("code") == "adc_unrecovered", 10)
+        assert not st["esp32"]["beat"]["converting"] and st["esp32"]["beat"]["conv_hz"] == 0
+        assert _fault(st)["beat_age_s"] < 2
+    finally:
+        rig.close()
+    assert 4.5 < hung_s < 7.5, hung_s
+
+
+def test_no_heartbeat_firmware_is_no_scans(tmp_path):
+    """Older firmware (no BEAT): a stopped ESP32 stays the old no_scans fault."""
+    rig = Rig(tmp_path, "quiet", ["--no-beat"])
+    try:
+        rig.wait_for(lambda e: e["k"] == "status" and e["esp32"]["streaming"], 8)
+        rig.fake.send_signal(signal.SIGSTOP)
+        m = rig.wait_for(lambda e: e["k"] == "mark" and e.get("fault", {}).get("event") == "fault", 9)
+        assert m["fault"]["code"] == "no_scans", m
+        rig.fake.send_signal(signal.SIGCONT)
+    finally:
+        rig.close()

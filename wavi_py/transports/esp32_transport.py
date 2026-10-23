@@ -60,6 +60,7 @@ class Esp32SerialTransport(Transport):
         self._n = {"scans": 0, "seq_gaps": 0, "adc_recov": 0, "adc_crc": 0, "adc_stale": 0,
                    "adc_reinit": 0, "adc_sync": 0, "adc_empty": 0}
         self._health: dict | None = None        # latest HEALTH frame (locked scan modes)
+        self._beat: dict | None = None          # latest heartbeat (BEAT, every mode)
         self._faults = FaultMonitor()
         self._faults.link(True)
         self._emit(self._hello())
@@ -176,6 +177,9 @@ class Esp32SerialTransport(Transport):
             self._emit({"k": "info", "t": now, **self._info})
         elif isinstance(ev, ef.Health):
             self._health = ev.summary()
+        elif isinstance(ev, ef.Beat):
+            self._beat = ev.summary()
+            self._faults.on_beat(ev, now)
 
     def _status(self, now: float) -> dict:
         dt = now - self._last_status
@@ -189,6 +193,7 @@ class Esp32SerialTransport(Transport):
                           "streaming": now - self._last_scan < 1.0,
                           **({"cfg": ef.info_cfg(self._info)} if self._info else {}),
                           **({"health": self._health} if self._health else {}),
+                          **({"beat": self._beat} if self._beat else {}),
                           "fault": self._faults.status(now)}}
 
     def _command(self, cmd: dict) -> None:
