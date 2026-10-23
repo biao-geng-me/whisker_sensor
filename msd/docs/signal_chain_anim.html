@@ -49,6 +49,24 @@ select, input[type=number] { padding: 3px 4px; }
 input[type=number] { width: 78px; font-family: var(--f-mono); }
 input[type=range] { accent-color: var(--gb); }
 .transport { position: sticky; top: 0; z-index: 5; }
+.layout > aside { position: sticky; top: calc(var(--tp, 96px) + 8px); max-height: calc(100vh - var(--tp, 96px) - 16px); overflow: auto; }
+@media (max-width: 900px) { .layout > aside { position: static; max-height: none; } }
+section.card { scroll-margin-top: calc(var(--tp, 96px) + 8px); }
+.expl { font-size: 12.5px; color: var(--mut); margin: 2px 0 4px; max-width: none; }
+.status { font: 12px/1.5 var(--f-mono); height: 1.5em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#clock { display: block; height: 1.5em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#speedlbl { display: inline-block; min-width: 32ch; } #zoomlbl { display: inline-block; min-width: 21ch; }
+#c1 { height: 170px; } #c2 { height: 196px; } #c3 { height: 214px; } #c4 { height: 124px; } #c5 { height: 178px; }
+#convbox { margin: 2px 0 4px; }
+.cline { font: 12px/1.6 var(--f-mono); height: 1.6em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--mut); }
+.cline .word { color: var(--fg); }
+.tbox { overflow: auto; border: 1px solid var(--line); border-radius: 4px; margin-bottom: 6px; }
+.tbox thead th { position: sticky; top: 0; background: var(--panel); z-index: 1; }
+#frame tr { height: 22px; } #frame td, #frame th { padding: 2px 6px; }
+.status, .cline, #frame, svg.blk, canvas { overflow-anchor: none; }   /* changing content is never a scroll anchor */
+.wdim { opacity: .45; stroke-width: 1.1; } .w.on { stroke-width: 2.6; }
+#drdyw.hot { stroke: var(--ok); stroke-width: 3.5; } #drdyt.hot { fill: var(--ok); } #spiw.rd { stroke: var(--gb); stroke-width: 3.5; }
+svg.norc .rc { display: none; }
 .readout { font: 500 13px var(--f-mono); }
 .badge { font: 600 11px var(--f-mono); padding: 2px 7px; border-radius: 10px; border: 1px solid var(--warn); color: var(--warn); }
 .badge.real { border-color: var(--ok); color: var(--ok); }
@@ -73,8 +91,6 @@ svg.blk { width: 100%; height: auto; display: block; min-width: 760px; }
 .v { font: 400 10.5px var(--f-mono); fill: var(--mut); }
 .n { font: 400 10.5px var(--f-body); fill: var(--mut); }
 .big { font: 600 12.5px var(--f-body); fill: var(--fg); }
-.conv { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
-@media (max-width: 700px) { .conv { grid-template-columns: 1fr; } }
 .word { font: 500 12.5px/1.6 var(--f-mono); overflow-wrap: anywhere; }
 .word .b1 { color: var(--gb); } .word .b0 { color: var(--mut); }
 .kv { font: 12px/1.6 var(--f-mono); color: var(--mut); }
@@ -97,7 +113,7 @@ svg.blk { width: 100%; height: auto; display: block; min-width: 760px; }
     <p class="lede">By default a simplified board: 4 whiskers × 2 gauges on a 4×2 mux, feeding a 2-channel delta-sigma ADC (gauge A → AIN0, gauge B → AIN1), read by the MCU and framed to the host. The mux size and channel count are settings; the “real board 8×4” preset has all 32 gauges. Every curve, bit and number below comes from the simulation running in this page; change a setting and it is rebuilt. Static schematic and worked examples: <a href="whisker_signal_chain.html">whisker signal chain</a>.</p>
   </header>
 
-  <div class="card transport">
+  <div class="card transport" id="transport">
     <div class="row">
       <button id="play" class="on">❚❚ pause</button>
       <span class="hint">step</span>
@@ -107,38 +123,49 @@ svg.blk { width: 100%; height: auto; display: block; min-width: 760px; }
       <label class="row" style="gap:6px"><span class="hint">preset</span><select id="preset"></select></label>
       <label class="row" style="gap:6px"><span class="hint">zoom channel</span><select id="zch"></select></label>
     </div>
-    <div class="row" style="margin-top:6px"><span id="clock" class="readout"></span></div>
+    <span id="clock" class="readout" style="margin-top:6px"></span>
   </div>
 
   <div class="layout">
     <aside class="card settings" id="settings"></aside>
     <div class="lanes">
-      <section class="card">
-        <div class="lanehead"><h2>1 · Board, live</h2><span class="hint" id="blkhint"></span></div>
+      <section class="card" id="s1">
+        <h2>1 · Board, live</h2>
+        <p class="expl">Each gauge's INA output runs through its RC to one input of a mux; the select connects one gauge per mux to an ADC channel. Bright wires: what the ADC sees now. Values update ~10 times a second.</p>
+        <div class="status" id="st1"></div>
         <div class="scroll"><svg class="blk" id="blk" viewBox="0 0 1000 330"></svg></div>
       </section>
-      <section class="card">
-        <div class="lanehead"><h2>2 · Scan timeline: mux slots, ADC inputs, conversions</h2><span class="hint" id="l1hint"></span></div>
-        <canvas id="c1" height="200"></canvas>
+      <section class="card" id="s2">
+        <h2>2 · Scan timeline: mux slots, ADC inputs, conversions</h2>
+        <p class="expl">One scan: the mux steps through the selects (shaded slots). Lines: voltage at each ADC pin. Boxes below: every conversion, kept (green) or read and discarded.</p>
+        <div class="status" id="st2"></div>
+        <canvas id="c1"></canvas>
       </section>
-      <section class="card">
-        <div class="lanehead"><h2>3 · At the switch: settle tail and which conversions are kept</h2><span class="hint" id="l2hint"></span></div>
-        <canvas id="c2" height="236"></canvas>
+      <section class="card" id="s3">
+        <h2>3 · At the switch: settle tail and which conversions are kept</h2>
+        <p class="expl">Log scale: how far the pin still is from the new input after the switch, and that residual as each conversion's sinc3 window sees it. Windows that overlap the tail are dropped; the vertical line is now.</p>
+        <div class="status" id="st3"></div>
+        <canvas id="c2"></canvas>
       </section>
-      <section class="card">
-        <div class="lanehead"><h2>4 · Bit level: pin voltage → modulator bits → sinc3 windows</h2><span class="hint" id="l3hint"></span></div>
-        <div class="row" style="margin-bottom:6px"><label class="row" style="gap:6px"><span class="hint">bits shown</span><input id="zoom" type="range" min="0" max="1" step="0.001" value="0.35" style="width:160px"></label><span id="zoomlbl" class="readout"></span></div>
-        <canvas id="c3" height="250"></canvas>
+      <section class="card" id="s4">
+        <h2>4 · Bit level: pin voltage → modulator bits → sinc3 windows</h2>
+        <p class="expl">The modulator turns the pin voltage into 1-bit samples; the density of 1s tracks the input. Each result weighs 3·OSR bits with the sinc3 hump; windows overlap, one result every OSR bits (DRDY).</p>
+        <div class="row" style="margin:2px 0"><span class="status" id="st4" style="flex:1 1 300px;min-width:0"></span><label class="row" style="gap:6px"><span class="hint">bits shown</span><input id="zoom" type="range" min="0" max="1" step="0.001" value="0.35" style="width:140px"></label><span id="zoomlbl" class="readout"></span></div>
+        <canvas id="c3"></canvas>
       </section>
-      <section class="card">
-        <div class="lanehead"><h2>5 · sinc3 result → 24-bit word → DRDY → SPI → MCU</h2><span class="hint" id="l4hint"></span></div>
-        <div class="conv" id="convbox"></div>
-        <canvas id="c4" height="150" style="margin-top:8px"></canvas>
+      <section class="card" id="s5">
+        <h2>5 · sinc3 result → 24-bit word → DRDY → SPI → MCU</h2>
+        <p class="expl">Each DRDY: every channel's 24-bit two's-complement result goes over SPI; the MCU keeps or drops it by the firmware policy and averages the kept ones per slot (plot: the current slot).</p>
+        <div class="status" id="st5"></div>
+        <div id="convbox"></div>
+        <canvas id="c4"></canvas>
       </section>
-      <section class="card">
-        <div class="lanehead"><h2>6 · Frame to the host, error vs the true input</h2><span class="hint" id="l5hint"></span></div>
-        <div class="scroll"><table id="frame"></table></div>
-        <canvas id="c5" height="220" style="margin-top:8px"></canvas>
+      <section class="card" id="s6">
+        <h2>6 · Frame to the host, error vs the true input</h2>
+        <p class="expl">One frame per scan: the reading per gauge vs the noiseless input, the error split into the settle tail and the rest (noise, ripple, comb, quantization); traces show the error scan by scan.</p>
+        <div class="status" id="st6"></div>
+        <div class="tbox" id="tbox"><table id="frame"></table></div>
+        <canvas id="c5"></canvas>
       </section>
       <section class="card note">
         <h2>Model: what is simulated, what is simplified</h2>
@@ -252,7 +279,6 @@ const clamp = (x, a, b) => x < a ? a : x > b ? b : x;
 const fmtV = (v, d = 3) => (v < 0 ? "−" : "+") + Math.abs(v).toFixed(d);
 function fmtT(us) { const a = Math.abs(us); if (a >= 1e6) return (us / 1e6).toFixed(3) + " s"; if (a >= 1e3) return (us / 1e3).toFixed(a >= 1e4 ? 2 : 3) + " ms"; return us.toFixed(a >= 100 ? 0 : a >= 10 ? 1 : 2) + " µs"; }
 function fmtUV(v) { const a = Math.abs(v) * 1e6; const s = v < 0 ? "−" : "+"; if (a >= 1000) return s + (a / 1000).toFixed(2) + " mV"; if (a >= 10) return s + a.toFixed(1) + " µV"; return s + a.toFixed(2) + " µV"; }
-const cssv = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 function rcH(f, on) { if (!on) return [1, 0]; const x = f / FC_RC; return [1 / Math.sqrt(1 + x * x), -Math.atan(x)]; }
 
 // sinc3 weights over 3·OSR − 2 bits: three boxcars of length OSR convolved (integers, sum OSR^3)
@@ -280,6 +306,20 @@ function makeModulator(order) {
     },
     state() { return order === 1 ? x1 : x2; },
   };
+}
+// Σ w·x over the window of every conversion k (bits [(k−2)·n, (k+1)·n − 3], the sinc3 weights),
+// as three running sums of length n: same numbers as the direct weighted sum, O(bits) instead of
+// O(3·OSR) per conversion. For bits (±1) every partial sum is an integer < 2^53, so it is exact.
+function sinc3Sums(x, n, nConv, pm) {
+  const N = x.length, a = new Float64Array(N), b = new Float64Array(N), out = new Float64Array(nConv);
+  const val = pm ? i => (x[i] ? 1 : -1) : i => x[i];
+  let s = 0;
+  for (let i = 0; i < N; i++) { s += val(i); if (i >= n) s -= val(i - n); a[i] = s; }
+  s = 0;
+  for (let i = 0; i < N; i++) { s += a[i]; if (i >= n) s -= a[i - n]; b[i] = s; }
+  s = 0;
+  for (let i = 0; i < N; i++) { s += b[i]; if (i >= n) s -= b[i - n]; if ((i + 3) % n === 0) { const k = (i + 3) / n - 1; if (k >= 2 && k < nConv) out[k] = s; } }
+  return out;
 }
 function adcNoiseSigmaBit(osr) {
   // per-bit input noise such that sinc3 output noise = table value; thermal part only
@@ -375,53 +415,87 @@ function simulate(p) {
   // 62.5 Hz comb: one 16 ms period tabulated at 1 us
   const combT = new Float32Array(16000 + 1);
   if (p.comb > 0) { const ph = []; for (let k = 1; k <= COMB_N; k++) ph.push(rnd() * 2 * Math.PI); for (let i = 0; i <= 16000; i++) { let s = 0; for (let k = 1; k <= COMB_N; k++) s += Math.sin(2 * Math.PI * COMB_HZ * k * i * 1e-6 + ph[k - 1]); combT[i] = s * p.comb * 1e-6; } }
-  const combAt = t => { const x = t % 16000, i = Math.floor(x); return combT[i] + (combT[i + 1] - combT[i]) * (x - i); };
+  // comb value at 0 <= x < 16000 us (one period), linear between the 1 us table points
+  function combT16(x) { const i = x | 0; return combT[i] + (combT[i + 1] - combT[i]) * (x - i); }
 
   const sigBit = p.adcNoise ? adcNoiseSigmaBit(p.osr) : 0;
   const gaugeOf = (sel, c) => sel < 0 ? -1 : sel * p.nch + c;
-  const srcClean = (g, t) => g < 0 ? p.other : xClean(g, t);
   const srcAt = (g, t) => g < 0 ? p.other : xClean(g, t) + nAt(g, t);
   const ch = [];
-  const h = sinc3Weights(p.osr), n3 = Math.pow(p.osr, 3), L = h.length;
+  const h = sinc3Weights(p.osr), n3 = Math.pow(p.osr, 3);
+  // switch residual (fraction of the step); terms that have decayed below e^-40 are skipped
+  const tf = 1 - p.tailFrac - p.tail2, uF = 40 * p.tauFast, uMax = 40 * Math.max(p.tauFast, p.tau, p.tail2 ? p.tau2 : 0);
+  const resid = u => u > uMax ? 0 : (u < uF ? tf * Math.exp(-u / p.tauFast) : 0) + p.tailFrac * Math.exp(-u / p.tau) + (p.tail2 ? p.tail2 * Math.exp(-u / p.tau2) : 0);
+  // per-gauge constants for the inner loop; the sines and the switch exponentials advance by
+  // recurrences (one rotation / one multiply per bit), re-seeded exactly at every switch
+  const ng = NG(p), offV = G.map(g => REF + g.off * 1e-3), bAmp = G.map(g => g.bend * 1e-3 * Hb), hAmp = G.map(g => g.humA * Hh);
+  const cB = Math.cos(wB * d.tb), sB = Math.sin(wB * d.tb), cH = Math.cos(wH * d.tb), sH = Math.sin(wH * d.tb);
+  const rF = Math.exp(-d.tb / p.tauFast), rS = Math.exp(-d.tb / p.tau), r2 = Math.exp(-d.tb / p.tau2), a2 = p.tail2;
+  const ord2 = p.order === 2, kN = d.tb / dtN, nNm = nN - 1, tb = d.tb, tfr = p.tailFrac, other = p.other;
+  const railG = G.map(g => g.rail), phB = G.map(g => g.phB + Pb), phH = G.map(g => g.phH + Ph);
+  // ADC noise per bit: a table of 65536 N(0,1) samples picked by an LCG (white, cheap per bit)
+  const GT = new Float64Array(65536); if (sigBit) for (let i = 0; i < GT.length; i++) GT[i] = gauss() * sigBit;
+  let lcg = (p.seed * 2654435761) >>> 0;
+  const weighted = (x, k) => { const b0 = (k - 2) * p.osr; let a = 0; for (let j = 0; j < h.length; j++) a += h[j] * x[b0 + j]; return a / n3; };
   for (let c = 0; c < p.nch; c++) {
     const v = new Float32Array(nb), dist = new Float32Array(nb), bits = new Int8Array(nb), integ = new Float32Array(nb);
-    const mod = makeModulator(p.order);
+    let x1 = 0, x2 = 0;                                   // modulator integrators (same loop as makeModulator)
     let si = -1, gCur = gaugeOf(slots[slots.length - 1].sel, c), gOld = gCur, tSw = -1e9, delta = 0, hold = 0, oldPin = 0;
+    let sb = 0, cb = 1, sh = 0, chh = 1, eF = 0, eS = 0, e2 = 0, seeded = true, combX = 0, reseed = true;
+    // (no closures over the loop state: captured variables would live on the heap)
     for (let n = 0; n < nb; n++) {
-      const t = n * d.tb;
-      while (si + 1 < slots.length && slots[si + 1].tSw <= t) {
-        si++; const s = slots[si];
-        const gNew = gaugeOf(s.sel, c);
-        // pin voltage just before the switch (incl. any residual of the previous switch)
-        const tt = s.tSw; let pinBefore;
-        const uPrev = tt - tSw - hold;
-        if (uPrev < 0) pinBefore = oldPin; else pinBefore = srcAt(gCur, tt) + delta * ((1 - p.tailFrac - p.tail2) * Math.exp(-uPrev / p.tauFast) + p.tailFrac * Math.exp(-uPrev / p.tau) + p.tail2 * Math.exp(-uPrev / p.tau2));
-        gOld = gCur; gCur = gNew; tSw = tt;
-        delta = pinBefore - srcAt(gNew, tt);
-        oldPin = pinBefore;
-        hold = (gOld >= 0 && G[gOld].rail) ? p.ovUs : 0;   // overload recovery of a railed source, as a delay
+      const t = n * tb;
+      if (si + 1 < slots.length && slots[si + 1].tSw <= t) {
+        while (si + 1 < slots.length && slots[si + 1].tSw <= t) {
+          si++; const s = slots[si];
+          const gNew = gaugeOf(s.sel, c);
+          // pin voltage just before the switch (incl. any residual of the previous switch)
+          const tt = s.tSw; let pinBefore;
+          const uPrev = tt - tSw - hold;
+          if (uPrev < 0) pinBefore = oldPin; else pinBefore = srcAt(gCur, tt) + delta * resid(uPrev);
+          gOld = gCur; gCur = gNew; tSw = tt;
+          delta = pinBefore - srcAt(gNew, tt);
+          oldPin = pinBefore;
+          hold = (gOld >= 0 && G[gOld].rail) ? p.ovUs : 0;   // overload recovery of a railed source, as a delay
+        }
+        reseed = true; seeded = false;
       }
+      if (reseed) { reseed = false; if (gCur >= 0 && !railG[gCur]) { const ab = wB * t + phB[gCur], ah = wH * t + phH[gCur]; sb = Math.sin(ab); cb = Math.cos(ab); sh = Math.sin(ah); chh = Math.cos(ah); } }
+      let x;
+      if (gCur < 0) x = other;
+      else if (railG[gCur]) x = RAIL;
+      else { let q = (n * kN) | 0; if (q > nNm) q = nNm; x = offV[gCur] + bAmp[gCur] * sb + hAmp[gCur] * sh + noise[gCur][q]; }
       const u = t - tSw - hold;
       let dv;
-      if (u < 0) dv = oldPin - srcAt(gCur, t);
-      else dv = delta * ((1 - p.tailFrac - p.tail2) * Math.exp(-u / p.tauFast) + p.tailFrac * Math.exp(-u / p.tau) + p.tail2 * Math.exp(-u / p.tau2));
-      const pin = srcAt(gCur, t) + dv + combAt(t);
+      if (u < 0) dv = oldPin - x;
+      else if (delta === 0) dv = 0;
+      else {
+        if (!seeded) { eF = Math.exp(-u / p.tauFast); eS = Math.exp(-u / p.tau); e2 = a2 ? Math.exp(-u / p.tau2) : 0; seeded = true; }
+        dv = delta * (tf * eF + tfr * eS + a2 * e2);
+        eF *= rF; eS *= rS; e2 *= r2;
+      }
+      const pin = x + dv + combT16(combX);
       v[n] = pin; dist[n] = dv;
-      const un = clamp((pin + (sigBit ? gauss() * sigBit : 0)) / VR, -1, 1);
-      bits[n] = mod.step(un) > 0 ? 1 : 0;
-      integ[n] = mod.state();
+      lcg = (Math.imul(lcg, 1664525) + 1013904223) >>> 0;
+      let un = (pin + GT[lcg >>> 16]) / VR; if (un > 1) un = 1; else if (un < -1) un = -1;
+      const y = (ord2 ? x2 : x1) >= 0 ? 1 : -1;
+      x1 += un - y; if (x1 > 4) x1 = 4; else if (x1 < -4) x1 = -4;
+      if (ord2) { x2 += x1 - y; if (x2 > 16) x2 = 16; else if (x2 < -16) x2 = -16; }
+      bits[n] = y > 0 ? 1 : 0; integ[n] = ord2 ? x2 : x1;
+      // advance the sines and the comb phase by one bit
+      const sb2 = sb * cB + cb * sB; cb = cb * cB - sb * sB; sb = sb2;
+      const sh2 = sh * cH + chh * sH; chh = chh * cH - sh * sH; sh = sh2;
+      combX += tb; if (combX >= 16000) combX -= 16000;
     }
-    // conversions: k ends at DRDY (k+1)·T; window bits [(k−2)·OSR, (k−2)·OSR + L)
+    // conversions: k ends at DRDY (k+1)·T; window bits [(k−2)·OSR, (k+1)·OSR − 3]. The code needs every
+    // conversion (running sums); the pin average and the residual are computed on demand.
     const nConv = Math.floor(nb / p.osr) - 1;
-    const code = new Int32Array(nConv), S = new Float64Array(nConv), A = new Float64Array(nConv), Dd = new Float64Array(nConv);
-    for (let k = 2; k < nConv; k++) {
-      const b0 = (k - 2) * p.osr; if (b0 + L > nb) break;
-      let s = 0, a = 0, dd = 0;
-      for (let j = 0; j < L; j++) { const w = h[j], n = b0 + j; s += bits[n] ? w : -w; a += w * v[n]; dd += w * dist[n]; }
-      S[k] = s; A[k] = a / n3 * 1; Dd[k] = dd / n3;
-      code[k] = clamp(Math.round(s / n3 * FS_CODE), -FS_CODE, FS_CODE - 1);
-    }
-    ch.push({ v, dist, bits, integ, code, S, A, Dd, nConv });
+    const code = new Int32Array(nConv), S = sinc3Sums(bits, p.osr, nConv, true);
+    for (let k = 2; k < nConv; k++) code[k] = clamp(Math.round(S[k] / n3 * FS_CODE), -FS_CODE, FS_CODE - 1);
+    const Ac = new Float64Array(nConv).fill(NaN), Dc = new Float64Array(nConv).fill(NaN);
+    const aAt = k => (k < 2 || k >= nConv) ? 0 : Number.isNaN(Ac[k]) ? (Ac[k] = weighted(v, k)) : Ac[k];
+    const dAt = k => (k < 2 || k >= nConv) ? 0 : Number.isNaN(Dc[k]) ? (Dc[k] = weighted(dist, k)) : Dc[k];
+    ch.push({ v, dist, bits, integ, code, S, aAt, dAt, nConv });
   }
   // per-conversion status and slot lookup
   const nConv = ch[0].nConv;
@@ -437,13 +511,13 @@ function simulate(p) {
     fr.t = Math.max(fr.t, (s.keep.at(-1) + 1) * d.T);
     for (let c = 0; c < p.nch; c++) {
       const g = s.sel * p.nch + c, C = ch[c];
-      let sc = 0, st = 0, sd = 0, sa = 0;
-      for (const k of s.keep) { sc += C.code[k]; st += xTrue(g, (k + 1) * d.T - 1.5 * d.T + d.tb); sd += C.Dd[k]; sa += C.A[k]; }
+      let sc = 0, st = 0, sd = 0;
+      for (const k of s.keep) { sc += C.code[k]; st += xTrue(g, (k + 1) * d.T - 1.5 * d.T + d.tb); sd += C.dAt(k); }
       const nk = s.keep.length;
       const codeAvg = nk ? Math.round(sc / nk) : 0;
       const out = codeAvg * VR / FS_CODE, tru = st / nk;
       const rail = G[g].rail;   // railed: no meaningful error (the code pins at full scale)
-      fr.g[g] = { code: codeAvg, n: nk, out, tru, rail, err: rail ? NaN : out - tru, tail: rail ? NaN : sd / nk, adc: out - sa / nk, slot: s };
+      fr.g[g] = { code: codeAvg, n: nk, out, tru, rail, err: rail ? NaN : out - tru, tail: rail ? NaN : sd / nk, slot: s };
     }
   }
   const lastScan0 = slots[(p.scans - 1) * d.nsel].tSw;   // period between scan starts
@@ -522,6 +596,16 @@ function selftest() {
   const qq = simulate(Object.assign(structuredClone(BASE), PRESETS.quiet, { scans: 3 }));
   R.quietRate = 1e6 / qq.scanPeriod;
   R.sigmaBit = { 256: adcNoiseSigmaBit(256), 4096: adcNoiseSigmaBit(4096) };
+  // the running-sum sinc3 used by the simulation equals the direct weighted sum
+  R.sinc3Fast = {};
+  for (const n of [16, 64, 256]) {
+    const rnd = mulberry32(n), nb = 40 * n, bits = new Int8Array(nb), v = new Float32Array(nb);
+    for (let i = 0; i < nb; i++) { bits[i] = rnd() < 0.6 ? 1 : 0; v[i] = rnd(); }
+    const nConv = Math.floor(nb / n) - 1, S = sinc3Sums(bits, n, nConv, true), Av = sinc3Sums(v, n, nConv), h = sinc3Weights(n);
+    let dS = 0, dA = 0;
+    for (let k = 2; k < nConv; k++) { let s = 0, a = 0; for (let j = 0; j < h.length; j++) { const q = (k - 2) * n + j; s += bits[q] ? h[j] : -h[j]; a += h[j] * v[q]; } dS = Math.max(dS, Math.abs(s - S[k])); dA = Math.max(dA, Math.abs(a - Av[k]) / n ** 3); }
+    R.sinc3Fast[n] = { dS, dA };
+  }
   return R;
 }
 
@@ -575,19 +659,20 @@ function syncSettings() {
   document.querySelectorAll("#gbody input").forEach(el => { const g = +el.dataset.g, k = el.dataset.k; if (k === "rail") el.checked = P.gauges[g].rail; else el.value = P.gauges[g][k]; });
 }
 let rebuildTimer = null;
-function scheduleRebuild() { clearTimeout(rebuildTimer); rebuildTimer = setTimeout(rebuild, 150); }
+function scheduleRebuild() { clearTimeout(rebuildTimer); setText($("clock"), "simulating …"); rebuildTimer = setTimeout(rebuild, 150); }
 function applyPreset(name) {
   const pr = PRESETS[name]; if (!pr) return;
   const keepG = P.gauges;
   P = Object.assign(structuredClone(BASE), pr); P.gauges = keepG; fitGauges(P); delete P.name; P.teaching = !!pr.teaching;
   speedLog = pr.speed; $("speed").value = speedLog; delete P.speed;
 }
-function rebuild() {
+function rebuild(first) {
   const frac = SIM ? (tNow - SIM.tStart) / (SIM.tEnd - SIM.tStart) : 0;
-  SIM = simulate(P);
+  SIM = simulate(P); simGen++;
   tNow = SIM.slots[0].tSw + SIM.scanPeriod * 1.02;   // start just inside scan 1
-  if (frac > 0 && frac < 1 && lastFrame) tNow = clamp(SIM.tStart + frac * (SIM.tEnd - SIM.tStart), SIM.tStart, simEnd());
-  zoomDefault(); syncSettings(); updateDerived(); buildBlock(); updateNote(); draw(true);
+  if (!first && frac > 0 && frac < 1) tNow = clamp(SIM.tStart + frac * (SIM.tEnd - SIM.tStart), SIM.tStart, simEnd());
+  computeStats(); zoomDefault(); syncSettings(); updateDerived(); buildBlock(); buildConvBox(); buildFrameTable(); sizeLanes(); updateNote();
+  requestDraw(true);
 }
 function simEnd() { return SIM.slots[SIM.slots.length - 1].tEnd; }
 function updateDerived() {
@@ -611,13 +696,34 @@ function updateDerived() {
 }
 
 // ───────────────────────────── canvas helpers ─────────────────────────────
+// Sizes come from a ResizeObserver (no layout reads per frame), colours are cached per theme,
+// static parts of a lane are drawn once into an offscreen layer, and a lane redraws only when
+// its frame key changes.
+const DPR = () => Math.min(2, window.devicePixelRatio || 1);
+let COLS = new Map(), themeGen = 0, simGen = 0;
+function cssv(n) { let v = COLS.get(n); if (v === undefined) { v = getComputedStyle(document.documentElement).getPropertyValue(n).trim(); COLS.set(n, v); } return v; }
+const mono = (px = 11) => `${px}px ${cssv("--f-mono")}`;
+function themeChanged() { COLS = new Map(); alphaCache.clear(); themeGen++; requestDraw(true); }
+function canvasSize(cv) { if (!cv._w) { cv._w = cv.clientWidth; cv._h = cv.clientHeight; } return [cv._w, cv._h]; }
 function prep(cv) {
-  const dpr = window.devicePixelRatio || 1, w = cv.clientWidth, h = +cv.getAttribute("height");
-  if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) { cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr); cv.style.height = h + "px"; }
+  const dpr = DPR(), [w, h] = canvasSize(cv), W = Math.max(1, Math.round(w * dpr)), H = Math.max(1, Math.round(h * dpr));
+  if (cv.width !== W || cv.height !== H) { cv.width = W; cv.height = H; }
   const g = cv.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, w, h);
-  g.font = "11px " + cssv("--f-mono"); g.textBaseline = "middle";
+  g.font = mono(); g.textBaseline = "middle";
   return [g, w, h];
 }
+function layer(cv, key, fn) {
+  const dpr = DPR(), [w, h] = canvasSize(cv), W = Math.max(1, Math.round(w * dpr)), H = Math.max(1, Math.round(h * dpr));
+  const k = `${key}|${W}x${H}|${themeGen}|${simGen}`;
+  const L = cv._layer || (cv._layer = { c: document.createElement("canvas"), k: null });
+  if (L.k !== k) { L.c.width = W; L.c.height = H; const g = L.c.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.font = mono(); g.textBaseline = "middle"; fn(g, w, h); L.k = k; }
+  return L.c;
+}
+function blit(g, img) { g.save(); g.setTransform(1, 0, 0, 1, 0, 0); g.drawImage(img, 0, 0); g.restore(); }
+function needs(cv, key) { const [w, h] = canvasSize(cv), k = `${key}|${w}x${h}|${DPR()}|${themeGen}|${simGen}`; if (cv._k === k) return false; cv._k = k; return true; }
+function setText(el, s) { if (el && el._t !== s) { el.textContent = s; el._t = s; } }
+function setHTML(el, s) { if (el && el._h !== s) { el.innerHTML = s; el._h = s; } }
+function setStatus(id, s) { const el = $(id); if (el && el._t !== s) { el.textContent = s; el._t = s; el.title = s; } }
 function selName(sel, long) {
   if (sel < 0) return long ? "other (not modelled)" : "other";
   const p = SIM.p, w = p.nch <= 2 && !(p.nsel === 8 && p.nch === 4);
@@ -632,19 +738,21 @@ const alphaCache = new Map();
 function A(col, a) { const k = col + a; if (!alphaCache.has(k)) alphaCache.set(k, alpha(col, a)); return alphaCache.get(k); }
 function slotAt(t) { const S = SIM.slots; let lo = 0, hi = S.length - 1; if (t < S[0].tSw) return -1; while (lo < hi) { const m = (lo + hi + 1) >> 1; if (S[m].tSw <= t) lo = m; else hi = m - 1; } return lo; }
 function convDoneAt(t) { return Math.floor(t / SIM.d.T + 1e-9) - 1; }   // last conversion with DRDY <= t
+function frameAt(t) { const F = SIM.frames; let fi = -1; for (let i = 0; i < F.length; i++) if (F[i].t <= t) fi = i; else break; return fi; }
 
 // ───────────────────────────── lane 2: scan timeline ─────────────────────────────
-function drawScan() {
-  const [g, W, H] = prep($("c1")), { slots, d, ch, status, p } = SIM;
-  const si = Math.max(0, slotAt(tNow)), sc = slots[si].scan;
-  const s0 = slots.findIndex(s => s.scan === sc), s1 = s0 + d.nsel - 1;
+function scanGeom(W, H) {
+  const { slots, d } = SIM, si = Math.max(0, slotAt(tNow)), sc = slots[si].scan;
+  const s0 = sc * d.nsel, s1 = s0 + d.nsel - 1;          // slots are stored scan by scan, d.nsel each
   const t0 = slots[s0].tSw - 0.03 * SIM.scanPeriod, t1 = slots[s1].tEnd + 0.03 * SIM.scanPeriod;
-  const L = 52, R = W - 8, X = t => L + (t - t0) / (t1 - t0) * (R - L);
-  const top = 18, bot = H - 52;
-  // y range from modelled, non-railed inputs
+  const L = 52, R = W - 8;
+  return { sc, s0, s1, t0, t1, L, R, X: t => L + (t - t0) / (t1 - t0) * (R - L), top: 18, bot: H - 46 };
+}
+function drawScanBase(g, W, H, Q) {
+  const { slots, d, ch, status, p } = SIM, { s0, s1, t0, t1, L, R, X, top, bot } = Q;
   let lo = Infinity, hi = -Infinity;
   for (const G of SIM.G) if (!G.rail) { lo = Math.min(lo, REF + (G.off - G.bend) * 1e-3); hi = Math.max(hi, REF + (G.off + G.bend) * 1e-3); }
-  lo = Math.min(lo, SIM.p.other); hi = Math.max(hi, SIM.p.other); if (!isFinite(lo)) { lo = 0; hi = 1; }
+  lo = Math.min(lo, p.other); hi = Math.max(hi, p.other); if (!isFinite(lo)) { lo = 0; hi = 1; }
   const pad = (hi - lo) * 0.12 + 0.005; lo -= pad; hi += pad;
   const Y = v => clamp(bot - (v - lo) / (hi - lo) * (bot - top), top - 6, bot);
   for (let i = s0; i <= s1; i++) {
@@ -652,59 +760,58 @@ function drawScan() {
     g.fillStyle = SELC(s.sel); g.textAlign = "left"; g.fillText(X(s.tEnd) - X(s.tSw) > 110 ? selName(s.sel, true).replace(" (not modelled)", "") : selName(s.sel), X(s.tSw) + 3, top - 7);
     g.strokeStyle = cssv("--mut"); g.setLineDash([3, 3]); g.beginPath(); g.moveTo(X(s.tSw), top - 14); g.lineTo(X(s.tSw), H - 6); g.stroke(); g.setLineDash([]);
   }
-  // axis
   g.fillStyle = cssv("--mut"); g.textAlign = "right";
-  for (const v of [lo + pad, (lo + hi) / 2, hi - pad]) { g.fillText((v * 1000).toFixed(0), L - 6, Y(v)); }
+  for (const v of [lo + pad, (lo + hi) / 2, hi - pad]) g.fillText((v * 1000).toFixed(0), L - 6, Y(v));
   g.save(); g.translate(10, (top + bot) / 2); g.rotate(-Math.PI / 2); g.textAlign = "center"; g.fillText("pin mV", 0, 0); g.restore();
-  // pin voltage, min/max per pixel
-  for (let c = 0; c < p.nch; c++) {
+  for (let c = 0; c < p.nch; c++) {   // pin voltage, min/max per pixel column
     const v = ch[c].v; g.strokeStyle = CHC(c); g.lineWidth = 1.3; g.beginPath();
     for (let px = Math.floor(L); px < R; px++) {
       const ta = t0 + (px - L) / (R - L) * (t1 - t0), tb2 = ta + (t1 - t0) / (R - L);
-      let na = Math.max(0, Math.floor(ta / d.tb)), nb2 = Math.min(SIM.nb - 1, Math.ceil(tb2 / d.tb));
+      const na = Math.max(0, Math.floor(ta / d.tb)), nb2 = Math.min(SIM.nb - 1, Math.ceil(tb2 / d.tb));
       if (nb2 < na) continue; let mn = Infinity, mx = -Infinity; for (let n = na; n <= nb2; n++) { const x = v[n]; if (x < mn) mn = x; if (x > mx) mx = x; }
       g.moveTo(px + 0.5, Y(mx)); g.lineTo(px + 0.5, Y(mn) + 0.5);
     }
     g.stroke();
   }
-  // conversions: two rows (AIN0 decides nothing different; status is per slot) → one row of DRDY ticks
-  const ky = H - 30, kh = 12; const kA = Math.max(0, Math.floor(t0 / d.T)), kB = Math.floor(t1 / d.T);
-  const cw = Math.max(1, (R - L) / ((t1 - t0) / d.T) - 1);
+  const ky = H - 26, kh = 11, kA = Math.max(0, Math.floor(t0 / d.T)), kB = Math.floor(t1 / d.T);
+  const cw = Math.max(1, (R - L) / ((t1 - t0) / d.T) - 1), ok = cssv("--ok"), mut = cssv("--mut");
+  g.lineWidth = 1;
   for (let k = kA; k <= kB; k++) {
     const x = X((k + 1) * d.T); if (x < L || x > R) continue;
-    const st = status[k];
-    if (st === 2) { g.fillStyle = cssv("--ok"); g.fillRect(x - cw, ky, cw, kh); }
-    else if (st === 1) { g.strokeStyle = cssv("--mut"); g.lineWidth = 1; g.strokeRect(x - cw + 0.5, ky + 0.5, Math.max(1, cw - 1), kh - 1); if (cw > 4) { g.beginPath(); g.moveTo(x - cw, ky); g.lineTo(x, ky + kh); g.stroke(); } }
+    if (status[k] === 2) { g.fillStyle = ok; g.fillRect(x - cw, ky, cw, kh); }
+    else if (status[k] === 1) { g.strokeStyle = mut; g.strokeRect(x - cw + 0.5, ky + 0.5, Math.max(1, cw - 1), kh - 1); if (cw > 4) { g.beginPath(); g.moveTo(x - cw, ky); g.lineTo(x, ky + kh); g.stroke(); } }
   }
   g.fillStyle = cssv("--fg"); g.textAlign = "left"; g.fillText("conversions (DRDY):", L, ky - 9);
-  g.fillStyle = cssv("--ok"); g.fillRect(L + 140, ky - 14, 10, 10); g.fillStyle = cssv("--mut"); g.fillText("kept", L + 154, ky - 9); g.strokeStyle = cssv("--mut"); g.strokeRect(L + 190.5, ky - 13.5, 9, 9); g.fillText("read and discarded", L + 204, ky - 9);
-  // zoom bracket and playhead
-  const zw = zoomBits() * d.tb, za = tNow - zw * 0.75;
+  g.fillStyle = ok; g.fillRect(L + 140, ky - 14, 10, 10); g.fillStyle = mut; g.fillText("kept", L + 154, ky - 9); g.strokeStyle = mut; g.strokeRect(L + 190.5, ky - 13.5, 9, 9); g.fillText("read and discarded", L + 204, ky - 9);
+}
+function drawScan() {
+  const cv = $("c1"), [w, h] = canvasSize(cv), Q = scanGeom(w, h), zw = zoomBits() * SIM.d.tb, za = tNow - zw * 0.75;
+  if (!needs(cv, `${Q.sc}|${Math.round(Q.X(tNow) * 2)}|${Math.round(Q.X(za))}|${Math.round(Q.X(za + zw))}`)) return;
+  const [g, W, H] = prep(cv);
+  blit(g, layer(cv, "scan" + Q.sc, (lg, lw, lh) => drawScanBase(lg, lw, lh, Q)));
+  const { X, top, bot } = Q;
   g.fillStyle = A(cssv("--fg"), 0.08); g.fillRect(X(za), top - 14, Math.max(2, X(za + zw) - X(za)), bot - top + 14);
   g.strokeStyle = cssv("--fg"); g.lineWidth = 1.5; g.beginPath(); g.moveTo(X(tNow), top - 14); g.lineTo(X(tNow), H - 4); g.stroke();
-  $("l1hint").textContent = `scan ${sc + 1} of ${SIM.p.scans} · ${fmtT(SIM.scanPeriod)} · ${[...Array(p.nch).keys()].map(c => ["red", "blue", "green", "orange"][c] + " AIN" + c).join(", ")} · shaded: bit-level zoom · railed inputs (3.3 V) clip at the top`;
+}
+function textScan() {
+  const p = SIM.p, si = Math.max(0, slotAt(tNow)), sc = SIM.slots[si].scan;
+  setStatus("st2", `scan ${sc + 1} of ${p.scans} · ${fmtT(SIM.scanPeriod)} per scan · ${[...Array(p.nch).keys()].map(c => ["red", "blue", "green", "orange"][c] + " AIN" + c).join(", ")} · grey band: bit-level window (4) · railed inputs clip at the top`);
 }
 
 // ───────────────────────────── lane 3: settle and keep ─────────────────────────────
-function drawSettle() {
-  const [g, W, H] = prep($("c2")), { slots, d, ch, p } = SIM;
-  const si = Math.max(1, slotAt(tNow)), s = slots[si], C = ch[zch];
-  const span = Math.max(s.tEnd - s.tSw, 1);
-  const L = 74, R = W - 10, X = u => L + u / span * (R - L);
-  const top = 16, bot = 120, nEnd = Math.ceil(s.tEnd / d.tb) - 1;
-  const n0 = Math.ceil(s.tSw / d.tb);
+function settleGeom(W, H, s) { const span = Math.max(s.tEnd - s.tSw, 1), L = 74, R = W - 10; return { span, L, R, X: u => L + u / span * (R - L), top: 16, bot: 104 }; }
+function drawSettleBase(g, W, H, si) {
+  const { slots, d, ch, p } = SIM, s = slots[si], C = ch[zch], { span, L, R, X, top, bot } = settleGeom(W, H, s);
+  const nEnd = Math.ceil(s.tEnd / d.tb) - 1, n0 = Math.ceil(s.tSw / d.tb);
   const d0 = Math.abs(C.dist[Math.min(SIM.nb - 1, n0 + 1)]) || 1e-3;
-  const yHi = Math.log10(Math.max(Math.abs(d0), 1e-6)) + 0.3, yLo = yHi - 7;
+  const yHi = Math.log10(Math.max(d0, 1e-6)) + 0.3, yLo = yHi - 7;
   const Y = v => { const l = Math.log10(Math.max(Math.abs(v), 1e-12)); return clamp(bot - (l - yLo) / (yHi - yLo) * (bot - top), top, bot); };
-  // grid
   g.fillStyle = cssv("--mut"); g.textAlign = "right"; g.strokeStyle = cssv("--line"); g.lineWidth = 1;
   for (let e = Math.ceil(yLo); e <= Math.floor(yHi); e++) { const y = bot - (e - yLo) / (yHi - yLo) * (bot - top); g.beginPath(); g.moveTo(L, y); g.lineTo(R, y); g.stroke(); g.fillText(e >= -3 ? `${Math.round(Math.pow(10, e + 3) * 1e3) / 1e3} mV` : e >= -6 ? `${Math.round(Math.pow(10, e + 6) * 1e3) / 1e3} µV` : `${Math.round(Math.pow(10, e + 9) * 1e3) / 1e3} nV`, L - 4, y); }
-  // settle line
   g.strokeStyle = cssv("--warn"); g.setLineDash([4, 3]); g.beginPath(); g.moveTo(X(p.settle), top); g.lineTo(X(p.settle), H - 4); g.stroke(); g.setLineDash([]);
-  g.fillStyle = cssv("--warn"); g.textAlign = "left"; g.fillText(`settle ${p.settle} µs`, X(p.settle) + 4, top + 4);
-  // |pin − new input| from the model (the disturbance), per pixel max
+  g.fillStyle = cssv("--warn"); g.textAlign = "left"; g.fillText(`settle ${p.settle} µs`, X(p.settle) + 4, top + 2);
   g.strokeStyle = CHC(zch); g.lineWidth = 1.5; g.beginPath(); let first = true;
-  for (let px = L; px < R; px++) {
+  for (let px = L; px < R; px++) {   // |pin − new input|, per pixel max
     const ua = (px - L) / (R - L) * span, ub = ua + span / (R - L);
     const na = Math.ceil((s.tSw + ua) / d.tb), nb2 = Math.min(SIM.nb - 1, nEnd, Math.floor((s.tSw + ub) / d.tb));
     if (na > nEnd) break;
@@ -713,29 +820,32 @@ function drawSettle() {
     const y = Y(mx); if (first) { g.moveTo(px, y); first = false; } else g.lineTo(px, y);
   }
   g.stroke();
-  // conversions in the slot: sinc3-filtered disturbance (dots) and windows (bars)
-  const ks = s.convs, rowH = Math.min(9, (H - bot - 24) / Math.max(1, Math.min(ks.length, 12)));
-  let shown = 0;
-  for (const k of ks) {
-    const tD = (k + 1) * d.T, ws = tD - d.win, kept = s.keep.includes(k);
-    const x = X(tD - s.tSw); const col = kept ? cssv("--ok") : cssv("--mut");
-    g.fillStyle = col; g.beginPath(); g.arc(x, Y(C.Dd[k]), kept ? 3.2 : 2.6, 0, 7); g.fill();
-    if (shown < 12) {
-      const y = bot + 18 + shown * rowH;
-      g.fillStyle = A(col, kept ? 0.55 : 0.28); g.fillRect(X(Math.max(-0.05 * span, ws - s.tSw)), y, X(tD - s.tSw) - X(Math.max(-0.05 * span, ws - s.tSw)), rowH - 2);
-      shown++;
-    }
-  }
-  g.fillStyle = cssv("--mut"); g.textAlign = "left";
-  g.fillText("line: |pin − new input| (switch disturbance) · dots: that disturbance through each conversion's sinc3 (green kept)", L, bot + 8);
-  if (ks.length > 12) g.fillText(`(first 12 of ${ks.length} windows shown)`, R - 200, H - 6);
+  const ks = s.convs, rows = Math.min(ks.length, 12), rowH = Math.min(7, (H - bot - 22) / Math.max(1, rows));
+  const ok = cssv("--ok"), mut = cssv("--mut");
+  ks.forEach((k, i) => {
+    const tD = (k + 1) * d.T, ws = tD - d.win, kept = s.keep.includes(k), col = kept ? ok : mut;
+    g.fillStyle = col; g.beginPath(); g.arc(X(tD - s.tSw), Y(C.dAt(k)), kept ? 3.2 : 2.6, 0, 7); g.fill();
+    if (i < rows) { const y = bot + 18 + i * rowH, xa = X(Math.max(-0.05 * span, ws - s.tSw)); g.fillStyle = A(col, kept ? 0.55 : 0.28); g.fillRect(xa, y, X(tD - s.tSw) - xa, rowH - 1.5); }
+  });
+  g.fillStyle = mut; g.textAlign = "left";
+  g.fillText("line: |pin − new input| · dots: that residual through each conversion's sinc3 (green = kept)", L, bot + 9);
+  if (ks.length > rows) { g.textAlign = "right"; g.fillText(`first ${rows} of ${ks.length} windows`, R, H - 5); }
   g.textAlign = "right"; g.fillText("windows", L - 4, bot + 22);
   g.textAlign = "left"; g.fillText("|residual|", 4, 6);
-  // stats
-  const sel = s.sel, prev = slots[si - 1];
-  const keptTail = s.keep.reduce((a, k) => a + C.Dd[k], 0) / Math.max(1, s.keep.length);
-  const delta = C.dist[Math.min(SIM.nb - 1, n0 + 1)];
-  $("l2hint").textContent = `slot ${selName(sel)} on AIN${zch}, from ${selName(prev.sel)} · step ≈ ${fmtUV(delta)} · tail left in the reading ${fmtUV(keptTail)} (${(keptTail / (delta || 1)).toExponential(1)} of the step) · ${s.keep.length} of ${ks.length} kept`;
+}
+function drawSettle() {
+  const cv = $("c2"), [w, h] = canvasSize(cv), si = Math.max(1, slotAt(tNow)), s = SIM.slots[si], Q = settleGeom(w, h, s);
+  const xp = Math.round(Q.X(clamp(tNow - s.tSw, 0, Q.span)));
+  if (!needs(cv, `${si}|${zch}|${xp}`)) return;
+  const [g, W, H] = prep(cv);
+  blit(g, layer(cv, `slot${si}|${zch}`, (lg, lw, lh) => drawSettleBase(lg, lw, lh, si)));
+  g.strokeStyle = A(cssv("--fg"), 0.7); g.lineWidth = 1.2; g.beginPath(); g.moveTo(xp, Q.top - 6); g.lineTo(xp, H - 2); g.stroke();
+}
+function textSettle() {
+  const { slots, d, ch } = SIM, si = Math.max(1, slotAt(tNow)), s = slots[si], C = ch[zch], prev = slots[si - 1];
+  const n0 = Math.ceil(s.tSw / d.tb), delta = C.dist[Math.min(SIM.nb - 1, n0 + 1)];
+  const keptTail = s.keep.reduce((a, k) => a + C.dAt(k), 0) / Math.max(1, s.keep.length);
+  setStatus("st3", `slot ${selName(s.sel)} on AIN${zch}, from ${selName(prev.sel)} · step ${fmtUV(delta)} · tail left in the reading ${fmtUV(keptTail)} (${(keptTail / (delta || 1)).toExponential(1)} of the step) · ${s.keep.length} of ${s.convs.length} kept`);
 }
 
 // ───────────────────────────── lane 4: bits ─────────────────────────────
@@ -744,180 +854,208 @@ function zoomBits() { return Math.round(ZLO * Math.pow(zoomHi() / ZLO, zoomF)); 
 let zoomUser = false;
 function zoomDefault() { if (zoomUser) return; zoomF = clamp(Math.log(4 * SIM.p.osr / ZLO) / Math.log(zoomHi() / ZLO), 0, 1); $("zoom").value = zoomF; }   // ~4·OSR bits: all windows in progress
 function drawBits() {
-  const [g, W, H] = prep($("c3")), { d, ch, p, h } = SIM, C = ch[zch];
+  const cv = $("c3"), { d, ch, p, h } = SIM, C = ch[zch];
   const nW = zoomBits(), nCur = Math.floor(tNow / d.tb), nA = nCur - Math.floor(nW * 0.75), nB = nA + nW;
+  if (!needs(cv, `${nCur}|${nW}|${zch}`)) return;
+  const [g, W, H] = prep(cv);
   const L = 58, R = W - 10, X = n => L + (n - nA) / nW * (R - L), bw = (R - L) / nW;
-  $("zoomlbl").textContent = `${nW} bits = ${fmtT(nW * d.tb)}`;
-  // rows
-  const yV0 = 10, yV1 = 70, yI0 = 82, yI1 = 120, yB0 = 132, yB1 = 152, yH0 = 162, yH1 = 222;
-  // pin voltage in the window
+  const yV0 = 14, yV1 = 58, yI0 = 66, yI1 = 96, yB0 = 104, yB1 = 122, yH0 = 130, yH1 = H - 22;
+  const n0 = Math.max(0, nA), n1 = Math.min(SIM.nb, nB), fg = cssv("--fg"), mut = cssv("--mut"), chc = CHC(zch);
   let mn = Infinity, mx = -Infinity;
-  for (let n = Math.max(0, nA); n < Math.min(SIM.nb, nB); n++) { mn = Math.min(mn, C.v[n]); mx = Math.max(mx, C.v[n]); }
+  for (let n = n0; n < n1; n++) { const x = C.v[n]; if (x < mn) mn = x; if (x > mx) mx = x; }
   if (!isFinite(mn)) { mn = 0; mx = 1; } if (mx - mn < 1e-5) { mn -= 5e-6; mx += 5e-6; }
   const YV = v => yV1 - (v - mn) / (mx - mn) * (yV1 - yV0);
-  g.fillStyle = cssv("--mut"); g.textAlign = "right";
+  g.fillStyle = mut; g.textAlign = "right";
   g.fillText((mx * 1000).toFixed(3), L - 4, yV0 + 2); g.fillText((mn * 1000).toFixed(3), L - 4, yV1 - 2); g.fillText("pin mV", L - 4, (yV0 + yV1) / 2);
   g.fillText(p.order === 1 ? "x1" : "x2", L - 4, (yI0 + yI1) / 2); g.fillText("bits", L - 4, (yB0 + yB1) / 2); g.fillText("sinc3", L - 4, (yH0 + yH1) / 2 - 7); g.fillText("weights", L - 4, (yH0 + yH1) / 2 + 7);
   const step = Math.max(1, Math.floor(nW / (R - L)));
-  g.strokeStyle = CHC(zch); g.lineWidth = 1.4; g.beginPath();
-  for (let n = Math.max(0, nA); n < Math.min(SIM.nb, nB); n += step) { const x = X(n + 0.5); if (n === Math.max(0, nA)) g.moveTo(x, YV(C.v[n])); else g.lineTo(x, YV(C.v[n])); }
+  g.strokeStyle = chc; g.lineWidth = 1.4; g.beginPath();
+  for (let n = n0; n < n1; n += step) { const x = X(n + 0.5); if (n === n0) g.moveTo(x, YV(C.v[n])); else g.lineTo(x, YV(C.v[n])); }
   g.stroke();
-  // integrator state
-  let im = 1; for (let n = Math.max(0, nA); n < Math.min(SIM.nb, nB); n += step) im = Math.max(im, Math.abs(C.integ[n]));
+  let im = 1; for (let n = n0; n < n1; n += step) im = Math.max(im, Math.abs(C.integ[n]));
   const YI = v => (yI0 + yI1) / 2 - v / im * (yI1 - yI0) / 2;
   g.strokeStyle = cssv("--line"); g.beginPath(); g.moveTo(L, YI(0)); g.lineTo(R, YI(0)); g.stroke();
-  g.strokeStyle = cssv("--mut"); g.lineWidth = 1; g.beginPath();
-  for (let n = Math.max(0, nA); n < Math.min(SIM.nb, nB); n += step) { const x = X(n + 0.5); if (n === Math.max(0, nA)) g.moveTo(x, YI(C.integ[n])); else g.lineTo(x, YI(C.integ[n])); }
+  g.strokeStyle = mut; g.lineWidth = 1; g.beginPath();
+  for (let n = n0; n < n1; n += step) { const x = X(n + 0.5); if (n === n0) g.moveTo(x, YI(C.integ[n])); else g.lineTo(x, YI(C.integ[n])); }
   g.stroke();
-  // bits
-  const dense = bw < 2;
+  const dense = bw < 2, nLast = Math.min(n1 - 1, nCur);
   if (!dense) {
-    for (let n = Math.max(0, nA); n < Math.min(SIM.nb, nB) && n <= nCur; n++) { g.fillStyle = C.bits[n] ? CHC(zch) : cssv("--line"); g.fillRect(X(n) + (bw > 4 ? 0.5 : 0), yB0, Math.max(1, bw - (bw > 4 ? 1 : 0)), yB1 - yB0); }
-    if (bw > 9) { g.textAlign = "center"; g.font = "10px " + cssv("--f-mono"); for (let n = Math.max(0, nA); n < Math.min(SIM.nb, nB) && n <= nCur; n++) { g.fillStyle = C.bits[n] ? cssv("--panel") : cssv("--mut"); g.fillText(C.bits[n], X(n + 0.5), (yB0 + yB1) / 2); } g.font = "11px " + cssv("--f-mono"); }
+    const gap = bw > 4 ? 0.5 : 0, bwid = Math.max(1, bw - 2 * gap);
+    for (const one of [1, 0]) { g.fillStyle = one ? chc : cssv("--line"); for (let n = n0; n <= nLast; n++) if (C.bits[n] === one) g.fillRect(X(n) + gap, yB0, bwid, yB1 - yB0); }
+    if (bw > 9) { g.textAlign = "center"; g.font = mono(10); const pan = cssv("--panel"); for (let n = n0; n <= nLast; n++) { g.fillStyle = C.bits[n] ? pan : mut; g.fillText(C.bits[n], X(n + 0.5), (yB0 + yB1) / 2); } g.font = mono(); }
   } else {
     for (let px = L; px < R; px++) {
       const a = Math.floor(nA + (px - L) / (R - L) * nW), b = Math.floor(nA + (px + 1 - L) / (R - L) * nW);
       if (a > nCur) break; let s = 0, c = 0; for (let n = Math.max(0, a); n < Math.min(SIM.nb, Math.max(b, a + 1)); n++) { s += C.bits[n]; c++; }
-      g.fillStyle = A(CHC(zch), c ? 0.1 + 0.9 * s / c : 0); g.fillRect(px, yB0, 1, yB1 - yB0);
+      if (c) { g.globalAlpha = 0.1 + 0.9 * s / c; g.fillStyle = chc; g.fillRect(px, yB0, 1, yB1 - yB0); }
     }
+    g.globalAlpha = 1;
   }
-  // DRDY ticks and windows: the three conversions in progress at tNow, plus the latest done
-  const kDone = convDoneAt(tNow);
-  const kList = [kDone, kDone + 1, kDone + 2, kDone + 3];
-  const hm = h[Math.floor(h.length / 2)];
-  kList.forEach((k, i) => {
+  const kDone = convDoneAt(tNow), hm = h[Math.floor(h.length / 2)], sstep = Math.max(1, Math.floor(h.length / 600));
+  [kDone, kDone + 1, kDone + 2, kDone + 3].forEach((k, i) => {   // windows of the conversions in progress
     if (k < 2) return;
     const b0 = (k - 2) * p.osr, st = SIM.status[k];
-    const col = st === 2 ? cssv("--ok") : st === 1 ? cssv("--mut") : cssv("--oth");
-    const op = i === 0 ? 0.9 : i === 1 ? 0.6 : 0.3;
+    const col = st === 2 ? cssv("--ok") : st === 1 ? mut : cssv("--oth"), op = i === 0 ? 0.9 : i === 1 ? 0.6 : 0.3;
     g.strokeStyle = A(col, op); g.fillStyle = A(col, op * 0.18); g.lineWidth = i === 0 ? 2 : 1.2;
     g.beginPath(); let started = false;
-    const sstep = Math.max(1, Math.floor(h.length / 600));
     for (let j = 0; j < h.length; j += sstep) { const n = b0 + j; if (n < nA - 1 || n > nB + 1) continue; const x = X(n + 0.5), y = yH1 - h[j] / hm * (yH1 - yH0); if (!started) { g.moveTo(x, yH1); g.lineTo(x, y); started = true; } else g.lineTo(x, y); }
     if (started) { g.lineTo(Math.min(R, X(b0 + h.length)), yH1); g.fill(); g.stroke(); }
-    // DRDY tick at the window end
     const xe = X((k + 1) * p.osr);
-    if (xe >= L && xe <= R) { g.strokeStyle = A(cssv("--fg"), 0.6); g.setLineDash([2, 3]); g.lineWidth = 1; g.beginPath(); g.moveTo(xe, yV0); g.lineTo(xe, H - 14); g.stroke(); g.setLineDash([]); g.fillStyle = cssv("--fg"); g.textAlign = "center"; g.fillText(`DRDY #${k}${st === 2 ? " keep" : st === 1 ? " drop" : ""}`, xe, H - 6); }
+    if (xe >= L && xe <= R) { g.strokeStyle = A(fg, 0.6); g.setLineDash([2, 3]); g.lineWidth = 1; g.beginPath(); g.moveTo(xe, yV0); g.lineTo(xe, H - 14); g.stroke(); g.setLineDash([]); g.fillStyle = fg; g.textAlign = "center"; g.fillText(`DRDY #${k}${st === 2 ? " keep" : st === 1 ? " drop" : ""}`, xe, H - 6); }
   });
-  // mux switch markers
-  for (const s of SIM.slots) { const xs = X(s.tSw / d.tb); if (xs >= L && xs <= R) { g.strokeStyle = SELC(s.sel); g.lineWidth = 2; g.beginPath(); g.moveTo(xs, yV0 - 6); g.lineTo(xs, yB1); g.stroke(); g.fillStyle = SELC(s.sel); g.textAlign = "left"; g.fillText(`switch → ${selName(s.sel)}`, xs + 3, yV0 - 2); } }
-  // playhead
-  g.strokeStyle = cssv("--fg"); g.lineWidth = 1.5; g.beginPath(); g.moveTo(X(nCur + 1), yV0 - 8); g.lineTo(X(nCur + 1), yH1 + 2); g.stroke();
-  // running fraction of ones in the latest window
-  let ones = 0; const bw0 = Math.max(0, nCur - 3 * p.osr + 1); for (let n = bw0; n <= nCur; n++) ones += C.bits[n];
-  $("l3hint").textContent = `AIN${zch} · bit ${fmtT(d.tb)} · ${dense ? "bits denser than 2 px: shading = fraction of 1s per pixel · " : ""}last 3·OSR bits: ${(ones / (nCur - bw0 + 1) * 100).toFixed(1)} % ones ↔ ${fmtV(VR * (2 * ones / (nCur - bw0 + 1) - 1), 4)} V · humps: windows of the conversions in progress (the next DRDY solid)`;
+  const tA = nA * d.tb, tB = nB * d.tb;
+  for (let i = Math.max(0, slotAt(tA)); i < SIM.slots.length && SIM.slots[i].tSw <= tB; i++) {   // mux switches
+    const s = SIM.slots[i], xs = X(s.tSw / d.tb); if (xs < L || xs > R) continue;
+    g.strokeStyle = SELC(s.sel); g.lineWidth = 2; g.beginPath(); g.moveTo(xs, yV0 - 8); g.lineTo(xs, yB1); g.stroke(); g.fillStyle = SELC(s.sel); g.textAlign = "left"; g.fillText(`switch → ${selName(s.sel)}`, xs + 3, yV0 - 6);
+  }
+  g.strokeStyle = fg; g.lineWidth = 1.5; g.beginPath(); g.moveTo(X(nCur + 1), yV0 - 10); g.lineTo(X(nCur + 1), yH1 + 2); g.stroke();
+}
+function textBits() {
+  const { d, ch, p } = SIM, C = ch[zch], nCur = Math.floor(tNow / d.tb), nW = zoomBits(), dense = (canvasSize($("c3"))[0] - 68) / nW < 2;
+  let ones = 0; const a = Math.max(0, nCur - 3 * p.osr + 1); for (let n = a; n <= nCur; n++) ones += C.bits[n];
+  const f = ones / (nCur - a + 1);
+  setText($("zoomlbl"), `${nW} bits = ${fmtT(nW * d.tb)}`);
+  setStatus("st4", `AIN${zch} · bit ${fmtT(d.tb)} · last 3·OSR bits: ${(f * 100).toFixed(1)} % ones ↔ ${fmtV(VR * (2 * f - 1), 4)} V${dense ? " · bits denser than 2 px: shading = fraction of 1s" : ""}`);
 }
 
 // ───────────────────────────── lane 5: conversion word, SPI, MCU ─────────────────────────────
 function bin24(code) { const u = (code + 0x1000000) & 0xFFFFFF; let s = ""; for (let i = 23; i >= 0; i--) { const b = (u >> i) & 1; s += `<span class="b${b}">${b}</span>` + (i % 4 === 0 && i ? " " : ""); } return [s, u]; }
-function drawConv() {
-  const { d, ch, p, slots, status } = SIM, k = convDoneAt(tNow);
-  const si = SIM.slotOf[k], s = si >= 0 ? slots[si] : null, st = status[k];
-  let html = "";
+const hex6 = u => u.toString(16).toUpperCase().padStart(6, "0");
+function buildConvBox() {
+  const p = SIM.p; let h = "";
+  for (let c = 0; c < p.nch; c++) h += `<div class="cline"><b style="color:${chVar(c)}">AIN${c}</b> <span class="word" id="cwb${c}"></span> <span id="cwv${c}"></span></div>`;
+  h += `<div class="cline" id="csum"></div><div class="cline" id="cspi"></div><div class="cline" id="cmcu"></div>`;
+  $("convbox").innerHTML = h;
+}
+function textConv() {
+  const { d, ch, p, slots, status } = SIM, k = convDoneAt(tNow), si = SIM.slotOf[k], s = si >= 0 ? slots[si] : null, st = status[k];
   const words = [];
   for (let c = 0; c < p.nch; c++) {
-    const C = ch[c], code = C.code[k] || 0, [b, u] = bin24(code); words.push(u);
-    const r = C.S[k] / Math.pow(p.osr, 3);
-    html += `<div><div class="kv">AIN${c} · conversion #${k} · DRDY at ${fmtT((k + 1) * d.T)}</div>
-      <div class="word">${b}</div>
-      <div class="kv">hex <b>0x${u.toString(16).toUpperCase().padStart(6, "0")}</b> · dec <b>${code}</b> · <b>${fmtV(code * VR / FS_CODE * 1000, 4)} mV</b></div>
-      <div class="kv">Σ w·(±1) = ${C.S[k]} over ${SIM.h.length} bits; ÷ OSR³ (${p.osr}³) = ${r.toFixed(7)}; × 2²³ → code. Pin, sinc3-averaged: ${fmtV(C.A[k] * 1000, 4)} mV → ${Math.abs(C.A[k]) < VR ? `quantization + ADC noise ${fmtUV(code * VR / FS_CODE - C.A[k])}` : "beyond ±1.2 V full scale: the code saturates"}</div></div>`;
+    const code = ch[c].code[k] || 0, [b, u] = bin24(code); words.push(u);
+    setHTML($("cwb" + c), b);
+    setText($("cwv" + c), `0x${hex6(u)} · ${code} · ${fmtV(code * VR / FS_CODE * 1000, 4)} mV`);
   }
+  const C = ch[zch], code = C.code[k] || 0, r = C.S[k] / Math.pow(p.osr, 3);
+  setText($("csum"), `#${k}, AIN${zch}: Σ w·(±1) = ${C.S[k]} over ${SIM.h.length} bits ÷ ${p.osr}³ = ${r.toFixed(7)} → × 2²³ = ${code} · pin, sinc3-averaged ${fmtV(C.aAt(k) * 1000, 4)} mV → ${Math.abs(C.aAt(k)) < VR ? `quantization + ADC noise ${fmtUV(code * VR / FS_CODE - C.aAt(k))}` : "beyond ±1.2 V: the code saturates"}`);
   const bytes = []; for (const w of words) bytes.push(w >> 16 & 255, w >> 8 & 255, w & 255);
-  const crc = crc16ccitt(bytes);
-  const pol = p.policy === "locked" ? `locked: keep conversions whose window starts ≥ ${p.settle} µs after the switch (position ≥ D = ${d.D} in the slot), average them` : `legacy: wait ${p.settle} µs, count conversions that end after it, drop ${p.discard}, keep the next`;
-  const pos = s ? s.convs.indexOf(k) : -1;
-  const verdict = st === 2 ? `<span class="keep">KEEP</span>` : st === 1 ? `<span class="drop">DROP</span>` : `<span class="hint">before the scan</span>`;
-  const keptSoFar = s ? s.keep.filter(q => q <= k).length : 0;
-  html += `<div style="grid-column:1/-1" class="kv">SPI frame (${fmtT(d.readUs)} at ${p.spi} MHz): <b>STATUS</b> · ${words.map((w, c) => `<b>CH${c} ${w.toString(16).toUpperCase().padStart(6, "0")}</b>`).join(" · ")} · ${p.nch < 4 ? `(CH${p.nch}${p.nch < 3 ? "–CH3" : ""} not modelled) · ` : ""}<b>CRC</b> (CRC-16-CCITT of the ${p.nch} shown word${p.nch > 1 ? "s" : ""}: 0x${crc.toString(16).toUpperCase().padStart(4, "0")})<br>
-    MCU: ${s ? `slot ${selName(s.sel)}, conversion ${pos + 1} of ${s.convs.length} → ${verdict}; kept so far ${keptSoFar} of ${s.keep.length}` : "—"} · policy ${pol}</div>`;
-  $("convbox").innerHTML = html;
-  // the current slot's conversions so far, on a scale set by its kept ones (dropped ones clip)
-  const [g, W, H] = prep($("c4")), C = ch[zch];
+  setText($("cspi"), `SPI ${fmtT(d.readUs)} at ${p.spi} MHz: STATUS · ${words.map((w, c) => `CH${c} ${hex6(w)}`).join(" · ")}${p.nch < 4 ? ` · (CH${p.nch}${p.nch < 3 ? "–CH3" : ""} not modelled)` : ""} · CRC 0x${crc16ccitt(bytes).toString(16).toUpperCase().padStart(4, "0")} (of the shown words)`);
+  const verdict = st === 2 ? `<span class="keep">KEEP</span>` : st === 1 ? `<span class="drop">DROP</span>` : `before the scan`;
+  const pol = p.policy === "locked" ? `locked: keep position ≥ D = ${d.D} (window starts ≥ ${p.settle} µs after the switch), average` : `legacy: wait ${p.settle} µs, drop ${p.discard}, keep the next`;
+  setHTML($("cmcu"), s ? `MCU: slot ${selName(s.sel)}, conversion ${s.convs.indexOf(k) + 1} of ${s.convs.length} → ${verdict} · kept so far ${s.keep.filter(q => q <= k).length} of ${s.keep.length} · ${pol}` : "MCU: —");
+  setStatus("st5", `DRDY ${tNow - (k + 1) * d.T < d.T * 0.3 ? "▲ just now" : "low"} · conversion #${k} at ${fmtT((k + 1) * d.T)} · one every ${fmtT(d.T)}`);
+}
+function drawConv() {
+  const cv = $("c4"), { ch, slots, status } = SIM, k = convDoneAt(tNow), si = SIM.slotOf[k], s = si >= 0 ? slots[si] : null;
+  if (!needs(cv, `${k}|${zch}`)) return;
+  const [g, W, H] = prep(cv), C = ch[zch];
   if (!s) return;
   const kA = s.convs[0], kB = s.convs.at(-1), kv = s.keep.map(q => C.code[q] * VR / FS_CODE);
   const mean = kv.reduce((a, b) => a + b, 0) / Math.max(1, kv.length);
   let half = 20e-6; for (const v of kv) half = Math.max(half, Math.abs(v - mean) * 1.25);
-  const lo = mean - half, hi = mean + half;
-  const L = 104, R = W - 10, X = q => L + (q - kA + 0.5) / (kB - kA + 1) * (R - L), Y = v => clamp(H - 22 - (v - lo) / (hi - lo) * (H - 40), 8, H - 22);
-  g.fillStyle = cssv("--mut"); g.textAlign = "right";
+  const lo = mean - half, hi = mean + half, ok = cssv("--ok"), mut = cssv("--mut");
+  const L = 104, R = W - 10, X = q => L + (q - kA + 0.5) / (kB - kA + 1) * (R - L), Y = v => clamp(H - 20 - (v - lo) / (hi - lo) * (H - 34), 8, H - 20);
+  g.fillStyle = mut; g.textAlign = "right";
   g.fillText(`${fmtV(hi * 1000, 4)} mV`, L - 6, Y(hi)); g.fillText(`${fmtV(lo * 1000, 4)} mV`, L - 6, Y(lo));
-  g.strokeStyle = A(cssv("--ok"), 0.7); g.setLineDash([5, 4]); g.beginPath(); g.moveTo(L, Y(mean)); g.lineTo(R, Y(mean)); g.stroke(); g.setLineDash([]);
-  g.fillStyle = cssv("--ok"); g.fillText(`${fmtV(mean * 1000, 4)} mV`, L - 6, Y(mean));
+  g.strokeStyle = A(ok, 0.7); g.setLineDash([5, 4]); g.beginPath(); g.moveTo(L, Y(mean)); g.lineTo(R, Y(mean)); g.stroke(); g.setLineDash([]);
+  g.fillStyle = ok; g.fillText(`${fmtV(mean * 1000, 4)} mV`, L - 6, Y(mean));
   for (let q = kA; q <= Math.min(k, kB); q++) {
-    const v = C.code[q] * VR / FS_CODE, x = X(q), y = Y(v), off = v > hi || v < lo;
-    if (status[q] === 2) { g.fillStyle = cssv("--ok"); g.beginPath(); g.arc(x, y, 3.2, 0, 7); g.fill(); }
-    else { g.strokeStyle = cssv("--mut"); g.lineWidth = 1; g.beginPath(); g.moveTo(x - 3, y - 3); g.lineTo(x + 3, y + 3); g.moveTo(x + 3, y - 3); g.lineTo(x - 3, y + 3); g.stroke(); if (off) { g.fillStyle = cssv("--mut"); g.textAlign = "center"; g.fillText(v > hi ? "▲" : "▼", x, v > hi ? Y(hi) + 10 : Y(lo) - 10); } }
+    const v = C.code[q] * VR / FS_CODE, x = X(q), y = Y(v);
+    if (status[q] === 2) { g.fillStyle = ok; g.beginPath(); g.arc(x, y, 3.2, 0, 7); g.fill(); }
+    else { g.strokeStyle = mut; g.lineWidth = 1; g.beginPath(); g.moveTo(x - 3, y - 3); g.lineTo(x + 3, y + 3); g.moveTo(x + 3, y - 3); g.lineTo(x - 3, y + 3); g.stroke(); if (v > hi || v < lo) { g.fillStyle = mut; g.textAlign = "center"; g.fillText(v > hi ? "▲" : "▼", x, v > hi ? Y(hi) + 10 : Y(lo) - 10); } }
   }
-  g.fillStyle = cssv("--mut"); g.textAlign = "left";
-  g.fillText(`AIN${zch}, slot ${selName(s.sel)}: ${k - kA + 1 > 0 ? Math.min(k, kB) - kA + 1 : 0} of ${s.convs.length} conversions so far (● kept, × dropped, ▲▼ off scale) · dashed (green): mean of all kept = the slot's reading`, L, H - 6);
-  // DRDY flash
-  const sinceD = tNow - (k + 1) * d.T;
-  $("l4hint").textContent = `DRDY ${sinceD < d.T * 0.3 ? "▲ just now" : "low"} · ${fmtT(d.T)} per conversion`;
+  g.fillStyle = mut; g.textAlign = "left";
+  g.fillText(`AIN${zch}, slot ${selName(s.sel)}: ${Math.max(0, Math.min(k, kB) - kA + 1)} of ${s.convs.length} conversions (● kept, × dropped, ▲▼ off scale) · dashed: mean of the kept = the slot's reading`, L, H - 6);
 }
 
 // ───────────────────────────── lane 6: frame ─────────────────────────────
-function drawFrame() {
-  const { frames, p, slots } = SIM, ng = NG(p);
-  const si = slotAt(tNow); const scNow = si >= 0 ? slots[si].scan : 0;
-  let fi = -1; for (let i = 0; i < frames.length; i++) if (frames[i].t <= tNow) fi = i;
-  const fr = fi >= 0 ? frames[fi] : null;
-  // stats over all frames from scan 2 on (scan 1 starts from an arbitrary previous state)
-  const stat = [];
-  for (let g = 0; g < ng; g++) {
-    const fs = frames.slice(1).filter(f => f.g[g] && !f.g[g].rail);
-    if (!fs.length) { stat.push(null); continue; }
-    const e = fs.map(f => f.g[g].err), m = e.reduce((a, b) => a + b, 0) / e.length;
-    stat.push({ m, sd: Math.sqrt(e.reduce((a, b) => a + (b - m) ** 2, 0) / Math.max(1, e.length - 1)) });
+function computeStats() {
+  const { frames, p } = SIM, ng = NG(p);
+  SIM.stat = [];
+  for (let g = 0; g < ng; g++) {   // over scans 2… (scan 1 starts from an arbitrary previous state)
+    const e = frames.slice(1).filter(f => f.g[g] && !f.g[g].rail).map(f => f.g[g].err);
+    if (!e.length) { SIM.stat.push(null); continue; }
+    const m = e.reduce((a, b) => a + b, 0) / e.length;
+    SIM.stat.push({ m, sd: Math.sqrt(e.reduce((a, b) => a + (b - m) ** 2, 0) / Math.max(1, e.length - 1)) });
   }
-  let html = `<thead><tr><th style="text-align:left">gauge</th><th>sel·ch</th><th>code</th><th>out mV</th><th>true mV</th><th>error</th><th>of which<br>settle tail</th><th>conv.<br>averaged</th><th>error mean<br>all scans</th><th>error rms<br>about mean</th></tr></thead><tbody>`;
+  let em = 1e-7; for (const f of frames.slice(1)) for (let q = 0; q < ng; q++) if (SIM.stat[q] && !p.gauges[q].rail) em = Math.max(em, Math.abs(f.g[q].err - SIM.stat[q].m));
+  SIM.errMax = em;
+}
+const ROWH = 22;
+function buildFrameTable() {
+  const p = SIM.p, ng = NG(p);
+  let h = `<thead><tr><th style="text-align:left">gauge</th><th>sel·ch</th><th>code</th><th>out mV</th><th>true mV</th><th>error</th><th>settle tail</th><th>conv.</th><th>err mean</th><th>err rms</th></tr></thead><tbody>`;
   for (let g = 0; g < ng; g++) {
-    const f = fr ? fr.g[g] : null, S = stat[g];
-    html += `<tr><td style="text-align:left;color:${chVar(g % p.nch)}">${gaugeLabel(p, g)}${p.gauges[g].rail ? " (railed)" : ""}</td><td>${Math.floor(g / p.nch)}·${g % p.nch}</td>`;
-    if (p.gauges[g].rail && f) { html += `<td>0x${((f.code + 0x1000000) & 0xFFFFFF).toString(16).toUpperCase().padStart(6, "0")}</td><td>${fmtV(f.out * 1000, 4)}</td><td colspan="6" style="text-align:left" class="hint">railed (3.3 V at the pin, beyond ±1.2 V): code pinned at full scale, no error computed</td></tr>`; continue; }
-    if (!S) { html += `<td colspan="8" style="text-align:left" class="hint">${p.gauges[g].rail ? "railed" : "select not scanned"}</td></tr>`; continue; }
-    html += (f ? `<td>0x${((f.code + 0x1000000) & 0xFFFFFF).toString(16).toUpperCase().padStart(6, "0")}</td><td>${fmtV(f.out * 1000, 4)}</td><td>${fmtV(Math.min(f.tru, VR) * 1000, 4)}</td><td>${fmtUV(f.err)}</td><td>${fmtUV(f.tail)}</td><td>${f.n}</td>` : `<td colspan="6">waiting for the first frame</td>`) + `<td>${fmtUV(S.m)}</td><td>${fmtUV(S.sd).replace("+", "")}</td></tr>`;
+    const S = SIM.stat[g], rail = p.gauges[g].rail;
+    h += `<tr><td style="text-align:left;color:${chVar(g % p.nch)}">${gaugeLabel(p, g)}${rail ? " railed" : ""}</td><td>${Math.floor(g / p.nch)}·${g % p.nch}</td>`;
+    if (rail) h += `<td id="fc${g}">—</td><td id="fo${g}">—</td><td colspan="6" style="text-align:left" class="hint">3.3 V at the pin: code pinned at full scale, no error</td></tr>`;
+    else if (!S) h += `<td colspan="8" style="text-align:left" class="hint">select not scanned</td></tr>`;
+    else h += `<td id="fc${g}">—</td><td id="fo${g}">—</td><td id="ft${g}">—</td><td id="fe${g}">—</td><td id="fl${g}">—</td><td id="fn${g}">—</td><td>${fmtUV(S.m)}</td><td>${fmtUV(S.sd).replace("+", "")}</td></tr>`;
   }
-  $("frame").innerHTML = html + `</tbody>`;
-  $("l5hint").textContent = fr ? `frame of scan ${fr.scan + 1} sent at ${fmtT(fr.t)} · now in scan ${scNow + 1} · stats over scans 2…${p.scans}` : "";
-  // traces: error − mean, per scan, per gauge
-  const cv = $("c5"), want = Math.max(220, ng * 20 + 24); if (+cv.getAttribute("height") !== want) cv.setAttribute("height", want);
-  const [g, W, H] = prep(cv);
-  const L = 80, R = W - 10, n = frames.length, X = i => L + (i + 0.5) / n * (R - L), rh = (H - 22) / ng;
-  let em = 1e-7; for (const f of frames.slice(1)) for (let q = 0; q < ng; q++) if (stat[q] && !p.gauges[q].rail) em = Math.max(em, Math.abs(f.g[q].err - stat[q].m));
-  for (let q = 0; q < ng; q++) {
-    const yc = 6 + q * rh + rh / 2, Y = v => yc - v / em * (rh / 2 - 1.5);
+  $("frame").innerHTML = h + "</tbody>";
+  $("tbox").style.height = `${ROWH * (Math.min(ng, 8) + 1) + 18}px`;
+  FT = { fi: -2, cells: [...Array(ng).keys()].map(g => ({ c: $("fc" + g), o: $("fo" + g), t: $("ft" + g), e: $("fe" + g), l: $("fl" + g), n: $("fn" + g) })) };
+}
+let FT = null;
+function textFrame() {
+  const { frames, p, slots } = SIM, fi = frameAt(tNow), si = slotAt(tNow), scNow = si >= 0 ? slots[si].scan : 0;
+  setStatus("st6", fi >= 0 ? `frame of scan ${frames[fi].scan + 1} sent at ${fmtT(frames[fi].t)} · now in scan ${scNow + 1} · mean / rms over scans 2…${p.scans}` : "no frame yet");
+  if (FT.fi === fi) return;
+  FT.fi = fi;
+  FT.cells.forEach((c, g) => {
+    const f = fi >= 0 ? frames[fi].g[g] : null;
+    setText(c.c, f ? `0x${hex6((f.code + 0x1000000) & 0xFFFFFF)}` : "—"); setText(c.o, f ? fmtV(f.out * 1000, 4) : "—");
+    setText(c.t, f ? fmtV(Math.min(f.tru, VR) * 1000, 4) : "—"); setText(c.e, f ? fmtUV(f.err) : "—"); setText(c.l, f ? fmtUV(f.tail) : "—"); setText(c.n, f ? String(f.n) : "—");
+  });
+}
+function traceGeom(W, H) { const ng = NG(SIM.p), cols = ng > 8 ? 2 : 1, rows = Math.ceil(ng / cols), cw = (W - 4) / cols; return { ng, cols, rows, cw, rh: (H - 20) / rows }; }
+function drawTraceBase(g, W, H) {
+  const { frames, p } = SIM, Q = traceGeom(W, H), n = frames.length, em = SIM.errMax, mut = cssv("--mut");
+  for (let q = 0; q < Q.ng; q++) {
+    const col = Math.floor(q / Q.rows), row = q % Q.rows, x0 = 4 + col * Q.cw, L = x0 + 60, R = x0 + Q.cw - 10;
+    const yc = 4 + row * Q.rh + Q.rh / 2, X = i => L + (i + 0.5) / n * (R - L), Y = v => yc - v / em * (Q.rh / 2 - 1.5);
     g.strokeStyle = cssv("--line"); g.lineWidth = 1; g.beginPath(); g.moveTo(L, yc); g.lineTo(R, yc); g.stroke();
     g.fillStyle = CHC(q % p.nch); g.textAlign = "right"; g.fillText(gaugeLabel(p, q), L - 6, yc);
-    if (p.gauges[q].rail) { g.fillStyle = cssv("--mut"); g.textAlign = "left"; g.fillText("railed: code pinned at full scale", L + 4, yc); continue; }
-    if (!stat[q]) { g.fillStyle = cssv("--mut"); g.textAlign = "left"; g.fillText("not scanned", L + 4, yc); continue; }
+    if (p.gauges[q].rail || !SIM.stat[q]) { g.fillStyle = mut; g.textAlign = "left"; g.fillText(p.gauges[q].rail ? "railed" : "not scanned", L + 4, yc); continue; }
     g.strokeStyle = CHC(q % p.nch); g.lineWidth = 1.3; g.beginPath();
-    for (let i = 1; i < n; i++) { const y = Y(frames[i].g[q].err - stat[q].m); if (i === 1) g.moveTo(X(i), y); else g.lineTo(X(i), y); }
+    for (let i = 1; i < n; i++) { const y = Y(frames[i].g[q].err - SIM.stat[q].m); if (i === 1) g.moveTo(X(i), y); else g.lineTo(X(i), y); }
     g.stroke();
-    g.fillStyle = CHC(q % p.nch);
-    for (let i = 1; i <= Math.min(fi, n - 1); i++) g.fillRect(X(i) - 1.5, Y(frames[i].g[q].err - stat[q].m) - 1.5, 3, 3);
   }
-  if (fi >= 0) { g.strokeStyle = cssv("--fg"); g.beginPath(); g.moveTo(X(fi), 2); g.lineTo(X(fi), H - 14); g.stroke(); }
-  g.fillStyle = cssv("--mut"); g.textAlign = "left"; g.fillText(`error − its mean, per scan (each row ±${fmtUV(em).replace("+", "")}); constant offsets (e.g. the comb folded to 0 Hz by a locked scan) are in the mean column`, L, H - 6);
+  g.fillStyle = mut; g.textAlign = "left"; g.fillText(`error − its mean, per scan (each row ±${fmtUV(em).replace("+", "")}); constant offsets (e.g. the comb folded to 0 Hz by a locked scan) are in “err mean”`, 8, H - 7);
+}
+function drawTraces() {
+  const cv = $("c5"), fi = frameAt(tNow);
+  if (!needs(cv, `${fi}`)) return;
+  const [g, W, H] = prep(cv), { frames, p } = SIM, Q = traceGeom(W, H), n = frames.length;
+  blit(g, layer(cv, "traces", drawTraceBase));
+  if (fi < 0) return;
+  for (let q = 0; q < Q.ng; q++) {
+    if (p.gauges[q].rail || !SIM.stat[q]) continue;
+    const col = Math.floor(q / Q.rows), row = q % Q.rows, x0 = 4 + col * Q.cw, L = x0 + 60, R = x0 + Q.cw - 10;
+    const yc = 4 + row * Q.rh + Q.rh / 2, X = i => L + (i + 0.5) / n * (R - L), Y = v => yc - v / SIM.errMax * (Q.rh / 2 - 1.5);
+    g.fillStyle = CHC(q % p.nch);
+    for (let i = 1; i <= Math.min(fi, n - 1); i++) g.fillRect(X(i) - 1.5, Y(frames[i].g[q].err - SIM.stat[q].m) - 1.5, 3, 3);
+    g.strokeStyle = cssv("--fg"); g.lineWidth = 1; g.beginPath(); g.moveTo(X(fi), yc - Q.rh / 2 + 1); g.lineTo(X(fi), yc + Q.rh / 2 - 1); g.stroke();
+  }
 }
 
 // ───────────────────────────── lane 1: block diagram ─────────────────────────────
 // Layout follows p.nsel × p.nch: one gauge row per (select, channel), one nsel:1 mux per ADC channel.
+// Built once per topology; per frame only text nodes and a few styles change (cached refs).
 let BL = null;
 function buildBlock() {
-  const p = SIM.p, ng = NG(p), rh = ng <= 8 ? 36 : ng <= 16 ? 22 : 17;
-  const Hg = 22 + ng * rh, Htot = Math.max(330, Hg + 20), band = (Htot - 40) / p.nch;
+  const p = SIM.p, ng = NG(p), rh = ng <= 8 ? 34 : ng <= 16 ? 20 : 14;
+  const Hg = 22 + ng * rh, Htot = Math.max(320, Hg + 20), band = (Htot - 40) / p.nch;
   const s = [], T = (x, y, txt, cls = "t", a = "start", id = "") => s.push(`<text x="${x}" y="${y}" class="${cls}" text-anchor="${a}"${id ? ` id="${id}"` : ""}>${txt}</text>`);
   const muxY = c => 14 + c * band, muxH = band - 22, inY = (c, q) => muxY(c) + 12 + (p.nsel > 1 ? q * (muxH - 24) / (p.nsel - 1) : (muxH - 24) / 2), outY = c => muxY(c) + muxH / 2;
-  const gy = g => 22 + g * rh;
+  const gy = g => 22 + g * rh, small = rh < 20;
   for (let g = 0; g < ng; g++) {
-    const y = gy(g), sel = Math.floor(g / p.nch), c = g % p.nch, col = chVar(c);
+    const y = gy(g), sel = Math.floor(g / p.nch), c = g % p.nch;
     if (c === 0) s.push(`<rect x="4" y="${y - rh / 2 + 2}" width="200" height="${rh * p.nch - 4}" rx="4" style="fill:none;stroke:var(--line)"/>`);
-    T(10, y + 4, gaugeLabel(p, g), rh < 20 ? "v" : "t");
+    T(10, y + 4, gaugeLabel(p, g), small ? "v" : "t");
     s.push(`<path d="M50,${y} L84,${y}" class="w"/><path d="M84,${y - Math.min(9, rh / 2 - 2)} L84,${y + Math.min(9, rh / 2 - 2)} L102,${y} Z" class="box"/>`);
-    s.push(`<path d="M102,${y} L118,${y}" class="w"/><rect x="118" y="${y - 4}" width="16" height="8" class="box" id="rc${g}"/><path d="M134,${y} L148,${y}" class="w"/>`);
+    s.push(`<path d="M102,${y} L118,${y}" class="w"/><rect x="118" y="${y - 4}" width="16" height="8" class="box rc"/><path d="M134,${y} L148,${y}" class="w"/>`);
     T(150, y + 4, "", "v", "start", "gv" + g);
-    s.push(`<path d="M204,${y} C250,${y} 250,${inY(c, sel)} 300,${inY(c, sel)}" class="wdim" id="gw${g}" style="stroke:${col}"/>`);
+    s.push(`<path d="M204,${y} C250,${y} 250,${inY(c, sel)} 300,${inY(c, sel)}" class="wdim" id="gw${g}" style="stroke:${chVar(c)}"/>`);
   }
   T(104, Htot - 6, "bridge · INA351 G 10 · RC 1 k/0.1 µF", "n", "middle");
   for (let c = 0; c < p.nch; c++) {
@@ -947,48 +1085,48 @@ function buildBlock() {
   for (let i = 0; i < hn; i++) T(886, my - hh / 2 + 38 + i * 17, "", "v", "start", "hf" + i);
   T(938, my + hh / 2 - 8, "", "v", "middle", "hfn");
   const svg = $("blk"); svg.setAttribute("viewBox", `0 0 1000 ${Htot}`); svg.innerHTML = s.join("");
-  BL = { shape: `${p.nsel}x${p.nch}`, hn };
+  svg.classList.toggle("norc", !p.rc);
+  const ids = (pre, n) => [...Array(n).keys()].map(i => $(pre + i));
+  BL = { shape: `${p.nsel}x${p.nch}`, hn, gen: simGen, slot: -2, hot: null, rd: null,
+    gv: ids("gv", ng), gw: ids("gw", ng), pin: ids("pin", p.nch), bit: ids("bit", p.nch), code: ids("code", p.nch), dens: ids("dens", p.nch),
+    mcu: ids("mcu", 8), hf: ids("hf", hn), hfn: $("hfn"), fmod: $("fmod"), osrl: $("osrl"), drdyw: $("drdyw"), drdyt: $("drdyt"), spiw: $("spiw"), spiv: $("spiv") };
+  setText(BL.fmod, `fMOD ${(SIM.d.fmod / 1e3).toFixed(0)} kHz · bit ${fmtT(SIM.d.tb)}`);
+  setText(BL.osrl, `OSR ${p.osr} · window ${fmtT(SIM.d.win)}`);
 }
-function updateBlock() {
+function textBlock() {
   const { slots, ch, d, p, frames, status } = SIM, si = slotAt(tNow), s = si >= 0 ? slots[si] : null, n = Math.min(SIM.nb - 1, Math.max(0, Math.floor(tNow / d.tb)));
-  if (!BL || BL.shape !== `${p.nsel}x${p.nch}`) buildBlock();
-  for (let g = 0; g < NG(p); g++) {
-    const G = SIM.G[g], v = G.rail ? RAIL : SIM.xTrue(g, tNow);
-    $("gv" + g).textContent = G.rail ? "3300 railed" : (v * 1000).toFixed(1) + " mV";
-    const active = s && s.sel >= 0 && Math.floor(g / p.nch) === s.sel;
-    const el = $("gw" + g); el.setAttribute("class", active ? "w" : "wdim"); el.style.strokeWidth = active ? 2.6 : 1.1; el.style.opacity = active ? 1 : 0.45;
-    $("rc" + g).style.display = p.rc ? "" : "none";
+  if (!BL || BL.gen !== simGen) buildBlock();
+  for (let g = 0; g < NG(p); g++) { const G = SIM.G[g]; setText(BL.gv[g], G.rail ? "3300 railed" : (SIM.xTrue(g, tNow) * 1000).toFixed(1) + " mV"); }
+  if (BL.slot !== si) {   // highlight the connected wires
+    BL.slot = si;
+    BL.gw.forEach((el, g) => { const on = s && s.sel >= 0 && Math.floor(g / p.nch) === s.sel; el.setAttribute("class", on ? "w on" : "wdim"); });
   }
+  const k = convDoneAt(tNow);
   for (let c = 0; c < p.nch; c++) {
-    $("pin" + c).textContent = (ch[c].v[n] * 1000).toFixed(2) + " mV";
-    $("bit" + c).textContent = "bit " + ch[c].bits[n];
-    const k = convDoneAt(tNow); $("code" + c).textContent = "0x" + ((ch[c].code[k] + 0x1000000) & 0xFFFFFF).toString(16).toUpperCase().padStart(6, "0");
-    const de = $("dens" + c);
-    if (de) { let o = 0; const a = Math.max(0, n - p.osr + 1); for (let q = a; q <= n; q++) o += ch[c].bits[q]; de.textContent = `1s (last OSR): ${(o / (n - a + 1) * 100).toFixed(1)} %`; }
+    setText(BL.pin[c], (ch[c].v[n] * 1000).toFixed(2) + " mV");
+    setText(BL.bit[c], "bit " + ch[c].bits[n]);
+    setText(BL.code[c], "0x" + hex6((ch[c].code[k] + 0x1000000) & 0xFFFFFF));
+    if (BL.dens[c]) { let o = 0; const a = Math.max(0, n - p.osr + 1); for (let q = a; q <= n; q++) o += ch[c].bits[q]; setText(BL.dens[c], `1s (last OSR): ${(o / (n - a + 1) * 100).toFixed(1)} %`); }
   }
-  $("fmod").textContent = `fMOD ${(d.fmod / 1e3).toFixed(0)} kHz · bit ${fmtT(d.tb)}`;
-  $("osrl").textContent = `OSR ${p.osr} · window ${fmtT(d.win)}`;
-  const k = convDoneAt(tNow), since = tNow - (k + 1) * d.T, hot = since < Math.min(d.T * 0.3, d.readUs + 2);
-  $("drdyw").style.stroke = hot ? "var(--ok)" : ""; $("drdyw").style.strokeWidth = hot ? 3.5 : "";
-  $("drdyt").style.fill = hot ? "var(--ok)" : "";
-  const reading = since < d.readUs; $("spiw").style.stroke = reading ? "var(--gb)" : ""; $("spiw").style.strokeWidth = reading ? 3.5 : "";
-  $("spiv").textContent = reading ? `read #${k}` : "idle";
-  const pos = s ? s.convs.indexOf(k) : -1, st = status[k];
+  const since = tNow - (k + 1) * d.T, hot = since < Math.min(d.T * 0.3, d.readUs + 2), rd = since < d.readUs;
+  if (BL.hot !== hot) { BL.hot = hot; BL.drdyw.classList.toggle("hot", hot); BL.drdyt.classList.toggle("hot", hot); }
+  if (BL.rd !== rd) { BL.rd = rd; BL.spiw.classList.toggle("rd", rd); }
+  setText(BL.spiv, rd ? `read #${k}` : "idle");
+  const st = status[k];
   const lines = [
     s ? `slot ${selName(s.sel)} (scan ${s.scan + 1})` : "",
     s ? `since switch ${fmtT(tNow - s.tSw)}` : "",
     `conv #${k}: ${st === 2 ? "KEEP" : st === 1 ? "drop" : "–"}`,
-    s ? `pos ${pos + 1}/${s.convs.length}` : "",
+    s ? `pos ${s.convs.indexOf(k) + 1}/${s.convs.length}` : "",
     s ? `kept ${s.keep.filter(q => q <= k).length}/${s.keep.length}` : "",
     p.policy === "locked" ? `D = ${d.D}, mean of kept` : `settle ${p.settle} µs`,
     p.policy === "locked" ? `N = ${p.N} per scan` : `drop ${p.discard}, keep 1`,
     `${(1e6 / SIM.scanPeriod).toFixed(1)} scans/s`];
-  lines.forEach((t, i) => $("mcu" + i).textContent = t);
-  let fi = -1; for (let i = 0; i < frames.length; i++) if (frames[i].t <= tNow) fi = i;
-  const ng = NG(p);
-  for (let i = 0; i < BL.hn; i++) { const f = fi >= 0 ? frames[fi].g[i] : null; $("hf" + i).textContent = fi >= 0 ? `${gaugeLabel(p, i)} ${f ? (f.out * 1000).toFixed(2) : "—"}` : ""; }
-  $("hfn").textContent = fi >= 0 ? (ng > BL.hn ? `+${ng - BL.hn} more (lane 6)` : `scan ${fi + 1}, mV`) : "no frame yet";
-  $("blkhint").textContent = s ? `select ${s.sel < 0 ? "other" : s.sel}: ` + [...Array(p.nch).keys()].map(c => `AIN${c} ← ${s.sel < 0 ? "other" : gaugeLabel(p, s.sel * p.nch + c)}`).join(", ") : "";
+  lines.forEach((t, i) => setText(BL.mcu[i], t));
+  const fi = frameAt(tNow), ng = NG(p);
+  for (let i = 0; i < BL.hn; i++) { const f = fi >= 0 ? frames[fi].g[i] : null; setText(BL.hf[i], fi >= 0 ? `${gaugeLabel(p, i)} ${f ? (f.out * 1000).toFixed(2) : "—"}` : ""); }
+  setText(BL.hfn, fi >= 0 ? (ng > BL.hn ? `+${ng - BL.hn} more (lane 6)` : `scan ${fi + 1}, mV`) : "no frame yet");
+  setStatus("st1", s ? `select ${s.sel < 0 ? "other" : s.sel}: ` + [...Array(p.nch).keys()].map(c => `AIN${c} ← ${s.sel < 0 ? "other" : gaugeLabel(p, s.sel * p.nch + c)}`).join(", ") : "");
 }
 
 // ───────────────────────────── notes ─────────────────────────────
@@ -999,41 +1137,97 @@ function updateNote() {
     `<li><b>Topology.</b> The board has 2 × CD4097B (dual 8:1) feeding a 4-channel ADS131M04: 8 selects × 4 channels = 32 gauges. Here: ${p.nsel} selects × ${p.nch} channel${p.nch > 1 ? "s" : ""} = ${NG(p)} gauges${p.nsel === 8 && p.nch === 4 ? " (the board's scale; names from the firmware's OUT_OF table)" : ""}. “Extra selects” (${p.extra} now) stand in for selects of the board that are not modelled, so the scan timing matches; their inputs sit at ${p.other} V. Each ADC channel has its own ${p.nsel}:1 mux; all switch together.</li>`,
     `<li><b>Gauges.</b> INA output = REF (${REF * 1000} mV, bench) + offset + bend sine (${p.bendHz} Hz), + white noise ${p.enoise} µV/√Hz, + the 845 Hz 3V3 ripple at ${p.humK} mV per V of offset (bench mechanism), all through the 1 kΩ / 0.1 µF RC (f<sub>c</sub> = ${FC_RC.toFixed(0)} Hz) when on. Railed = 3.3 V. The 62.5 Hz comb (${p.comb} µV per line, 16 lines) is added at the ADC pins, equal on both; its real injection point is unknown.</li>`,
     `<li><b>Mux switch.</b> At a switch the pin keeps its old value through a fast part (τ ${p.tauFast} µs, the fits put it at an effective ~15 µs delay) and a charge-sharing tail: ${p.tailFrac} × (old pin − new input) × e<sup>−t/${p.tau} µs</sup>${p.tail2 ? ` + ${p.tail2} × e<sup>−t/${p.tau2} µs</sup>` : ""}. A railed source holds the pin ${p.ovUs} µs longer (overload recovery, modelled as a delay). Defaults from the bench settle fits (τ 70–90 µs, ~0.0136 of the step; the individual fits scatter, 1e-3…4e-3 slow parts with 69–142 µs). A plausible reading, not measured: ${p.tailFrac} ≈ C<sub>par</sub>/(C<sub>par</sub> + 100 nF), i.e. C<sub>par</sub> ≈ ${cpar.toFixed(1)} nF of mux + ADC input, recharged through 1 kΩ (τ ≈ ${TAU_RC_US.toFixed(0)} µs). The RC switch only filters the gauge signals; it does not change the tail parameters.</li>`,
-    `<li><b>Modulator.</b> 1-bit, ${p.order === 2 ? "second" : "first"} order, the same loop as the signal chain page (y = sign of the last integrator before the step; x1 += u − y; x2 += x1 − y), u = pin / 1.2 V clipped to ±1, integrators clamped (±4, ±16). The ADS131M04's real loop is not published; second order stands in. ADC thermal noise: white per-bit input noise sized so the sinc3 output matches the datasheet's gain-1 noise at OSR ≥ 256 (${p.adcNoise ? (SIM.sigBit * 1e3).toFixed(3) + " mV per bit now" : "off now"}); at OSR 64/128 the table also holds the chip's quantization noise, which this modulator makes itself.</li>`,
+    `<li><b>Modulator.</b> 1-bit, ${p.order === 2 ? "second" : "first"} order, the same loop as the signal chain page (y = sign of the last integrator before the step; x1 += u − y; x2 += x1 − y), u = pin / 1.2 V clipped to ±1, integrators clamped (±4, ±16). The ADS131M04's real loop is not published; second order stands in. ADC thermal noise: white per-bit input noise (drawn from a 65 536-sample Gaussian table by an LCG, for speed) sized so the sinc3 output matches the datasheet's gain-1 noise at OSR ≥ 256 (${p.adcNoise ? (SIM.sigBit * 1e3).toFixed(3) + " mV per bit now" : "off now"}); at OSR 64/128 the table also holds the chip's quantization noise, which this modulator makes itself.</li>`,
     `<li><b>sinc3 and the code.</b> Weights = three length-OSR boxcars convolved (3·OSR − 2 bits, sum OSR³); result = Σ w·(±1) / OSR³; code = round(result × 2²³), clipped to 0x800000…0x7FFFFF. One result per OSR bits (T = 2·OSR/CLKIN = ${fmtT(d.T)}), window 3·T. The chip's internal reference error, gain error and offset are not modelled.</li>`,
     `<li><b>Firmware.</b> Legacy (M0): switch, wait settle, count conversions that end after it, drop N, keep the next; the next switch follows that read (${fmtT(d.readUs)} for a 6-word SPI frame + ${READ_OVH_US} µs). Locked (M1/M2): every conversion is read; scan = N conversions on the ADC grid, split over the selects (floor/ceil); switch ${p.swLat} µs after the DRDY that ends a slot; drop the first D = ceil(3 + (settle + ${LK_LAT_ALLOW_US})/T) − 1 of each slot, average the rest. CRC errors, missed DRDYs and resyncs are not modelled.</li>`,
     `<li><b>Error columns.</b> True = the noiseless gauge signal (REF + offset + bend, through the RC when on) at the centre of the kept windows. Error = output − true; “settle tail” = the switch disturbance seen through the kept conversions (exact, same sinc3 sums); the rest is noise, 845 Hz ripple, comb and quantization. Time skew between gauges is not an error here (each gauge is compared at its own sampling time).</li>`,
   ].join("");
 }
 
-// ───────────────────────────── transport ─────────────────────────────
+// ───────────────────────────── transport and frame loop ─────────────────────────────
+// Lanes off screen are skipped (IntersectionObserver); text and DOM updates run at ~10 Hz;
+// a frame is drawn only while playing or after something changed.
+let VIS = {}, ALLVIS = false, PROF = null, dirty = true, forceText = true, lastText = -1e9;
+const vis = id => ALLVIS || VIS[id] !== false;
+function requestDraw(text) { dirty = true; if (text) forceText = true; }
 function speedUs() { return Math.pow(10, speedLog); }   // signal µs per screen second
-function draw() {
+function prof(name, f) { if (!PROF) return f(); const a = performance.now(); f(); PROF[name] = (PROF[name] || 0) + performance.now() - a; }
+function drawAll(textNow) {
   if (!SIM) return;
-  $("speedlbl").textContent = `1 s on screen = ${fmtT(speedUs())} of signal`;
-  const si = slotAt(tNow), s = si >= 0 ? SIM.slots[si] : null;
-  $("clock").textContent = `t = ${fmtT(tNow)} · scan ${s ? s.scan + 1 : "–"} · slot ${s ? (selName(s.sel)) : "–"} · ${s ? fmtT(tNow - s.tSw) + " after the switch" : ""} · bit #${Math.floor(tNow / SIM.d.tb)} · ${SIM.p.teaching || SIM.p.osr < 64 ? "TEACHING SETTINGS (not the board)" : ""}`;
-  updateBlock(); drawScan(); drawSettle(); drawBits(); drawConv(); drawFrame();
+  if (vis("s2")) prof("scan", drawScan);
+  if (vis("s3")) prof("settle", drawSettle);
+  if (vis("s4")) prof("bits", drawBits);
+  if (vis("s5")) prof("conv", drawConv);
+  if (vis("s6")) prof("traces", drawTraces);
+  const now = performance.now();
+  if (textNow || now - lastText > 100) { lastText = now; prof("text", updateTexts); }
 }
+function updateTexts() {
+  const si = slotAt(tNow), s = si >= 0 ? SIM.slots[si] : null;
+  setText($("speedlbl"), `1 s on screen = ${fmtT(speedUs())} of signal`);
+  setText($("clock"), `t = ${fmtT(tNow)} · scan ${s ? s.scan + 1 : "–"} · slot ${s ? selName(s.sel) : "–"} · ${s ? fmtT(tNow - s.tSw) + " after the switch" : ""} · bit #${Math.floor(tNow / SIM.d.tb)}${SIM.p.teaching || SIM.p.osr < 64 ? " · TEACHING SETTINGS (not the board)" : ""}`);
+  if (vis("s1")) textBlock();
+  if (vis("s2")) textScan();
+  if (vis("s3")) textSettle();
+  if (vis("s4")) textBits();
+  if (vis("s5")) textConv();
+  if (vis("s6")) textFrame();
+}
+function draw(text) { drawAll(text); }
+function advance(dtS) { tNow += dtS * speedUs(); if (tNow > simEnd()) tNow = SIM.slots[0].tSw + 0.5 * SIM.d.T; }
 function frame(ts) {
-  if (lastFrame !== null && playing && SIM) {
-    const dt = Math.min(0.1, (ts - lastFrame) / 1000);
-    tNow += dt * speedUs();
-    if (tNow > simEnd()) tNow = SIM.slots[0].tSw + 0.5 * SIM.d.T;
-    draw();
+  if (SIM && !PERF_RUNNING) {
+    if (playing && lastFrame !== null) { advance(Math.min(0.1, (ts - lastFrame) / 1000)); dirty = true; }
+    if (dirty) { const f = forceText; dirty = false; forceText = false; drawAll(f); }
   }
   lastFrame = ts;
   requestAnimationFrame(frame);
 }
+function setPlaying(on) { playing = on; $("play").textContent = on ? "❚❚ pause" : "▶ play"; $("play").classList.toggle("on", on); requestDraw(true); }
 function stepBy(kind) {
-  playing = false; $("play").textContent = "▶ play"; $("play").classList.remove("on");
+  setPlaying(false);
   const d = SIM.d;
   if (kind === "bit") tNow = (Math.floor(tNow / d.tb + 1e-9) + 1) * d.tb + 1e-6;
   else if (kind === "conv") tNow = (convDoneAt(tNow) + 2) * d.T + 1e-6;
   else if (kind === "slot") { const si = slotAt(tNow); tNow = (SIM.slots[si + 1] || SIM.slots[0]).tSw + 1e-6; }
-  else if (kind === "scan") { const si = slotAt(tNow), sc = SIM.slots[si].scan, nx = SIM.slots.find(s => s.scan === sc + 1) || SIM.slots[0]; tNow = nx.tSw + 1e-6; }
+  else if (kind === "scan") { const si = slotAt(tNow), sc = SIM.slots[si].scan, nx = SIM.slots[(sc + 1) * d.nsel] || SIM.slots[0]; tNow = nx.tSw + 1e-6; }
   if (tNow > simEnd()) tNow = SIM.slots[0].tSw + 1e-6;
-  draw();
+  requestDraw(true);
+}
+// Fixed heights from the topology only (never from the content of a frame).
+function sizeLanes() {
+  const ng = NG(SIM.p), rows = ng > 8 ? Math.ceil(ng / 2) : ng;
+  $("c5").style.height = `${Math.round(rows * (ng > 8 ? 13 : 19) + 26)}px`;
+}
+function observe() {
+  const ro = new ResizeObserver(es => { for (const e of es) { e.target._w = e.contentRect.width; e.target._h = e.contentRect.height; } requestDraw(true); });
+  for (const id of ["c1", "c2", "c3", "c4", "c5"]) ro.observe($(id));
+  const tp = new ResizeObserver(es => document.documentElement.style.setProperty("--tp", `${Math.ceil(es[0].borderBoxSize?.[0]?.blockSize ?? es[0].target.offsetHeight)}px`));
+  tp.observe($("transport"));
+  const io = new IntersectionObserver(es => { for (const e of es) VIS[e.target.id] = e.isIntersecting; requestDraw(true); }, { rootMargin: "100px 0px" });
+  for (const id of ["s1", "s2", "s3", "s4", "s5", "s6"]) io.observe($(id));
+  const watchDpr = () => matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`).addEventListener("change", () => { requestDraw(true); watchDpr(); }, { once: true });
+  watchDpr();
+  matchMedia("(prefers-color-scheme: dark)").addEventListener("change", themeChanged);
+}
+
+// ───────────────────────────── perf / layout check (#perf) ─────────────────────────────
+// Pass A: as in use (visible lanes, text at 10 Hz) at the top of the page. Pass B: every lane and
+// every text node each frame, scrolled down; the page height and the scroll position must not move.
+let PERF_RUNNING = false;
+function perfRun(hp) {
+  PERF_RUNNING = true;
+  const out = { width: window.innerWidth };
+  let a = performance.now(); simulate(structuredClone(P)); out.simMs = +(performance.now() - a).toFixed(1);
+  const stats = T => { const s = [...T].sort((x, y) => x - y); return { median: +s[s.length >> 1].toFixed(2), p95: +s[Math.floor(s.length * 0.95)].toFixed(2), max: +s.at(-1).toFixed(2) }; };
+  const run = (n, text) => { const T = [], H = new Set(), Y = new Set(); for (let i = 0; i < n; i++) { const b = performance.now(); advance(1 / 60); drawAll(text); T.push(performance.now() - b); H.add(document.documentElement.scrollHeight); Y.add(Math.round(window.scrollY)); } return { T, H, Y }; };
+  for (const id of ["s1", "s2", "s3", "s4", "s5", "s6"]) { const r = $(id).getBoundingClientRect(); VIS[id] = r.bottom > -100 && r.top < window.innerHeight + 100; }
+  PROF = {}; let r = run(300, false); out.realistic = stats(r.T); out.profA = PROF;
+  ALLVIS = true; const y = Math.max(0, Math.min(+(hp.get("scroll") || 1500), document.documentElement.scrollHeight - window.innerHeight - 10)); window.scrollTo(0, y);
+  PROF = {}; r = run(300, true); out.all = stats(r.T); out.profB = PROF;
+  out.heights = [...r.H]; out.scrollYs = [...r.Y]; out.scrollTarget = y;
+  for (const k of ["profA", "profB"]) for (const n in out[k]) out[k][n] = +(out[k][n] / 300).toFixed(3);
+  const el = $("selftest"); el.textContent = JSON.stringify(out); el.hidden = false;
 }
 
 // ───────────────────────────── boot ─────────────────────────────
@@ -1046,25 +1240,26 @@ function boot() {
   buildSettings();
   const pre = hp.get("preset") || "quiet"; ps.value = pre; applyPreset(pre);
   if (hp.has("theme")) document.documentElement.dataset.theme = hp.get("theme");
-  if (hp.has("zch")) { zch = +hp.get("zch"); $("zch").value = zch; }
+  if (hp.has("zch")) zch = +hp.get("zch");
   if (hp.has("zoom")) { zoomF = +hp.get("zoom"); $("zoom").value = zoomF; zoomUser = true; }
   for (const [k, v] of hp) if (k.startsWith("p.")) { const key = k.slice(2); P[key] = typeof BASE[key] === "number" ? Number(v) : typeof BASE[key] === "boolean" ? v === "1" : v; }
   if (hp.has("rail")) hp.get("rail").split(",").forEach(g => P.gauges[+g].rail = true);
-  SIM = simulate(P); zoomDefault(); syncSettings(); updateDerived(); buildBlock(); updateNote();
-  tNow = SIM.slots[0].tSw + SIM.scanPeriod * 1.02;
+  rebuild(true);
   if (hp.has("t")) tNow = SIM.slots[0].tSw + Number(hp.get("t"));
   if (hp.has("slot")) { const [sc, j, off] = hp.get("slot").split(",").map(Number); const s = SIM.slots.find(q => q.scan === sc && q.j === j); if (s) tNow = s.tSw + (off || 0); }
-  if (hp.has("pause")) { playing = false; $("play").textContent = "▶ play"; $("play").classList.remove("on"); }
-  ps.addEventListener("change", () => { if (ps.value !== "custom") { applyPreset(ps.value); rebuild(); } });
-  $("play").addEventListener("click", () => { playing = !playing; $("play").textContent = playing ? "❚❚ pause" : "▶ play"; $("play").classList.toggle("on", playing); });
+  if (hp.has("pause")) setPlaying(false);
+  ps.addEventListener("change", () => { if (ps.value !== "custom") { applyPreset(ps.value); scheduleRebuild(); } });
+  $("play").addEventListener("click", () => setPlaying(!playing));
   document.querySelectorAll("[data-step]").forEach(b => b.addEventListener("click", () => stepBy(b.dataset.step)));
-  $("speed").value = speedLog; $("speed").addEventListener("input", e => { speedLog = +e.target.value; draw(); });
-  $("zoom").addEventListener("input", e => { zoomF = +e.target.value; zoomUser = true; draw(); });
-  $("zch").addEventListener("change", e => { zch = +e.target.value; draw(); });
-  $("theme").addEventListener("click", () => { const r = document.documentElement, dark = r.dataset.theme ? r.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches; r.dataset.theme = dark ? "light" : "dark"; alphaCache.clear(); draw(); });
-  window.addEventListener("resize", () => draw());
-  document.addEventListener("keydown", e => { if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return; if (e.key === " ") { e.preventDefault(); $("play").click(); } else if (e.key === "ArrowRight") stepBy(e.shiftKey ? "conv" : "bit"); });
-  draw();
+  $("speed").value = speedLog; $("speed").addEventListener("input", e => { speedLog = +e.target.value; requestDraw(true); });
+  $("zoom").addEventListener("input", e => { zoomF = +e.target.value; zoomUser = true; requestDraw(true); });
+  $("zch").addEventListener("change", e => { zch = +e.target.value; requestDraw(true); });
+  $("theme").addEventListener("click", () => { const r = document.documentElement, dark = r.dataset.theme ? r.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches; r.dataset.theme = dark ? "light" : "dark"; themeChanged(); });
+  document.addEventListener("keydown", e => { if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return; if (e.key === " ") { e.preventDefault(); setPlaying(!playing); } else if (e.key === "ArrowRight") stepBy(e.shiftKey ? "conv" : "bit"); });
+  observe();
+  if (hp.has("perf")) { perfRun(hp); return; }
+  if (hp.has("goto")) requestAnimationFrame(() => $(hp.get("goto")).scrollIntoView({ block: "start" }));
+  drawAll(true);
   requestAnimationFrame(frame);
 }
 boot();
