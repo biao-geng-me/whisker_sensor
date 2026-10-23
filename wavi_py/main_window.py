@@ -55,6 +55,7 @@ from wavi_py.io.dat_writer import DatWriter, build_datalog_filename
 from wavi_py.transports.sim_transport import SimSignals
 from wavi_py.views import FftView, ImuView, LineView, SpectrogramView, SpectrumView
 from wavi_py.views.sim_panel import SimPanel
+from wavi_py.views.spectral_base import FFT_WINDOWS_S
 from whisker_link.channels import SAT_CODE
 from whisker_link.esp32_frame import MV_PER_CODE
 
@@ -136,7 +137,7 @@ class MainWindow(QMainWindow):
         self._spectrum_view = SpectrumView(self._nsensor, self._nch)
         self._fft_view = FftView(self._nch, self._nfreq, self._t_fft_s)
         self._spec_view = SpectrogramView(
-            self._nch, self._nfreq, self._fs, self._ns_spec, self._t_spec_s
+            self._nch, self._nfreq, self._fs, self._ns_spec, self._t_spec_s, self._t_fft_s
         )
         self._imu_view = ImuView(self._t_buffer_s)
         for v, btn in ((self._line_view, self._toggle_line), (self._spectrum_view, self._toggle_spectrum),
@@ -145,12 +146,18 @@ class MainWindow(QMainWindow):
             v.hide()
             # closing a view window unchecks its button (setChecked is a no-op if already off)
             v.closed.connect(lambda b=btn: b.setChecked(False))
-        # the line / spectrum windows' Pause (and Re-zero) drive the panel's buttons (state
-        # flows back through _on_pause_toggled / _set_stream_buttons_enabled)
-        self._stream_views = (self._line_view, self._spectrum_view)
+        # the plot windows' Pause (and Re-zero) drive the panel's buttons (state flows
+        # back through _on_pause_toggled / _set_stream_buttons_enabled); they all show
+        # the stream status line
+        self._stream_views = (self._line_view, self._spectrum_view, self._fft_view, self._spec_view)
         for v in self._stream_views:
             v.pauseToggled.connect(self._pause_btn.setChecked)
+        for v in (self._line_view, self._spectrum_view):
             v.resetRequested.connect(self._on_reset_clicked)
+        # FFT window length (shared by FFT and Spec) and the spectrogram span live here
+        for v in (self._fft_view, self._spec_view):
+            v.fftWindowChanged.connect(self._set_fft_window)
+        self._spec_view.spanChanged.connect(self._set_spec_span)
         # IMU rolling buffer (server transport only)
         self._imu_last_seq = 0
         self._imu_rows = np.empty((0, 9), dtype=np.float32)
@@ -164,19 +171,43 @@ class MainWindow(QMainWindow):
     def _set_rate(self, fs: float) -> None:
         """Size the rolling buffers for sample rate ``fs`` and clear them."""
         self._fs = float(fs)
-        self._n_fft_window = max(2, int(round(self._fs * self._t_fft_s)))
-        self._nfreq = self._n_fft_window // 2 + 1
-        self._ns_tot = max(self._n_fft_window, int(self._t_buffer_s * self._fs))
-        self._spec_cols = max(1, int(self._t_spec_s * self._fs / self._ns_spec))
+        self._ns_tot = max(int(round(self._fs * FFT_WINDOWS_S[-1])), int(self._t_buffer_s * self._fs))
         self._sig = np.full((self._ns_tot, self._nch), np.nan, dtype=np.float32)
-        self._spec_data = np.zeros((self._nfreq * self._nch, self._spec_cols), dtype=np.float32)
-        self._fft_map = np.zeros((self._nfreq, self._nch), dtype=np.float32)
-        self._samples_since_spec_update = 0
+        self._size_spectral()
         # Track how many real samples are sitting in `_sig` since the last
         # connect/reset. Used to feed only the populated portion to the line
         # view; otherwise pyqtgraph's auto-range latches onto the full t-axis
         # the moment any sample lands and gaps the NaN-filled leading slots.
         self._samples_since_clear = 0
+
+    def _size_spectral(self) -> None:
+        """Size (and clear) the FFT frame and the spectrogram history."""
+        self._n_fft_window = max(2, int(round(self._fs * self._t_fft_s)))
+        self._nfreq = self._n_fft_window // 2 + 1
+        self._spec_cols = max(1, int(self._t_spec_s * self._fs / self._ns_spec))
+        self._spec_data = np.zeros((self._nfreq * self._nch, self._spec_cols), dtype=np.float32)
+        self._fft_map = np.zeros((self._nfreq, self._nch), dtype=np.float32)
+        self._samples_since_spec_update = 0
+        for v in (getattr(self, "_fft_view", None), getattr(self, "_spec_view", None)):
+            if v is not None:
+                v.set_nfreq(self._nfreq)
+
+    def _set_fft_window(self, secs: float) -> None:
+        """FFT window length of the FFT and Spec windows (from either one)."""
+        self._t_fft_s = float(secs)
+        self._size_spectral()
+        for v in (self._fft_view, self._spec_view):
+            v.set_fft_window(self._t_fft_s)
+
+    def _set_spec_span(self, secs: float) -> None:
+        """Spectrogram history length; keeps the newest columns."""
+        self._t_spec_s = float(secs)
+        cols = max(1, int(self._t_spec_s * self._fs / self._ns_spec))
+        new = np.zeros((self._spec_data.shape[0], cols), dtype=np.float32)
+        keep = min(cols, self._spec_cols)
+        new[:, -keep:] = self._spec_data[:, -keep:]
+        self._spec_data, self._spec_cols = new, cols
+        self._spec_view.set_span(self._t_spec_s)
 
     def _maybe_apply_measured_rate(self, fs_measured: Optional[float]) -> None:
         """Adopt the measured whisker rate when it differs by more than 1%.
@@ -189,7 +220,6 @@ class MainWindow(QMainWindow):
         if abs(fs_measured - self._fs) <= 0.01 * self._fs:
             return
         self._set_rate(fs_measured)
-        self._fft_view.set_nfreq(self._nfreq)
         print(f"[MainWindow] whisker rate measured from the ESP32 clock: {fs_measured:.2f} Hz")
 
     # ------------------------------------------------------------------
@@ -402,10 +432,12 @@ class MainWindow(QMainWindow):
         # server / esp32 samples are mV at the ADC; a railed (open) gauge reads ~ full scale
         if client.is_event_stream:
             self._line_view.set_value_format("mV", SAT_CODE * MV_PER_CODE)
-            self._spectrum_view.set_units("mV")
+            for v in (self._spectrum_view, self._fft_view, self._spec_view):
+                v.set_units("mV")
         else:
             self._line_view.set_value_format("", None)
-            self._spectrum_view.set_units("")
+            for v in (self._spectrum_view, self._fft_view, self._spec_view):
+                v.set_units("")
         self._record_btn.setEnabled(True)
         self._set_transport_inputs_enabled(False)
         self._path_label.setText(f"Connected to {client.endpoint_str} — output dir: {self._outpath}")
@@ -688,11 +720,19 @@ class MainWindow(QMainWindow):
         n = int(round(self._spectrum_view.window_s * self._fs))
         if n < 8 or self._samples_since_clear < n:
             return
+        amp = self._amp_spectrum(self._sig[-n:])
+        if amp is not None:
+            self._spectrum_view.update_view(np.fft.rfftfreq(n, 1 / self._fs), amp)
+
+    def _amp_spectrum(self, x: np.ndarray) -> Optional[np.ndarray]:
+        """(nfreq, nch) amplitude of the samples ``x`` (n, nch): mean removed, Hann
+        window, scaled so a sine of amplitude a reads a; None if ``x`` has gaps."""
         # float64: a railed gauge (~1200 mV, constant) leaves ~1e-4 of float32 rounding
-        # after the detrend, which would read as a tiny peak instead of nothing
-        x = self._sig[-n:].astype(np.float64)
+        # after the mean removal, which would read as a tiny peak instead of nothing
+        x = x.astype(np.float64)
         if not np.isfinite(x).all():
-            return
+            return None
+        n = x.shape[0]
         w = np.hanning(n)
         # Mean removal, not a linear detrend: with a 1 s window a 1 Hz sine is one cycle,
         # and a line fitted to one cycle takes ~45 % of its amplitude (5 mV read as 2.7).
@@ -702,20 +742,17 @@ class MainWindow(QMainWindow):
         amp[0] /= 2
         if n % 2 == 0:
             amp[-1] /= 2
-        amp[amp < 1e-9] = 0                    # detrend round-off of a constant (railed) gauge
-        self._spectrum_view.update_view(np.fft.rfftfreq(n, 1 / self._fs), amp)
+        amp[amp < 1e-9] = 0                    # round-off of a constant (railed) gauge
+        return amp
 
     def _update_fft_and_spec(self) -> None:
-        """Recompute the current FFT (matches ``do_fft`` in wavi.m:901-914)."""
-        window = self._sig[-self._n_fft_window:]
-        if not np.isfinite(window).all():
+        """Recompute the current FFT (``do_fft`` in wavi.m:901-914, but with the
+        Spectrum window's method: mean removed, Hann window, amplitude-scaled)."""
+        if self._samples_since_clear < self._n_fft_window:
             return
-
-        x = detrend(window - self._v0, axis=0)
-        Y = np.fft.rfft(x, axis=0)
-        amp = np.abs(Y) / window.shape[0]
-        if amp.shape[0] > 2:
-            amp[1:-1] *= 2
+        amp = self._amp_spectrum(self._sig[-self._n_fft_window:])
+        if amp is None:
+            return
         self._fft_map = amp.astype(np.float32)
 
         # Spectrogram: shift columns left, drop new frame at right edge.
@@ -726,7 +763,7 @@ class MainWindow(QMainWindow):
         if self._fft_view.isVisible():
             self._fft_view.update_view(self._fft_map, self._fs)
         if self._spec_view.isVisible():
-            self._spec_view.update_view(self._spec_data)
+            self._spec_view.update_view(self._spec_data, self._fs, self._ns_spec / self._fs)
 
     def _write_record(self, cleaned: np.ndarray, new_seq: int) -> None:
         assert self._dat_writer is not None

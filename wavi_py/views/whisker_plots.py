@@ -13,7 +13,7 @@ Three pages:
 
 Keys (window-wide; the Keys button lists the subclass's ``KEYS_HELP``):
 = / - zoom X, + / _ zoom Y of the framed tile (the one last under the mouse,
-all tiles if none), . / , zoom Y of all tiles, arrows pan (Up / Down: the
+all tiles if none), . / , zoom Y of all tiles, arrows move the data (Up / Down: the
 framed tile), Y link Y, Z zoom box, R reset view, Space pause, Esc back. The
 punctuation keys are matched by the character typed (an application event
 filter, installed while the window is shown), not as QAction shortcuts: Qt
@@ -310,8 +310,10 @@ class WhiskerPlotsView(ViewWindow):
         # Shortcuts are window-wide (QAction's default WindowShortcut context), so they
         # work whichever plot has focus. A shortcut beats a focused button's own Space
         # handling; the toolbar buttons also take no focus, so Space never clicks one.
-        for key, dx, dy in ((Qt.Key.Key_Left, -_PAN_STEP, 0), (Qt.Key.Key_Right, _PAN_STEP, 0),
-                            (Qt.Key.Key_Up, 0, _PAN_STEP), (Qt.Key.Key_Down, 0, -_PAN_STEP)):
+        # the arrows move the data, not the view: Left slides the traces left (later
+        # times come into view), Up slides them up
+        for key, dx, dy in ((Qt.Key.Key_Left, _PAN_STEP, 0), (Qt.Key.Key_Right, -_PAN_STEP, 0),
+                            (Qt.Key.Key_Up, 0, -_PAN_STEP), (Qt.Key.Key_Down, 0, _PAN_STEP)):
             act = QAction(self)
             act.setShortcut(QKeySequence(key))
             act.triggered.connect(lambda _=False, dx=dx, dy=dy: self._pan(dx, dy))
