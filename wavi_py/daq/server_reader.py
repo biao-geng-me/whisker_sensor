@@ -21,6 +21,10 @@ spectrogram views work unchanged. Differences:
   it arrived, so the GUI can start its buffers over exactly at a mode switch.
   ``info_count`` counts them. An INFO also restarts the rate measurement. The
   firmware's text lines are kept as ``esp32_txt`` = ``(n, msg)``.
+- ESP32 / ADC fault events (``mark`` events with a ``fault`` field, from
+  ``whisker_link/esp32_fault.py``) go in ``bus`` metadata as ``fault_marks``:
+  the newest few as ``(n, mark)``. The current state is in the status record
+  (``server_status["esp32"]["fault"]``).
 - ``start_tee(path)`` copies the raw stream to a local .jsonl — the same
   format as the recording on the Pi, so ``whisker_link.convert`` reads both.
 """
@@ -76,6 +80,8 @@ class ServerReader:
         self._infos: collections.deque = collections.deque(maxlen=8)   # (n, at, info)
         self._n_info = 0
         self._n_txt = 0
+        self._fault_marks: collections.deque = collections.deque(maxlen=64)   # (n, mark)
+        self._n_fault_marks = 0
 
     # ----- lifecycle (same surface as Reader)
 
@@ -201,6 +207,11 @@ class ServerReader:
             if ev.get("src") == "esp32":
                 self._n_txt += 1
                 self._bus.set_metadata(esp32_txt=(self._n_txt, str(ev.get("msg", ""))))
+        elif k == "mark" and isinstance(ev.get("fault"), dict):
+            print(f"[{ev['fault'].get('event', '?')}] {ev.get('text', '')}")
+            self._n_fault_marks += 1
+            self._fault_marks.append((self._n_fault_marks, ev))
+            self._bus.set_metadata(fault_marks=list(self._fault_marks))
         elif k == "ack":
             self._bus.set_metadata(server_ack=ev)
             if not ev.get("ok", True):

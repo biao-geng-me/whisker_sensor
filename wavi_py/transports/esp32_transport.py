@@ -10,6 +10,10 @@ Commands written to the transport are the server's JSON commands. Handled
 locally: ``esp32`` (raw bytes to the firmware), ``esp32_reset`` (RTS pulse =
 pressing EN), ``mark``; ``rec_start`` / ``rec_stop`` are acknowledged and
 otherwise ignored, since the local tee is the only recording here.
+
+ADC / ESP32 faults (``whisker_link/esp32_fault.py``, as in daq_server): the
+status carries ``esp32.fault``, and each fault onset / clear / warning is also
+sent as a ``mark`` event (so it lands in the local .jsonl).
 """
 
 from __future__ import annotations
@@ -25,6 +29,7 @@ import serial
 from wavi_py.transports.base import Transport
 from whisker_link import esp32_frame as ef
 from whisker_link import wire
+from whisker_link.esp32_fault import FaultMonitor, mark_event, mark_text
 from whisker_link.channels import CHANNEL_NAMES
 
 ESP32_BAUD = 921600          # whisker_daq.ino SERIAL_BAUD
@@ -55,6 +60,8 @@ class Esp32SerialTransport(Transport):
         self._n = {"scans": 0, "seq_gaps": 0, "adc_recov": 0, "adc_crc": 0, "adc_stale": 0,
                    "adc_reinit": 0, "adc_sync": 0, "adc_empty": 0}
         self._health: dict | None = None        # latest HEALTH frame (locked scan modes)
+        self._faults = FaultMonitor()
+        self._faults.link(True)
         self._emit(self._hello())
         self._kick()
 
@@ -75,6 +82,10 @@ class Esp32SerialTransport(Transport):
                 self._handle(ev, now)
         if now - self._last_scan > _KICK_S and now - self._last_kick > _KICK_S:
             self._kick()                            # boot banner / text mode / rebooted
+        self._faults.poll(now)
+        for fev in self._faults.take_events():
+            print(f"[esp32] {mark_text(fev)}")
+            self._emit(mark_event(fev, now))
         if now - self._last_status >= 1.0:
             self._emit(self._status(now))
         parts = []
@@ -140,6 +151,7 @@ class Esp32SerialTransport(Transport):
             self._last_scan = now
             self._n["scans"] += 1
             self._scans_since_status += 1
+            self._faults.on_scan(ev.flags, now)
             if ev.flags & ef.FLAG_RECOVERED:
                 self._n["adc_recov"] += 1
             if ev.flags & ef.FLAG_CRC_RETRY:
@@ -156,6 +168,7 @@ class Esp32SerialTransport(Transport):
                         "dur": ev.dur_us, "rail": ev.railmask, "flg": ev.flags, "raw": ev.raw})
         elif isinstance(ev, ef.Text):
             self._emit({"k": "txt", "t": now, "src": "esp32", "msg": ev.text})
+            self._faults.on_text(ev.text, now)
         elif isinstance(ev, ef.Info):
             self._info = dict(ev.__dict__)
             if self._info.get("mode") not in (1, 2):
@@ -175,7 +188,8 @@ class Esp32SerialTransport(Transport):
                           "skipped": self._decoder.n_skipped,
                           "streaming": now - self._last_scan < 1.0,
                           **({"cfg": ef.info_cfg(self._info)} if self._info else {}),
-                          **({"health": self._health} if self._health else {})}}
+                          **({"health": self._health} if self._health else {}),
+                          "fault": self._faults.status(now)}}
 
     def _command(self, cmd: dict) -> None:
         name = cmd.get("cmd")
@@ -184,6 +198,7 @@ class Esp32SerialTransport(Transport):
         if name == "esp32":
             reply["ok"] = self._raw_write(str(cmd.get("data", "")).encode())
         elif name == "esp32_reset":
+            self._faults.expect_reset(now)
             reply["ok"] = self._reset()
         elif name == "mark":
             self._emit({"k": "mark", "t": now, "text": str(cmd.get("text", ""))})

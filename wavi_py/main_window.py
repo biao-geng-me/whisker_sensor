@@ -58,6 +58,8 @@ from wavi_py.scan_mode import (DEFAULT_SELECTS, PRESETS, ModeKeeper, ScanRequest
                                parse_selects)
 from wavi_py.transports.sim_transport import SimSignals
 from wavi_py.views import FftView, ImuView, LineView, SpectrogramView, SpectrumView
+from wavi_py.views.base import alarm_label, show_alarm
+from wavi_py.views.fault_log import FaultLogView
 from wavi_py.views.sim_panel import SimPanel
 from wavi_py.views.spectral_base import FFT_WINDOWS_S
 from whisker_link.channels import SAT_CODE
@@ -142,6 +144,16 @@ class MainWindow(QMainWindow):
         self._pending_switches: list[tuple[int, float]] = []    # (sample index, fs)
         self._legacy_fs: dict[int, float] = {}                  # measured, per select mask
         self._last_status_rec: dict = {}
+
+        # ESP32 / ADC faults (whisker_link/esp32_fault.py, run by the transport or
+        # daq_server): the current state from the status record, the events for
+        # the session's log, and a <recording>.faults.txt next to the .dat
+        self._fault_state: dict = {}
+        self._fault_marks_seen = 0
+        self._n_fault_events = 0
+        self._fault_log = FaultLogView()
+        self._fault_sidecar = None
+        self._fault_sidecar_path: Optional[Path] = None
 
         # recording state
         self._outpath: Path = outpath if outpath else _default_outpath()
@@ -273,6 +285,8 @@ class MainWindow(QMainWindow):
         outer.setSpacing(6)
         self.setCentralWidget(central)
 
+        self._fault_banner = alarm_label()
+        outer.addWidget(self._fault_banner)
         outer.addWidget(self._build_transport_group())
         outer.addWidget(self._build_view_buttons())
         outer.addWidget(self._build_record_row())
@@ -489,8 +503,14 @@ class MainWindow(QMainWindow):
         self._path_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self._path_label.setStyleSheet("QLabel { color: #555; }")
 
+        self._fault_log_btn = QPushButton("Fault log")
+        self._fault_log_btn.setToolTip("ESP32 / ADC faults and warnings this session")
+        self._fault_log_btn.clicked.connect(self._show_fault_log)
+        h = QHBoxLayout()
+        h.addWidget(self._path_label, stretch=1)
+        h.addWidget(self._fault_log_btn)
         v.addWidget(self._progress)
-        v.addWidget(self._path_label)
+        v.addLayout(h)
         return box
 
     # ------------------------------------------------------------------
@@ -553,6 +573,8 @@ class MainWindow(QMainWindow):
         self._info_seen = self._txt_seen = 0
         self._pending_switches = []
         self._last_status_rec = {}
+        self._fault_marks_seen = 0
+        self._set_fault_state({})
         if client.is_event_stream:
             self._keeper.connected()
         self._show_mode_note()
@@ -586,6 +608,7 @@ class MainWindow(QMainWindow):
 
         self._keeper.set_wanted(self._keeper.want, connected=False)
         self._esp32_cfg = None
+        self._set_fault_state({})
         self._show_mode_note()
         self._connect_btn.setText("Connect")
         self._pause_btn.setChecked(False)
@@ -692,9 +715,19 @@ class MainWindow(QMainWindow):
         )
         self._path_label.setText(f"Recording → {fullpath}")
         self._progress.setValue(0)
+        self._fault_sidecar_path = fullpath.with_suffix(".faults.txt")
+        f = self._fault_state
+        if f.get("level") in ("fault", "warn"):     # from before the recording
+            since = datetime.fromtimestamp(f.get("since", 0)).strftime("%H:%M:%S")
+            self._write_fault_sidecar(f"at record start: {f['level']} {f.get('code')}:"
+                                      f" {f.get('msg')} (since {since})")
 
     def _stop_recording(self) -> None:
         self._is_recording = False
+        if self._fault_sidecar is not None:
+            self._fault_sidecar.close()
+            self._fault_sidecar = None
+        self._fault_sidecar_path = None
         if self._client is not None:
             self._client.send_record_stop()
         if self._dat_writer is not None:
@@ -848,6 +881,7 @@ class MainWindow(QMainWindow):
         rows, seq = self._client.imu_bus.read_since(self._imu_last_seq, block=False)
         meta = self._client.bus.get_metadata()
         self._tick_esp32_mode(meta)
+        self._tick_faults(meta)
         self._maybe_apply_measured_rate(meta.get("fs_measured"))
         st = meta.get("server_status") or {}
         if rows is not None:
@@ -861,7 +895,80 @@ class MainWindow(QMainWindow):
         if st and st.get("t", 0) != self._last_status_t:
             self._last_status_t = st.get("t", 0)
             self._last_status_rec = st
+            self._set_fault_state(st.get("esp32", {}).get("fault") or {})
             self._show_status(st)
+
+    # ------------------------------------------------------------------
+    # ESP32 / ADC faults
+    # ------------------------------------------------------------------
+
+    def _tick_faults(self, meta: dict) -> None:
+        """New fault events: the session log, and the recording's sidecar."""
+        for n, mark in meta.get("fault_marks") or ():
+            if n <= self._fault_marks_seen:
+                continue
+            self._fault_marks_seen = n
+            fev = mark.get("fault", {})
+            self._n_fault_events += 1
+            t = datetime.fromtimestamp(fev.get("unix") or datetime.now().timestamp())
+            self._fault_log.append(f"{t:%Y-%m-%d %H:%M:%S}  {fev.get('event', '?'):5s}  "
+                                   f"{mark.get('text', '')}")
+            if self._is_recording:
+                self._write_fault_sidecar(mark.get("text", ""), t)
+        self._update_fault_button()
+
+    def _write_fault_sidecar(self, text: str, t: Optional[datetime] = None) -> None:
+        """One line in <recording>.faults.txt: wall time, the .dat row it falls
+        on (the rows written so far), the event."""
+        if self._fault_sidecar_path is None:
+            return
+        if self._fault_sidecar is None:
+            self._fault_sidecar = open(self._fault_sidecar_path, "a", buffering=1)
+            self._fault_sidecar.write("# ESP32 / ADC fault events during "
+                                      f"{self._fault_sidecar_path.with_suffix('').stem}.dat:"
+                                      " wall time, .dat row (0-based), event\n")
+        row = self._dat_writer.n_written if self._dat_writer is not None else 0
+        t = t or datetime.now()
+        self._fault_sidecar.write(f"{t:%Y-%m-%d %H:%M:%S.%f}"[:-3] + f"  row {row}  {text}\n")
+
+    def _set_fault_state(self, f: dict) -> None:
+        """The banner on the panel and on every view window."""
+        self._fault_state = f
+        level = f.get("level", "ok")
+        text = ""
+        if level in ("fault", "warn"):
+            since = datetime.fromtimestamp(f.get("since", 0)).strftime("%H:%M:%S")
+            if level == "fault":
+                action = f.get("action") or ""
+                text = (f"ADC / ESP32 FAULT since {since}: {f.get('msg', '')}. "
+                        f"{action[:1].upper() + action[1:]}.")
+                if f.get("detail"):
+                    text += f"\nESP32: {f['detail']}"
+                text += ("\nNo valid whisker data while this lasts. The alarm clears after"
+                         " 10 s of clean streaming; the Fault log keeps it.")
+            else:
+                text = (f"ESP32 warning at {since}: {f.get('msg', '')} "
+                        f"(warnings this session: {sum((f.get('warns') or {}).values())};"
+                        " see the Fault log)")
+        show_alarm(self._fault_banner, text, level)
+        for v in (*self._stream_views, self._imu_view):
+            v.set_alarm(text, level)
+        self._update_fault_button()
+
+    def _update_fault_button(self) -> None:
+        n = self._n_fault_events
+        level = self._fault_state.get("level", "ok")
+        if (n, level) == getattr(self, "_fault_btn_shown", None):
+            return
+        self._fault_btn_shown = (n, level)
+        self._fault_log_btn.setText(f"Fault log ({n})" if n else "Fault log")
+        self._fault_log_btn.setStyleSheet(
+            {"fault": "QPushButton { background: #c00000; color: white; font-weight: bold; }",
+             "warn": "QPushButton { background: #f0a000; }"}.get(level, ""))
+
+    def _show_fault_log(self) -> None:
+        self._fault_log.show()
+        self._fault_log.raise_()
 
     def _show_status(self, st: dict) -> None:
         text = self._format_status(st)
@@ -899,6 +1006,9 @@ class MainWindow(QMainWindow):
                 errs += f" sync {e['adc_sync']}"
         if self._keeper.want is not None and self._keeper.note:
             errs += f" | mode: {self._keeper.note}"
+        f = e.get("fault") or {}
+        if f.get("level") == "fault":
+            errs = f"FAULT {f.get('code')} | " + errs
         imu = (f"IMU {hz.get('RAW_IMU', 0):g} Hz | att {hz.get('ATTITUDE', 0):g} Hz | "
                if self._client.transport_kind == "server" else "")
         return (f"{self._client.endpoint_str} | whisker {self._fs:.2f} Hz | {imu}{pi_rec}"
@@ -983,6 +1093,6 @@ class MainWindow(QMainWindow):
             self._disconnect()
         finally:
             for v in (self._line_view, self._spectrum_view, self._fft_view, self._spec_view,
-                      self._imu_view, self._sim_panel):
+                      self._imu_view, self._sim_panel, self._fault_log):
                 v.close()
         super().closeEvent(event)

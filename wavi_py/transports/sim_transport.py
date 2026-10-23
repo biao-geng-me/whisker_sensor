@@ -23,7 +23,18 @@ streaming (the GUI's signal panel, or a script):
   would, so the reader re-measures the rate in one step);
 - a reboot (the ``reboot`` fault): the array comes back in the legacy mode
   with all selects, and streams again ~2 s later, as when the ESP32 transport
-  kicks it with ``B``.
+  kicks it with ``B``;
+- an ADC lock-up (``adc_lockup``, as on the ROV: the ADC stops converting
+  until its PCB is power-cycled): no scans; the legacy scan reports
+  ``[halt #N] UNRECOVERED ...`` every 1.5 s, a locked mode
+  ``[halt] no conversion ...`` every 0.1 s, and a reboot meanwhile reports
+  ``CLOCK readback = 0x00FF (NOT accepted)``. ``pcb_power_cycle`` ends it:
+  ``[halt #N] recovered at L3`` (legacy) and scans again, the first one with
+  the RECOVERED flag.
+
+The ADC / ESP32 fault model (``whisker_link/esp32_fault.py``) runs on these
+events as in the ESP32 transport: ``esp32.fault`` in the status, and a
+``mark`` event per fault onset / clear / warning.
 
 The ``esp32`` command (raw bytes to the firmware) understands the firmware's
 ``S<digits>;`` (mux selects; the outputs of a skipped select read railed),
@@ -54,6 +65,7 @@ from wavi_py.scan_mode import LOCK_DEFAULTS, info_for, lock_params
 from wavi_py.transports.base import Transport
 from whisker_link import esp32_frame as ef
 from whisker_link import wire
+from whisker_link.esp32_fault import FaultMonitor, mark_event
 from whisker_link.channels import CHANNEL_NAMES, NCH, channels_of_selects
 
 RAIL_CODE = (1 << 23) - 1           # a railed (open) gauge: positive full scale
@@ -96,6 +108,7 @@ class SimSignals:
     pending_link_crc: int = 0       # link CRC errors to count
     dropout_until: float = 0.0      # monotonic; no scans before this
     pending_reboot: bool = False
+    adc_locked: bool = False        # the ADC stopped converting (until a PCB power cycle)
     t_ref: float = field(default_factory=time.monotonic)    # drift is zero here
 
     def __post_init__(self) -> None:
@@ -184,7 +197,8 @@ class SimSignals:
 
     def fault(self, kind: str, n: int = 1, secs: float = 3.0) -> None:
         """Inject: recovered / crc_retry / stale / reinit (scan flags), seq_gap,
-        link_crc, dropout (no scans for ``secs``), or reboot (back in legacy)."""
+        link_crc, dropout (no scans for ``secs``), reboot (back in legacy),
+        adc_lockup (the ADC stops converting) or pcb_power_cycle (ends it)."""
         flags = {"recovered": ef.FLAG_RECOVERED, "crc_retry": ef.FLAG_CRC_RETRY,
                  "stale": ef.FLAG_STALE, "reinit": ef.FLAG_REINIT}
         with self.lock:
@@ -198,6 +212,10 @@ class SimSignals:
                 self.dropout_until = time.monotonic() + secs
             elif kind == "reboot":
                 self.pending_reboot = True
+            elif kind == "adc_lockup":
+                self.adc_locked = True
+            elif kind == "pcb_power_cycle":
+                self.adc_locked = False
             else:
                 raise ValueError(f"unknown fault {kind!r}")
 
@@ -256,6 +274,11 @@ class SimTransport(Transport):
         self._mode, self._sel_mask, self._lk = 0, 0xFF, None
         self._streaming_at = 0.0                   # rebooted: not streaming before this (monotonic)
         self._last_health = self._t0
+        self._locked = False                       # ADC lock-up in effect (seen by the firmware)
+        self._n_halt = 0
+        self._next_halt_msg = 0.0
+        self._faults = FaultMonitor()
+        self._faults.link(True, self._t0)
         self._emit(self._hello())
         self._emit(self._info())                   # the transport's 'B' on connect
 
@@ -276,8 +299,16 @@ class SimTransport(Transport):
             self._firmware(self._fw_in.popleft(), now)
         if self.signals.pending_reboot:
             self._reboot(now)
+        self._faults.poll(now)
+        for fev in self._faults.take_events():
+            self._emit(mark_event(fev, now))
         if now < self._streaming_at:               # rebooted, not kicked yet
             self._next_t = self._streaming_at
+            if now - self._last_status >= 1.0:
+                self._emit(self._status(now))
+            return self._drain()
+        if self._adc_locked(now):                  # nothing converts: no scans
+            self._next_t = now + 0.05
             if now - self._last_status >= 1.0:
                 self._emit(self._status(now))
             return self._drain()
@@ -351,6 +382,7 @@ class SimTransport(Transport):
 
     def _say(self, msg: str, now: float) -> None:
         self._emit({"k": "txt", "t": now, "src": "esp32", "msg": msg})
+        self._faults.on_text(msg, now)
 
     def _firmware(self, data: str, now: float) -> None:
         """Bytes written to the ESP32: S<digits>; M<args>; B (others are ignored)."""
@@ -399,6 +431,34 @@ class SimTransport(Transport):
         self._seq = self._tus = 0
         self._streaming_at = now + _REBOOT_S
         self._say("whisker_daq (SIMULATED) rebooted", now)
+        self._say("Device ID      = 0x2405  (ADS131M04)", now)
+        self._say("CLOCK readback = 0x00FF  (NOT accepted)" if self._locked
+                  else "CLOCK readback = 0x0F02  (config ACCEPTED)", now)
+
+    def _adc_locked(self, now: float) -> bool:
+        """Follow SimSignals.adc_locked; while locked, say what the firmware says."""
+        locked = self.signals.adc_locked
+        if locked != self._locked:
+            self._locked = locked
+            self._next_halt_msg = now
+            if not locked:                         # PCB power-cycled: the firmware recovers
+                if not self._mode:
+                    self._n_halt += 1
+                    self._say(f"[halt #{self._n_halt}] recovered at L3  (L1=0 L2=0 L3=1"
+                              f" fail={self._n_halt - 1} crcbad=0 stale=0)", now)
+                self.signals.fault("recovered")
+                self._next_t = now
+        if locked and now >= self._next_halt_msg:
+            if self._mode:
+                self._say(f"[halt] no conversion for 50 ms in "
+                          f"{ef.MODE_NAMES[self._mode]} mode: CLKIN restart + re-init", now)
+                self._next_halt_msg = now + 0.1
+            else:
+                self._n_halt += 1
+                self._say(f"[halt #{self._n_halt}] UNRECOVERED  ID=0x2405 CLOCKrb=0x00FF"
+                          " crcbad=0  -> power-cycle the PCB with the ESP32 already running", now)
+                self._next_halt_msg = now + 1.5
+        return locked
 
     def _health(self) -> dict | None:
         if not self._mode:
@@ -428,6 +488,7 @@ class SimTransport(Transport):
                 self._n[name] += 1
         dt_us = int(round(1e6 / self._rate))
         for k in range(len(t)):
+            self._faults.on_scan(flags if k == 0 else 0, now)
             self._emit({"k": "wsk", "t": now, "seq": self._seq, "tus": self._tus,
                         "dur": int(1e6 / self._rate) if self._mode else 12_300, "rail": rail, "flg": flags if k == 0 else 0,
                         "raw": codes[k].tolist()})
@@ -449,7 +510,8 @@ class SimTransport(Transport):
                           "streaming": now - self._last_scan < 1.0,
                           "cfg": ef.info_cfg(info_for(self._mode, self._sel_mask,
                                                       self._lk).__dict__),
-                          **({"health": health} if health else {})}}
+                          **({"health": health} if health else {}),
+                          "fault": self._faults.status(now)}}
 
     def _command(self, cmd: dict) -> None:
         name = cmd.get("cmd")
