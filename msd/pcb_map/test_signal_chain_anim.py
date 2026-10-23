@@ -163,3 +163,21 @@ def test_adc_noise_per_bit_is_flat(st):
     # datasheet noise ~ 1/sqrt(OSR) at OSR >= 256 -> about the same per-bit noise
     a, b = st["sigmaBit"]["256"], st["sigmaBit"]["4096"]
     assert 0.1e-3 < a < 0.5e-3 and 0.7 < a / b < 1.4
+
+
+def test_controls_never_break_the_animation():
+    """Edit topology, policy and OSR fields, switch every preset and step through each: no exception
+    in any lane (also in the gap before the debounced rebuild), and the speed label follows the slider."""
+    exe = find_chromium()
+    if not exe:
+        pytest.skip("no chromium")
+    env = dict(os.environ, APPIMAGE_EXTRACT_AND_RUN="1")
+    out = subprocess.run([exe, "--headless", "--no-sandbox", "--disable-gpu", "--window-size=1400,800",
+                          "--dump-dom", PAGE.as_uri() + "#uitest&preset=quiet&pause"],
+                         capture_output=True, text=True, timeout=600, env=env).stdout
+    m = re.search(r'<pre id="selftest"[^>]*>(.*?)</pre>', out, re.S)
+    assert m, "no ui test output"
+    r = json.loads(m.group(1).replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">"))
+    assert r["errors"] == [], r["errors"]
+    assert r["steps"] == 16 + 4 * 5 + 3, r
+    assert len(set(r["speedLbl"])) == 3, r["speedLbl"]
