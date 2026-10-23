@@ -125,7 +125,7 @@ Health:
   - conversions, overruns, missed conversions, edgeless reads (DRDY pulse blocked by a read), CRC errors, stale reads, late switches, TX drops, empty slots, resyncs, re-inits and recoveries
 - **Where it shows.** The status record carries it as `esp32.health`. The daq_server log and the wavi_py status line show busy %, max latency and overruns.
 
-CPU: see "Reader core: C0 / C1" below. In C0 (the boot default) the reader and the sender share one core. Frames leave through a TX queue, written in small chunks only when the next DRDY is ≥ 6 µs away, the next conversion doesn't end a slot, and the UART FIFO is nearly empty.
+CPU: see "Reader core: C0 / C1" below. In C1 (the boot default) the reader streams on core 1 and core 0 sends; in C0 (fallback) the reader also sends. Frames leave through a TX queue, written in small chunks only when the next DRDY is ≥ 6 µs away, the next conversion doesn't end a slot, and the UART FIFO is nearly empty.
 
 What to watch on the bench:
 - **Latency in wide mode.** `lat max` must stay below the 32 µs conversion period. An 18-byte read at 11.4 MHz is ~13 µs of clocking plus the driver and ISR overhead.
@@ -168,12 +168,12 @@ The sim runs each FreeRTOS task as a thread, one at a time, on two virtual cores
 
 ## Reader core: C0 / C1 (2026-10-23, bring-up)
 
-While a locked mode streams, the reader runs as its own task on core 1, next to the DRDY ISR. `C0;` (the boot default) has it send its own frames through the paced TX queue, which is the single-core firmware's execution path. `C1;` has it hand the records to core 0, which sends them. Wide mode needs C1: on one core, Serial writes of up to ~80 µs can't fit in T = 32 µs. `C1 <us>;` additionally holds each scan frame until `<us>` after its scan start (windowed TX, 100 µs up to the scan period), so serial activity stays at a fixed phase of the scan. The setting is RAM only. It is meant for the A/B tests until one variant becomes the default.
+While a locked mode streams, the reader runs as its own task on core 1, next to the DRDY ISR. `C1;` (the boot default since round 5) has it hand the records to core 0, which sends them. `C0;` (runtime fallback) has it send its own frames through the paced TX queue, which is the single-core firmware's execution path. Wide mode needs C1: on one core, Serial writes of up to ~80 µs can't fit in T = 32 µs. `C1 <us>;` additionally holds each scan frame until `<us>` after its scan start (windowed TX, 100 µs up to the scan period), so serial activity stays at a fixed phase of the scan. The setting is RAM only. C1 became the default after round 5: quiet noise was 16/16 µV against 35/32 µV in C0. Windowed TX (18/19 µV) gave no gain over free TX.
 
 Layout:
 - **Core 1.** The reader task (priority 23, `lk_reader.cpp`) and the DRDY ISR (`setup()` attaches it on core 1).
 - **Core 0.** The host task, which runs everything that used to be `loop()` except streaming a locked mode: commands, text modes, the legacy scan, and the sending in C1. `Serial.begin` runs there, so the UART ISR is on core 0. Core 0's idle task is taken off the task watchdog, because long diagnostics (`p`, `D`, `r`) run there without yielding, as they did on the unwatched core 1 before.
-- **Handover.** In C1, core 1 hands records (scan, HEALTH, message) to core 0 through a single-producer/single-consumer queue (`lk_xcore.h`, 32 slots).
+- **Handover.** In C1, core 1 hands records (scan, HEALTH, message) to core 0 through a single-producer/single-consumer queue (`lk_xcore.h`, 32 slots). The reader makes no FreeRTOS calls while it streams; core 0 polls the queue every 1 ms tick. With windowed TX, core 0 is awake and polling when the next record is due. The reader's hot path (`lkStep`, `lkCloseScan`, `adsReadFast`, `lkHealthReset`) is in IRAM.
 - **Ownership.** Every command first parks the reader and takes it back to the host core (the park/run handshake in `lk_xcore.h`, with generation numbers). Streaming hands it to core 1 again. While the reader runs, it alone touches SPI, CS, the mux and CLKIN. The host holds the Arduino SPI transaction throughout, so the reader's transfers take the no-lock path and it never changes the SPI clock.
 - **Watchdog.** The reader task is not on the ESP-IDF task watchdog. The host watches its heartbeat (`g_lkBeat`) and restarts the ESP32 if it stops for 3 s while it should run.
 - **ESP-IDF logs.** These would otherwise go raw into UART0, past the Serial driver. A `vprintf` hook captures them, and they go out as framed TEXT `[idf] ...`, at most 10 lines/s with a drop count. `Serial.setDebugOutput(false)` turns off ROM/Arduino debug prints. A crash dump still prints raw.
@@ -204,34 +204,32 @@ Fixes in this round:
 - **Scan flags.** They no longer carry over into the first streamed scan.
 - **adc_diag stream.** It now fails loudly: it stops with an error if no SCAN arrives within 2 s of B, and exits non-zero (3) if a reboot banner, `[reader watchdog]`, a crash line or a park timeout appears.
 
+Bench round 5 (2026-10-23, firmware 6aeb4ef, `r5/`): everything streamed, with link CRC 0, tx_drop 0 and HEALTH during stress. Findings and fixes:
+- **Wide C1: one overrun per second.** 10 min gave overrun 601, lat max 47–54 µs. Every flagged scan was the first scan after a HEALTH frame (597 of 600, spaced exactly 1.004 s, the HEALTH window). In the stress run HEALTH came from core 0 (the partial window at each park), and there were no such overruns. So the cause was the reader's own once-a-second HEALTH work right after a scan end. That work did a ~100 B copy, a queued record and a second `xTaskNotifyGive` right after the scan record's (the only kernel call there, cross-core while core 0 was waking up). Fix: the reader makes no kernel calls at all while streaming, and its hot path is in IRAM. host_sim checks that the streaming reader makes 0 FreeRTOS calls. It does not model kernel-lock contention, so the overrun itself is not reproduced there.
+- **C0 lines at multiples of 3.906 Hz.** These are a 16-scan periodic pattern: folding by scan index mod 16 gives ±60 µV on W2_A/W2_B, and removing it leaves 16 µV, the C1 level. It is in every r5 C0 run and in none before: r2 (69094c2) and r3 (158c314, which already had the UART pacing) are flat. The only 16-scan-periodic change was this round's C0 loop. It called `lkService(2000)`, which returned every 16 conversions (2048 µs), and LCM(2048 µs, 16 ms) = 256 ms = 16 scans. The C0 loop now comes back after every conversion (period T, locked to the scan). The sim's TX-coupling model (`--tx-couple`) can't show this re-entry effect, so the fix is based on the bench correlation and the arithmetic.
+- **The silent missing frame** (`quiet_c0_ab`, seq gap 1). The firmware sent it. On the link, the frame's two sync bytes were replaced by 64 × 0xFF (one USB packet), so the decoder skipped its 116 bytes as loose bytes (`n_junk` 180; CRC failures only count false syncs). `adc_diag stream` now warns about bytes outside frames. The audit of the firmware's drop paths found one uncounted case: a C0 scan closed but not yet packed (`pendingSend`) was discarded when a command parked the reader or the reader re-armed. It is now sent (or counted as `tx_drop` when it can't be). The others were already counted: queue full, the previous scan never got idle time, TX queue full, and the C1 queue full. HEALTH is never dropped. Seq skips from re-arming on the same grid are counted as `resync`.
+
 Not verified on the board yet:
-- the round-3 and round-4 fixes
-- wide in C1 (lat max, overrun 0)
-- the quiet noise with C1 free TX and windowed TX against C0
-- the stress run
+- the round-5 fixes
+- wide C1 overrun 0 for 10 min
+- C0 without the 3.906 Hz lines
 
-In host_sim, the core-1 tick is the remaining risk for wide C1: at 1.5× costs one read per tick collision ends 1 µs after the next conversion. That is handled (no overrun), but it is the margin to watch in `lat_max_us`.
-
-Board test sequence. Power-cycle (or press EN) before each numbered step, so no C1 → C0 switch is involved unless stated. Wait > 3 s after boot before starting a step (the r4 failure needed that). A step is only valid if `adc_diag` exits 0 with no `ERROR:` lines:
+Board test sequence (round 6). Power-cycle (or press EN) where it says so, and wait > 3 s after boot. A step is only valid if `adc_diag` exits 0 with no `ERROR:` lines:
 
 ```powershell
-cd C:\Users\Biao\Projects\whisker_sensor
-arduino-cli compile --fqbn esp32:esp32:esp32 --upload -p COM4 msd\esp32\whisker_daq
-cd msd\esp32
-# 1. fresh boot, quiet C0 (expect stale 0, edgeless 0, no [idf] lines, no junk)
-python adc_diag.py stream --port COM4 --selects 0123457 --core 0 --mode quiet --secs 30 --out quiet_c0.bin
-# 2. fresh boot, wide C1 20 s (expect overrun 0, lat max < 32)
-python adc_diag.py stream --port COM4 --selects 0123457 --core 1 --mode wide --secs 20 --out wide_c1.bin
-# 3. no reboot: C1 -> C0 switch, quiet C0 again (expect the same as step 1)
-python adc_diag.py stream --port COM4 --selects 0123457 --core 0 --mode quiet --secs 30 --out quiet_c0_after_c1.bin
-# 4. fresh boot, wide C1 10 min
-python adc_diag.py stream --port COM4 --selects 0123457 --core 1 --mode wide --secs 600 --out wide_c1_10min.bin
-# 5. fresh boot, quiet OSR 512 A/B: C0, C1 free TX, C1 windowed TX (same session)
-python adc_diag.py stream --port COM4 --selects 0123457 --core 0 --mode quiet --secs 30 --out ab_c0.bin
-python adc_diag.py stream --port COM4 --selects 0123457 --core 1 --mode quiet --secs 30 --out ab_c1.bin
-python adc_diag.py stream --port COM4 --selects 0123457 --core 1 --tx-window-us 100 --mode quiet --secs 30 --out ab_c1w.bin
-# 6. fresh boot, stress: re-send S/C/M/B every second while streaming wide on core 1
-python adc_diag.py stream --port COM4 --selects 0123457 --core 1 --mode wide --secs 60 --resend-every 1 --out stress_c1.bin
+cd C:\Users\Biao\Projects\whisker_sensor\msd\esp32
+# flash (from the shared folder copy, or build: arduino-cli compile --fqbn esp32:esp32:esp32 --upload -p COM4 whisker_daq)
+python -m esptool --chip esp32 --port COM4 --baud 921600 write_flash 0x0 whisker_daq_<commit>_quietboot_c1.merged.bin
+# 1. power-cycle first: quiet, boot default (C1), 30 s
+python adc_diag.py stream --port COM4 --selects 0123457 --secs 30 --out r6_quiet_default.bin
+# 2. no power-cycle needed: wide C1, 20 s
+python adc_diag.py stream --port COM4 --selects 0123457 --core 1 --mode wide --secs 20 --out r6_wide_c1.bin
+# 3. power-cycle first: wide C1, 10 min
+python adc_diag.py stream --port COM4 --selects 0123457 --core 1 --mode wide --secs 600 --out r6_wide_c1_10min.bin
+# 4. no power-cycle needed: quiet C0, 30 s
+python adc_diag.py stream --port COM4 --selects 0123457 --core 0 --mode quiet --secs 30 --out r6_quiet_c0.bin
+# 5. power-cycle first: stress, wide C1, re-send every second, 60 s
+python adc_diag.py stream --port COM4 --selects 0123457 --core 1 --mode wide --secs 60 --resend-every 1 --out r6_stress_c1.bin
 ```
 
 ## First board run of the locked modes (bench, 2026-10-23)

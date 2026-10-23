@@ -75,6 +75,9 @@
  *            125 Hz (quiet periods: multiples of 8000 us, N = period / T must
  *            be whole, so 8000 needs OSR <= 256). Locked modes send a HEALTH
  *            frame each ~1 s. See lk_reader.cpp. Forgotten on reboot.
+ *    C<0|1> [tx_window_us];   WHO SENDS while a locked mode streams (boot C1):
+ *            C1 core 0 sends (optionally <us> after each scan start), C0 the
+ *            reader on core 1 sends its own frames. Forgotten on reboot.
  *  r, D and p restore the normal config (0.8 MHz, OSR 128, SPI_HZ) after,
  *  and put a locked mode back if one was on.
  *  Any text-mode command leaves binary mode. Serial Monitor: set the line
@@ -109,12 +112,13 @@
 
 // ── State ────────────────────────────────────────────────────────────────────
 SPIClass vspi(VSPI);
-// Tasks: the host task (core 0) runs everything here; the locked reader can run
-// on its own task on core 1 (C1, see lk_reader.cpp). C0 (boot default): the
-// host task reads too, as the single-core firmware did.
+// Tasks: the host task (core 0) runs everything here except streaming a locked
+// mode, which the reader task on core 1 does (see lk_reader.cpp). C1 (boot
+// default): core 0 sends the reader's records; C0: the reader sends itself.
 TaskHandle_t g_hostTask = nullptr;
 HostHealth   g_hh = {};
-static uint8_t  g_core  = 0;          // 'C': 0 = reader on the host core, 1 = own core
+static uint8_t  g_core  = 1;          // 'C': 1 = core 0 sends (boot default since 2026-10-23
+                                      // r5: quiet noise 16 uV vs 35 in C0), 0 = the reader sends
 static uint32_t g_txWin = 0;          // 'C1 <us>': windowed TX offset (0 = free)
 
 float outV    [NUM_OUT + 1];   // latest voltage, indexed by OUT number
@@ -1685,8 +1689,8 @@ static void hostSetup() {
     Serial.println("          S<digits>;=scan only these selects (S; = all 8)");
     Serial.println("          M<0|1|2> [settle_us] [osr] [period_us] [spi];=scan mode: 0 legacy"
                    " 76 Hz, 1 quiet 62.5 Hz (OSR 512), 2 wide 250 Hz");
-    Serial.println("          C<0|1> [tx_window_us];=who sends while streaming: C0 the reader"
-                   " itself (boot), C1 core 0; C1 <us> sends frames <us> after the scan start");
+    Serial.println("          C<0|1> [tx_window_us];=who sends while streaming: C1 core 0 (boot),"
+                   " C0 the reader itself; C1 <us> sends frames <us> after the scan start");
 }
 
 // ── ESP-IDF log capture ─────────────────────────────────────────────────────
@@ -1778,6 +1782,8 @@ static void hostSendRecord(const XRec &r) {
 // (C1 <us>); returns early if that is more than ~1.5 ms off (the caller sleeps
 // a tick and comes back).
 #define TX_LATE_US  200
+static uint32_t g_nextScanEnd = 0;     // C1: when the next scan record is due (grid time)
+static bool     g_haveNextEnd = false;
 static void hostDrain(bool window) {
     while (const XRec *q = g_xq.peek()) {
         if (window && q->kind == XR_SCAN && g_lk.txWinUs) {
@@ -1788,6 +1794,7 @@ static void hostDrain(bool window) {
         }
         XRec r;
         g_xq.pop(r);
+        if (r.kind == XR_SCAN) { g_nextScanEnd = r.tUs + 2 * r.durUs; g_haveNextEnd = true; }
         uint32_t w0 = micros();
         hostSendRecord(r);
         uint32_t dt = micros() - w0;
@@ -1804,7 +1811,12 @@ static bool hostTakeBack() {
         return false;
     }
     txqFlushBlocking();                      // what the reader queued in C0
+    if (g_lk.pendingSend) {                  // C0: a closed scan it hadn't packed yet
+        g_lk.pendingSend = false;
+        send_scan();
+    }
     hostDrain(false);                        // what it handed over in C1
+    g_haveNextEnd = false;
     if (g_mode == 'B') lkFlushHealth();      // the partial HEALTH window
     return true;
 }
@@ -1845,8 +1857,8 @@ static void core_cmd() {
     long v[2] = {-1, 0};
     int n = parseLongs(buf, v, 2);
     if (n < 1 || v[0] < 0 || v[0] > 1 || (v[0] == 1 && v[1] && (v[1] < 100 || v[1] > 60000))) {
-        logf("C: usage C<0|1> [tx_window_us];  the reader streams on core 1; C0 (boot) it sends"
-             " its frames itself, C1 core 0 sends them; C1 <100-60000> sends each scan frame"
+        logf("C: usage C<0|1> [tx_window_us];  the reader streams on core 1; C1 (boot) core 0"
+             " sends its frames, C0 it sends them itself; C1 <100-60000> sends each scan frame"
              " that long after the scan start (shorter than the scan period)\n");
         return;
     }
@@ -1920,9 +1932,20 @@ static void hostLoop() {
         }
         hostWatchReader();
         if (g_core == 1) {
+            // The reader makes no kernel calls while it streams (bench r5: its
+            // second xTaskNotifyGive at each 1 s HEALTH push coincided with one
+            // overrun per HEALTH window in wide mode), so this core polls the
+            // queue every tick. Windowed TX: be awake and polling when the next
+            // record is due, so its window isn't missed.
             hostDrain(true);
             logqDrain(2);
-            ulTaskNotifyTake(pdTRUE, 1);     // the next record, or one tick
+            if (g_lk.txWinUs && g_haveNextEnd &&
+                (int32_t)(g_nextScanEnd - micros()) < 1500) {
+                while (!g_xq.ready() && (int32_t)(g_nextScanEnd + 2000 - micros()) > 0) {}
+                if (!g_xq.ready()) g_haveNextEnd = false;   // lost track (re-init): re-learn
+                return;
+            }
+            vTaskDelay(1);
         } else {
             vTaskDelay(2);                   // the reader sends; this core only watches
         }

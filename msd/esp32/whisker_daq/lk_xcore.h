@@ -23,7 +23,8 @@ struct XQueue {
     T slot[N];
 
     // Producer. false = full (the record is not queued; the caller counts it).
-    bool push(const T &r) {
+    // Always inlined, so it runs from the caller's memory (the reader's is IRAM).
+    __attribute__((always_inline)) inline bool push(const T &r) {
         uint32_t h = __atomic_load_n(&head, __ATOMIC_RELAXED);
         uint32_t t = __atomic_load_n(&tail, __ATOMIC_ACQUIRE);
         if (h - t >= N) return false;
@@ -33,7 +34,7 @@ struct XQueue {
         return true;
     }
     // Producer: room for one more?
-    bool full() const {
+    __attribute__((always_inline)) inline bool full() const {
         return __atomic_load_n(&head, __ATOMIC_RELAXED) -
                __atomic_load_n(&tail, __ATOMIC_ACQUIRE) >= N;
     }

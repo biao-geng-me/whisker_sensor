@@ -77,7 +77,7 @@ static inline bool drdyLowFast() { return !((REG_READ(GPIO_IN_REG) >> PIN_DRDY) 
 
 // One 18-byte frame: CS by register, the SPI driver's no-lock transfer (the
 // transaction is held all the time), table CRC. Same result as ads_read_all.
-static uint32_t adsReadFast(long ch[4], bool *crcOk) {
+static uint32_t IRAM_ATTR adsReadFast(long ch[4], bool *crcOk) {
     static const uint32_t zeros[5] = {0, 0, 0, 0, 0};
     uint32_t w[5];                                   // word-aligned for the driver
     REG_WRITE(GPIO_OUT_W1TC_REG, 1UL << PIN_CS);
@@ -136,7 +136,7 @@ void lkClearScan() {
     memset(g_lk.taint, 0, sizeof(g_lk.taint));
 }
 
-void lkHealthReset() {
+void IRAM_ATTR lkHealthReset() {
     memset(&g_lk.h, 0, sizeof(g_lk.h));
     g_lk.h.t0Us = micros();
 }
@@ -148,7 +148,11 @@ void lkRearm(bool newGrid) {
     g_lk.waitBoundary = true;
     g_lk.lastK = -1;
     g_lk.curSel = 0xFF;
-    g_lk.pendingSend = false;
+    if (g_lk.pendingSend) {                  // a closed scan not packed yet (C0): send it,
+        if (g_lk.streaming) send_scan();     // don't drop it silently (bench r5 audit)
+        else g_lk.h.txDrop++;
+        g_lk.pendingSend = false;
+    }
     lkClearScan();
     g_lk.scanFlags = 0;                      // nothing of an interrupted scan carries over
     drdyResync();
@@ -212,7 +216,7 @@ static void lkMsg(uint32_t code, uint32_t arg) {
     if (lkToHost()) {
         XRec r;
         r.kind = XR_MSG; r.mode = g_lk.mode; r.msg[0] = code; r.msg[1] = arg;
-        if (g_xq.push(r)) xTaskNotifyGive(g_hostTask);
+        g_xq.push(r);                        // (no notify: the host polls each tick)
         return;
     }
     char buf[120];
@@ -232,7 +236,7 @@ static void lkSendHealth() {               // C0: straight into the TX queue
 
 // The scan that just ended (its last conversion was read): averages -> outRaw,
 // queue the frame (sent from idle time), next scan.
-static void lkCloseScan(uint32_t tEnd) {
+static void IRAM_ATTR lkCloseScan(uint32_t tEnd) {
     for (uint8_t i = 0; i < g_lk.nslot; i++) {
         uint8_t sel = g_lk.slotSel[i];
         if (!g_lk.cnt[i]) { g_lk.scanFlags |= FLAG_EMPTY; g_lk.h.empty++; continue; }
@@ -260,8 +264,7 @@ static void lkCloseScan(uint32_t tEnd) {
         r.seq = g_scans; r.tUs = g_scanT0; r.durUs = g_scanDur;
         r.txAt = g_scanT0 + g_scanDur + g_lk.txWinUs;
         for (int o = 1; o <= NUM_OUT; o++) r.raw[o] = (int32_t)outRaw[o];
-        if (g_xq.push(r)) xTaskNotifyGive(g_hostTask);
-        else g_lk.h.txDrop++;
+        if (!g_xq.push(r)) g_lk.h.txDrop++;  // (no notify: see lkTaskMain)
     } else if (g_lk.streaming) {
         if (g_lk.pendingSend) g_lk.h.txDrop++;      // the previous one never got idle time
         g_lk.pendingSend = true;
@@ -280,7 +283,6 @@ static void lkCloseScan(uint32_t tEnd) {
             g_xq.hwm = 0;
             r.h = g_lk.h;
             g_xq.push(r);
-            xTaskNotifyGive(g_hostTask);
         } else if (g_lk.streaming) {
             lkSendHealth();
         }
@@ -294,7 +296,7 @@ static inline int32_t lkIndex(uint32_t t) {
 }
 
 // Reads one conversion if one is waiting. 0 = none waiting, 1 = handled.
-static int lkStep() {
+static int IRAM_ATTR lkStep() {
     uint32_t e, t;
     bool edge;
     if ((int32_t)(g_drdyEdges - g_drdyTaken) > 0) {
@@ -540,7 +542,11 @@ void lkService(uint32_t budgetUs) {
 // host owns it while the task is parked (text modes, commands, legacy scan),
 // the task while it streams a locked mode. In C0 the task also sends (the
 // paced TX queue, as the single-core firmware did on core 1); in C1 it hands
-// records to the host core. The task busy-polls while it runs; it is NOT on
+// records to the host core. While it runs it makes no FreeRTOS calls at all (no
+// notifies: the host polls the queue each tick; bench r5: the extra notify at
+// the 1 s HEALTH push came with one overrun per window in wide mode), and its
+// hot path (lkStep, lkCloseScan, adsReadFast) is in IRAM, so a rarely taken
+// branch can't stall on flash cache misses. The task busy-polls; it is NOT on
 // the task watchdog (bench r3: esp_task_wdt_reset from it logged "task not
 // found" into the stream); the host watches g_lkBeat instead and restarts the
 // ESP32 if the reader stops for LK_BEAT_TIMEOUT_MS. Priority 23: above
@@ -570,7 +576,11 @@ static void lkTaskMain(void *) {
         }
         g_lkBeat = g_lkBeat + 1;
         if (!g_lk.txHost) {                // C0: read and send, as the single-core loop
-            lkService(2000);
+            // budget 0: back here after every conversion, so this loop runs at the
+            // conversion rate, locked to the scan. With 2000 it came back every
+            // 16 conversions (2048 us), a 256 ms = 16-scan cycle against the 16 ms
+            // scan that moved the TX timing: bench r5, C0 lines at k x 3.906 Hz.
+            lkService(0);
             continue;
         }
         if (lkStep()) continue;

@@ -863,6 +863,10 @@ def cmd_stream(a) -> int:
     if resends:
         print(f"stress: the setup was re-sent {resends} times ({len([x for x in scans if x.flags])}"
               f" flagged scans in total)")
+    if dec.n_junk:
+        print(f"WARNING: {dec.n_junk} bytes arrived outside frames and {gaps} seq gap(s): bytes"
+              " were lost or corrupted on the link (bench r5: 64 x 0xFF replaced a frame's"
+              " sync bytes; the firmware had sent it)", file=sys.stderr)
     if watch.problems:
         print(f"ERROR: this run is NOT valid ({len(watch.problems)} problem(s)):", file=sys.stderr)
         for p in dict.fromkeys(watch.problems):
@@ -934,7 +938,7 @@ def main(argv=None) -> int:
 
     p = sub.add_parser("stream", parents=[mo], help="stream and print HEALTH + scan stats")
     p.add_argument("--core", type=int, choices=(0, 1),
-                   help="who sends while streaming: 0 the reader itself (boot default), 1 core 0")
+                   help="who sends while streaming: 1 core 0 (boot default), 0 the reader itself")
     p.add_argument("--tx-window-us", type=int,
                    help="with --core 1: send each scan frame this long after the scan start"
                         " (100 us .. the scan period; default: as soon as it is ready)")

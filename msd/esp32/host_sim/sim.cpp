@@ -35,6 +35,7 @@
 //        [--board-costs] (Serial/UART costs calibrated to the bench; apply before --cost)
 //        [--cost NAME=US] (one CPU cost, e.g. ser_call=55; names as in struct Costs)
 //        [--tick-phase US] (core 1's tick offset vs core 0's, default 437)
+//        [--tx-couple CODES] (inputs offset while UART0 transmits)
 //        [--fail-task NAME]  (xTaskCreatePinnedToCore fails for that task)
 //        [--idf-log T:TEXT]  (an ESP-IDF component logs "E (ms) TEXT" at T)
 //        [--trace T0:T1]  (one stderr line per reader step between T0 and T1 s)
@@ -128,11 +129,26 @@ static void pinsChanged() {
     muxUpdate(1, s2);
 }
 
+// --tx-couple CODES: while UART0 transmits (its FIFO isn't empty), every input
+// is offset by CODES - a stand-in for the digital-activity pickup the bench
+// sees. A TX schedule locked to the scan turns it into a constant offset per
+// channel; one that drifts against the scan turns it into noise / lines.
+static double sim_txCouple = 0;
+static std::deque<std::pair<double, double>> sim_txOn;     // FIFO non-empty intervals
+static double txCoupling(double t) {
+    for (auto it = sim_txOn.rbegin(); it != sim_txOn.rend(); ++it) {
+        if (t >= it->first && t < it->second) return sim_txCouple;
+        if (it->second < t) break;
+    }
+    return 0;
+}
+
 static double analog(int ch, double t) {
     const MuxHist &h = sim_mux[ch < 2 ? 1 : 0];
-    if (t < h.tsw) return outValue(SIM_OUT_OF[ch][h.prev]);
+    double c = sim_txCouple ? txCoupling(t) : 0;
+    if (t < h.tsw) return outValue(SIM_OUT_OF[ch][h.prev]) + c;
     double vn = outValue(SIM_OUT_OF[ch][h.cur]), vp = outValue(SIM_OUT_OF[ch][h.prev]);
-    return vn + KICK * (vp - vn) * exp(-(t - h.tsw) / TAU);
+    return vn + KICK * (vp - vn) * exp(-(t - h.tsw) / TAU) + c;
 }
 
 // ---------------------------------------------------------------- ADC
@@ -266,6 +282,14 @@ static double uartIsr() {                // returns its cost, us
     sim_uRing -= m;
     sim_uFifo += m;
     sim_uIsrs++;
+    if (sim_txCouple) {
+        double end = sim_t + sim_uFifo / BAUD_BPS * 1e6;
+        if (!sim_txOn.empty() && sim_t <= sim_txOn.back().second)
+            sim_txOn.back().second = std::max(sim_txOn.back().second, end);
+        else
+            sim_txOn.push_back({sim_t, end});
+        while (sim_txOn.size() > 2 && sim_txOn.front().second < sim_t - 5000) sim_txOn.pop_front();
+    }
     return C.uisr + C.uisr_byte * m;
 }
 
@@ -424,8 +448,16 @@ void vTaskDelete(TaskHandle_t h) {
     throw SimExit();
 }
 static double nextTickAfter(double t, uint32_t ticks) { return (std::floor(t / 1000) + ticks) * 1000; }
-void vTaskDelay(TickType_t ticks) { advance(nextTickAfter(sim_t, ticks ? ticks : 1) - sim_t); }
+static bool (*sim_readerRunning)() = nullptr;   // set in main (needs the sketch's g_xc)
+static uint64_t sim_readerKernelCalls = 0;
+static void kernelCall() {
+    if (sim_readerRunning && sim_self && !strcmp(sim_self->name, "lkReader") && sim_readerRunning())
+        sim_readerKernelCalls++;
+}
+void vTaskDelay(TickType_t ticks) {
+    kernelCall(); advance(nextTickAfter(sim_t, ticks ? ticks : 1) - sim_t); }
 uint32_t ulTaskNotifyTake(BaseType_t clear, TickType_t ticks) {
+    kernelCall();
     SimTask *me = sim_self;
     advance(C.notify);
     if (!me->notify && ticks) {
@@ -440,6 +472,7 @@ uint32_t ulTaskNotifyTake(BaseType_t clear, TickType_t ticks) {
     return n;
 }
 void xTaskNotifyGive(TaskHandle_t h) {
+    kernelCall();
     SimTask *t = (SimTask *)h;
     if (t) {
         t->notify++;
@@ -655,6 +688,7 @@ int main(int argc, char **argv) {
         else if (a == "--no-pulse") sim_pulse = false;
         else if (a == "--board-costs") boardCosts();
         else if (a == "--fail-task") sim_failTask = next();
+        else if (a == "--tx-couple") sim_txCouple = atof(next().c_str());
         else if (a == "--tick-phase") sim_tickPhase = atof(next().c_str());
         else if (a == "--idf-log") {
             std::string v = next();
@@ -691,6 +725,7 @@ int main(int argc, char **argv) {
     std::stable_sort(sim_rx.begin(), sim_rx.end(),
                      [](const auto &x, const auto &y) { return x.first < y.first; });
     sim_endUs = endS * 1e6;
+    sim_readerRunning = [] { return (__atomic_load_n(&g_xc.state, __ATOMIC_RELAXED) & 1) != 0; };
     sim_core[1].nextTick = 1000 + sim_tickPhase;   // each core has its own tick timer
     sim_level[P_CS] = 1;
     adc.reset();
@@ -714,12 +749,13 @@ static void simFinish() {
     fclose(f);
     fprintf(stderr, "sim: %.3f s virtual, %llu conversions, %llu blocked DRDY pulses, %llu FIFO"
             " overwrites, %llu narrow pulses, %llu UART ISRs, %llu late DRDY ISRs, %zu bytes out,"
-            " twdt errors %llu, raw log lines %llu\n",
+            " twdt errors %llu, raw log lines %llu, reader kernel calls %llu\n",
             sim_t / 1e6,
             (unsigned long long)adc.nConv, (unsigned long long)adc.nBlocked,
             (unsigned long long)adc.nOverwrite, (unsigned long long)adc.nPulse,
             (unsigned long long)sim_uIsrs, (unsigned long long)sim_isrLate, sim_tx.size(),
-            (unsigned long long)sim_twdtErrors, (unsigned long long)sim_rawLogLines);
+            (unsigned long long)sim_twdtErrors, (unsigned long long)sim_rawLogLines,
+            (unsigned long long)sim_readerKernelCalls);
     fflush(stderr);
     _exit(sim_exitCode);
 }

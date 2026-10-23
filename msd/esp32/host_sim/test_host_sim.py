@@ -54,7 +54,7 @@ def run(sim, out: Path, *args: str):
     r = subprocess.run([str(sim), "--out", str(out), *args], capture_output=True, text=True,
                        timeout=300)
     assert r.returncode == 0, r.stderr
-    assert "twdt errors 0, raw log lines 0" in r.stderr, r.stderr[-500:]
+    assert "twdt errors 0, raw log lines 0, reader kernel calls 0" in r.stderr, r.stderr[-500:]
     dec = ef.Decoder()
     evs = list(dec.feed(out.read_bytes()))
     LAST.update(junk=dec.n_junk, stderr=r.stderr)
@@ -406,3 +406,27 @@ def test_stress_resend_late_start_keeps_health(sim, tmp_path):
     assert len(health) >= 5 and all(h.core == 1 for h in health)
     assert all(200 <= h.window_ms <= 1100 for h in health)
     assert len([s for s in scans if s.t_us < 6.0e6]) > 150      # the first B streams
+
+
+def test_c1_is_boot_default(sim, tmp_path):
+    """Since 2026-10-23 r5: quiet on C1 (core 0 sends) after boot, no C command."""
+    scans, infos, health, _ = run(sim, tmp_path / "o.bin", "--end", "7", "--board-costs",
+                                  "--cmd", "4.0:S0123457;B")
+    assert ef.info_cfg(dict(infos[-1].__dict__))["mode_name"] == "quiet"
+    assert health and all(h.core == 1 for h in health)
+    assert len(scans) > 150 and not [s for s in scans[1:] if s.flags]
+
+
+def test_c0_pending_scan_not_lost_on_command(sim, tmp_path):
+    """Bench r5 audit: in C0 a closed scan waits (pendingSend) for idle time to be
+    packed; a command that parks the reader then must send it, not drop it."""
+    cmds = ["--cmd", "4.0:S0123457;C0;B"]
+    for i in range(10):
+        cmds += ["--cmd", f"{4.5 + i * 0.2371:.4f}:S0123457;"]
+    scans, _, health, _ = run(sim, tmp_path / "o.bin", "--end", "7.5", "--board-costs", *cmds)
+    gaps = [(a.seq, b.seq) for a, b in zip(scans, scans[1:]) if b.seq != a.seq + 1]
+    lost = sum(b - a - 1 for a, b in gaps)
+    # each S re-arms on the same grid: the partial scan it interrupts is skipped and
+    # counted as a resync; every scan that was closed must arrive
+    assert lost <= sum(h.resync for h in health) + 1, (gaps, [h.resync for h in health])
+    assert sum(h.tx_drop for h in health) == 0
