@@ -358,6 +358,20 @@ def test_beat_dead_adc_vs_hung_esp32():
     assert [e["code"] for e in mon.take_events() if e["event"] == "fault"] == ["esp32_hung"]
 
 
+def test_beat_keeps_the_firmware_line_as_the_detail():
+    """The banner shows the firmware's UNRECOVERED line, not the later heartbeat summary."""
+    clk, mon = make()
+    mon.link(True)
+    stream(clk, mon, 3)
+    mon.on_beat(_beat(3000))
+    beats(clk, mon, 3, 4000, edges=0)                        # heartbeat first: its summary
+    assert mon.status()["detail"].startswith("heartbeat:")
+    mon.on_text(UNRECOVERED)
+    beats(clk, mon, 3, 7000, edges=0, flags=ef.BEAT_ADC_DOWN, unrec=1)
+    st = mon.status()
+    assert st["code"] == "adc_unrecovered" and st["detail"] == UNRECOVERED, st
+
+
 def test_beat_keeps_alive_without_scans_and_old_firmware_is_no_scans():
     clk, mon = make()
     mon.link(True)

@@ -22,7 +22,9 @@ Levels:
     ``adc_unrecovered`` / ``adc_not_converting`` also from the heartbeat (BEAT frame,
                          firmware since 2026-10-23 brief 6): its ADC-down flag, or no
                          DRDY edges in ``DEAD_BEATS`` beats in a row (the ESP32 is
-                         alive, the ADC isn't);
+                         alive, the ADC isn't). The heartbeat summary is the
+                         fault's detail only until a firmware line (``UNRECOVERED ...``)
+                         gives one; a later heartbeat never replaces that line;
     ``esp32_hung``       the firmware sends heartbeats, the link is up, and nothing
                          (no beat, scan or text) came for ``BEAT_LOST_S``;
     ``no_scans``         no scan for ``NO_SCAN_S`` while the link is up;
@@ -69,6 +71,7 @@ FLAG_WINDOW_S = 10.0
 FLAG_WARN_FRAC = 0.01
 FLAG_MIN_SCANS = 100
 HISTORY_N = 10           # events kept in status()["history"]
+_BEAT_DETAIL = "heartbeat: "   # detail of a heartbeat-raised fault (a firmware line beats it)
 BEAT_LOST_S = 5.0        # heartbeat firmware: nothing at all this long: ESP32 hung
 DEAD_BEATS = 2           # beats in a row with no DRDY edge: ADC not converting
 
@@ -246,7 +249,7 @@ class FaultMonitor:
                 self._warn(now, "esp32_reboot", f"ESP32 rebooted (reset reason {name})",
                            f"uptime {b.uptime_ms} ms")
             self._alive = now
-        detail = (f"heartbeat: {ef.MODE_NAMES.get(b.mode, b.mode)} mode, {b.conv_hz:.0f} DRDY/s,"
+        detail = (f"{_BEAT_DETAIL}{ef.MODE_NAMES.get(b.mode, b.mode)} mode, {b.conv_hz:.0f} DRDY/s,"
                   f" halts {b.halts}, unrecovered {b.unrecovered}, CLOCKrb=0x{b.clock_rb:04X}")
         if b.adc_down:
             self._raise(now, "adc_unrecovered", "ADC not converting (halt not recovered)", detail)
@@ -339,7 +342,11 @@ class FaultMonitor:
         if f is not None:
             if code == f["code"]:
                 f["repeats"] += 1
-                f["detail"] = detail or f["detail"]
+                # the firmware's own line (e.g. "[halt #N] UNRECOVERED ... CLOCKrb") stays:
+                # a later heartbeat summary says less (and reads 0 DRDY/s for as long as it lasts)
+                if detail and not (detail.startswith(_BEAT_DETAIL) and f["detail"]
+                                   and not f["detail"].startswith(_BEAT_DETAIL)):
+                    f["detail"] = detail
                 if code in ("no_scans", "link_down", "adc_not_converting", "esp32_hung"):
                     f["msg"] = msg                 # the silence keeps growing
                 return
