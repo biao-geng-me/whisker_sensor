@@ -14,6 +14,8 @@ The ADC stops converting, and no software recovery brings it back. The firmware'
 
 The ROV bring-up on 2026-10-15/16 (msd/docs/bluerov_bringup_2026-10.md) powered the PCB from the vehicle 5 V and the ESP32 from the Pi USB, and streamed with zero scan gaps; no lock-up is recorded there. That was firmware before the halt/UNRECOVERED reporting, so a lock-up would have shown only as missing scans.
 
+Related, not a lock-up: on 2026-10-26 (firmware 2e9d8dc, first full 12-gauge set, PCB drawing 2.14 W) the bench supply was first set to a too-low current limit and the 5 V sagged below 4.7 V. wavi_py showed many red banners; the session counters afterwards read adc_reinits 580 (beat), adc_reinit 148 and adc_crc 165 (host), with halts 0 and unrecovered 0. So repeated supply sags made the ADC power-on-reset (STATUS RESET) and the firmware re-initialised it each time, but never produced the CLOCKrb=0x00FF state. That is a data point against a plain sag as the trigger (hypothesis 2), although the sag depth and duration weren't measured. Details: /scratch/bigeme/whisker_dev/bench_1026/README.md.
+
 ## What is known
 
 - **No hardware reset on this board.** The schematic (MAIN.SchDoc in /shared/rc/whiskers/MSD_P25937/, traced with /scratch/bigeme/whisker_dev/sch/net.py) shows U4 (ADS131M04, TSSOP-20) pin 11 SYNC/RESET tied straight to the 3V3 net. AVDD (pin 1) and DVDD (pin 20) share that 3V3 with the bridge excitation. CS → PIN27, CLKIN (pin 17) → PIN07, DRDY (pin 13) → PIN29. The headers carry no reset line, and GPIO17 (`PIN_RESET` in daq_common.h, `HAVE_HW_RESET 0`) connects to nothing.
