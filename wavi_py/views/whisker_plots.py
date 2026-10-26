@@ -25,6 +25,14 @@ back with ``set_paused`` / ``set_stream_controls_enabled``. The status bar's
 right side shows the panel's stream status line (``set_stream_status``); its
 left side keeps transient messages (probe readout, hints).
 
+Y scale (toolbar "Y auto" / "Y fixed" and its value box): auto is pyqtgraph's
+per-plot auto-range (Link Y: one range fitted over all tiles; stacked: a fixed
+gain the Y keys change). Fixed gives every tile, the single plot and every
+stacked row the same Y range, ``_fixed_range`` from the value box(es), so the
+channels can be compared by eye; the Y keys then change that value, and Reset
+view puts the fixed range back (it stays fixed). Typing a value switches to
+fixed. Subclasses set the boxes' units and ``_fixed_range``.
+
 Every plot has a value label in its corner (on the right of each row in the
 stacked layout), refreshed at ~7 Hz; the subclass supplies the text.
 
@@ -47,8 +55,9 @@ import time
 import numpy as np
 from PyQt6.QtCore import QEvent, QPointF, QRectF, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction, QFont, QFontMetricsF, QKeySequence, QPainter, QPixmapCache
-from PyQt6.QtWidgets import (QApplication, QGraphicsRectItem, QLabel, QMessageBox,
-                             QStackedWidget, QToolBar, QWidget)
+from PyQt6.QtWidgets import (QAbstractSpinBox, QApplication, QComboBox, QDoubleSpinBox,
+                             QGraphicsRectItem, QLabel, QLineEdit, QMessageBox, QStackedWidget,
+                             QToolBar, QWidget)
 
 import pyqtgraph as pg
 
@@ -134,6 +143,16 @@ class _ElidedLabel(QLabel):
         QPainter(self).drawText(r, int(self.alignment()), text)
 
 
+class _ValueBox(QDoubleSpinBox):
+    """A spin box that shows 10 as "10", not "10.000"."""
+
+    def textFromValue(self, v: float) -> str:  # noqa: N802 — Qt naming
+        loc = self.locale()
+        text = loc.toString(float(v), "f", self.decimals()).replace(loc.groupSeparator(), "")
+        dp = loc.decimalPoint()
+        return text.rstrip("0").rstrip(dp) if dp in text else text
+
+
 class WhiskerPlotsView(ViewWindow):
     pauseToggled = pyqtSignal(bool)
     resetRequested = pyqtSignal()
@@ -142,6 +161,7 @@ class WhiskerPlotsView(ViewWindow):
     X_LABEL = ("X", "")              # (label, units) of the X axis
     KEYS_HELP = ""
     VALUE_AXIS_LABEL = ""            # title of the stacked layout's value-label column
+    STACKED_CENTRE = 0.0             # fixed Y, stacked: the row offset sits this far up the range
     STACKED_LABEL_SAMPLE = "A -0000.0   B -0000.0"   # widest stacked value label
 
     def __init__(self, nsensor: int, nch: int):
@@ -300,7 +320,10 @@ class WhiskerPlotsView(ViewWindow):
         self._act_pause.toggled.connect(self._on_pause_action)
 
         for a in (self._act_grid, self._act_link_y, self._act_zoom, self._act_reset,
-                  *self._view_actions(), self._act_probe, self._act_all):
+                  *self._view_actions()):
+            tb.addAction(a)
+        self._build_y_scale(tb)
+        for a in (self._act_probe, self._act_all):
             tb.addAction(a)
         tb.addSeparator()
         for a in (self._act_pause, *self._stream_actions()):
@@ -320,9 +343,44 @@ class WhiskerPlotsView(ViewWindow):
             self.addAction(act)                    # window-wide, not on the toolbar
         for a in tb.actions():
             w = tb.widgetForAction(a)
-            if w is not None:
+            if w is not None and not isinstance(w, QDoubleSpinBox):
                 w.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.set_stream_controls_enabled(False)
+
+    def _build_y_scale(self, tb: QToolBar) -> None:
+        self._y_mode = QComboBox()
+        self._y_mode.addItems(["Y auto", "Y fixed"])
+        self._y_mode.setToolTip("Y auto: each plot fits its data. Y fixed: the same Y range for "
+                                "every plot, so the channels compare by eye")
+        self._y_mode.currentIndexChanged.connect(self._on_y_mode)
+        self._y_top = self._y_box()
+        self._y_span = self._y_box()
+        tb.addWidget(self._y_mode)
+        tb.addWidget(self._y_top)
+        self._act_y_span = tb.addWidget(self._y_span)
+        self._act_y_span.setVisible(False)              # subclasses with a second value show it
+
+    def _y_box(self) -> QDoubleSpinBox:
+        """A value box of the fixed Y range: takes typing only while clicked into."""
+        b = _ValueBox()
+        b.setStepType(QAbstractSpinBox.StepType.AdaptiveDecimalStepType)
+        b.setKeyboardTracking(False)
+        b.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        b.editingFinished.connect(lambda: self._pages.currentWidget().setFocus())
+        b.valueChanged.connect(self._on_y_value)
+        return b
+
+    @staticmethod
+    def _set_box(box: QDoubleSpinBox, value: float, lo: float, hi: float, decimals: int,
+                 prefix: str = "", suffix: str = "") -> None:
+        """Configure a value box without emitting ``valueChanged``."""
+        box.blockSignals(True)
+        box.setDecimals(decimals)
+        box.setRange(lo, hi)
+        box.setPrefix(prefix)
+        box.setSuffix(suffix)
+        box.setValue(value)
+        box.blockSignals(False)
 
     def _view_actions(self) -> list[QAction]:
         """Hook: extra toolbar actions after Reset view."""
@@ -419,7 +477,7 @@ class WhiskerPlotsView(ViewWindow):
         self.setWindowTitle(f"{self.TITLE} - W{sensor + 1}")
         self._act_all.setEnabled(True)
         self._pages.setCurrentIndex(SINGLE)
-        self._single_plot.enableAutoRange(axis="y")
+        self._init_y(self._single_plot.getPlotItem())
         self._show_x(x)
         self._render(labels=True)
 
@@ -461,6 +519,8 @@ class WhiskerPlotsView(ViewWindow):
         """Zoom keys by the character typed, anywhere in this window."""
         if ev.type() != QEvent.Type.KeyPress or not isinstance(obj, QWidget) or obj.window() is not self:
             return False
+        if isinstance(obj, (QAbstractSpinBox, QLineEdit)):
+            return False                                   # typing into a value box
         text = ev.text()
         mods = ev.modifiers() & ~(Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.KeypadModifier)
         if mods or not text:
@@ -494,6 +554,9 @@ class WhiskerPlotsView(ViewWindow):
 
     def _zoom_y(self, f: float, all_tiles: bool) -> None:
         """Y zoom about the view centre; in the stacked layout, the trace gain."""
+        if self.fixed_y:
+            self._zoom_fixed(f)
+            return
         page = self._pages.currentIndex()
         if page == STACKED:
             self._gain /= f
@@ -505,8 +568,64 @@ class WhiskerPlotsView(ViewWindow):
             p.getViewBox().scaleBy(y=f)
 
     def _show_gain(self) -> None:
+        if self.fixed_y:
+            self._stacked.setLabel("left", f"Whisker (row: {self._fixed_text()})")
+            return
         self._stacked.setLabel("left", "Whisker" if abs(self._gain - 1) < 1e-9
                                else f"Whisker (gain x{self._gain:.3g})")
+
+    # ------------------------------------------------------------------
+    # Y scale: auto / fixed
+    # ------------------------------------------------------------------
+
+    @property
+    def fixed_y(self) -> bool:
+        return self._y_mode.currentIndex() == 1
+
+    def set_fixed_y(self, on: bool) -> None:
+        self._y_mode.setCurrentIndex(1 if on else 0)
+
+    def _fixed_range(self) -> tuple[float, float]:
+        """Hook: the fixed Y range, in the plotted units. Default: +- the value box."""
+        v = self._y_top.value()
+        return -v, v
+
+    def _fixed_text(self) -> str:
+        lo, hi = self._fixed_range()
+        return f"{lo:g} to {hi:g}"
+
+    def _zoom_fixed(self, f: float) -> None:
+        """Hook: a Y zoom key while fixed scales the value (all plots alike)."""
+        self._y_top.setValue(self._y_top.value() * f)
+
+    def _on_y_mode(self, _i: int) -> None:
+        self._reset_y()
+        self._show_gain()
+        self._render(labels=True)
+
+    def _on_y_value(self, _v: float) -> None:
+        if self.fixed_y:
+            self._on_y_mode(1)
+        else:
+            self.set_fixed_y(True)                         # typing a value means: use it
+
+    def _init_y(self, p: pg.PlotItem) -> None:
+        """Auto-range ``p``'s Y, or give it the fixed range."""
+        if self.fixed_y:
+            p.disableAutoRange(axis="y")
+            p.setYRange(*self._fixed_range(), padding=0)
+        else:
+            p.enableAutoRange(axis="y")
+
+    def _reset_y(self) -> None:
+        """Y of the tiles and the single plot: auto (Link Y: fitted in ``_redraw``) or fixed."""
+        self._link_auto = True
+        linked = self._act_link_y.isChecked()
+        for p in (*self._tiles, self._single_plot.getPlotItem()):
+            if linked and not self.fixed_y and p in self._tiles:
+                p.disableAutoRange(axis="y")
+            else:
+                self._init_y(p)
 
     def _pan(self, dx: float, dy: float) -> None:
         """Shift the view by ``dx`` / ``dy`` visible spans. X moves all plots
@@ -528,12 +647,7 @@ class WhiskerPlotsView(ViewWindow):
     def _on_link_y(self, on: bool) -> None:
         for p in self._tiles[1:]:
             p.setYLink(self._tiles[0] if on else None)
-        for p in self._tiles:
-            if on:
-                p.disableAutoRange(axis="y")
-            else:
-                p.enableAutoRange(axis="y")
-        self._link_auto = True
+        self._reset_y()
         self._render()
 
     def _show_keys(self) -> None:
@@ -585,10 +699,7 @@ class WhiskerPlotsView(ViewWindow):
         self._show_gain()
         self.statusBar().clearMessage()
         self._stacked.setYRange(-0.5, self._nsensor)
-        linked = self._act_link_y.isChecked()
-        for p in (*self._tiles, self._single_plot.getPlotItem()):
-            if not (linked and p in self._tiles):
-                p.enableAutoRange(axis="y")
+        self._reset_y()
         self._reset_x()
         self._render(labels=True)
 
@@ -668,7 +779,11 @@ class WhiskerPlotsView(ViewWindow):
         super().hideEvent(event)
 
     def _stacked_y(self, y: np.ndarray) -> np.ndarray:
-        """Hook: per-channel values -> height in the stacked layout (before the row offset)."""
+        """Hook: per-channel values -> height in the stacked layout (before the row offset).
+        Fixed Y: the fixed range spans one row."""
+        if self.fixed_y:
+            lo, hi = self._fixed_range()
+            return (y - lo) / (hi - lo) - self.STACKED_CENTRE
         return y * self._gain
 
     def _redraw(self) -> None:
@@ -688,7 +803,7 @@ class WhiskerPlotsView(ViewWindow):
             finite = bool(np.isfinite(y).all())
             for c, curve in enumerate(self._grid_curves):
                 curve.setData(x, y[c], skipFiniteCheck=finite)
-            if self._act_link_y.isChecked() and self._link_auto:
+            if self._act_link_y.isChecked() and self._link_auto and not self.fixed_y:
                 self._fit_linked_y(y)
         elif self._single is not None:
             c0 = 2 * self._single

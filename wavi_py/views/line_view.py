@@ -11,6 +11,12 @@ Live (L) returns to live keeping the zoom (time span, Y ranges, gain); Resume
 does the same. Reset view (R) also restores the full span, auto Y and gain 1.
 Re-zero mirrors the control panel's Reset (re-capture V0).
 
+Y fixed (toolbar): every plot shows +-value around zero, i.e. around each
+channel's own V0 baseline (the traces are drawn minus V0, so the gauges' DC
+offsets are already gone), the same span for all channels; in the stacked
+layout +-value spans one row. If a channel drifts out of the window, Re-zero
+re-centres it.
+
 Every plot also shows the current absolute value of each gauge (raw, before V0
 and the display scale; mean of the last 0.1 s) in its corner, or on the right
 of each row in the stacked layout.
@@ -37,10 +43,10 @@ _KEYS_HELP = """\
 <table cellspacing=4>
 <tr><td><b>Space</b></td><td>pause / resume (resume goes live at the current zoom)</td></tr>
 <tr><td><b>L</b></td><td>live: follow the newest data, keep the zoom (also resumes)</td></tr>
-<tr><td><b>R</b></td><td>reset view: whole buffer, auto Y, gain 1, live</td></tr>
+<tr><td><b>R</b></td><td>reset view: whole buffer, auto Y (or the fixed range), gain 1, live</td></tr>
 <tr><td><b>= &nbsp;-</b></td><td>zoom time in / out (all plots; stays live). Keypad + - too</td></tr>
-<tr><td><b>+ &nbsp;_</b></td><td>zoom Y in / out: framed tile (stacked: trace gain)</td></tr>
-<tr><td><b>. &nbsp;,</b></td><td>zoom Y in / out: all tiles (stacked: trace gain)</td></tr>
+<tr><td><b>+ &nbsp;_</b></td><td>zoom Y in / out: framed tile (stacked: trace gain; Y fixed: the +- value)</td></tr>
+<tr><td><b>. &nbsp;,</b></td><td>zoom Y in / out: all tiles (stacked: trace gain; Y fixed: the +- value)</td></tr>
 <tr><td><b>arrows</b></td><td>move the data (Left: traces slide left); Left / Right all plots (leaves live), Up / Down the framed tile</td></tr>
 <tr><td><b>Y</b></td><td>link Y: all grid tiles share one Y range</td></tr>
 <tr><td><b>Z</b></td><td>zoom box mode (drag a rectangle) / pan mode</td></tr>
@@ -83,6 +89,8 @@ class LineView(WhiskerPlotsView):
     X_LABEL = ("Time", "s")
     KEYS_HELP = _KEYS_HELP
     VALUE_AXIS_LABEL = "absolute"
+    STACKED_CENTRE = 0.5                          # fixed Y: +-value centred on the row
+    DEFAULT_FIXED = 5.0                           # +- this, in the sample units (mV)
 
     def __init__(self, nsensor: int, nch: int, t_buffer_s: float = 30.0):
         super().__init__(nsensor, nch)
@@ -96,6 +104,8 @@ class LineView(WhiskerPlotsView):
         self._units = ""                           # absolute-value labels; see set_value_format
         self._open_level: float | None = None
         self._vals = np.full(self._nch, np.nan)
+        self._set_box(self._y_top, self.DEFAULT_FIXED, 1e-3, 1e6, 3, prefix="±")
+        self._y_top.setToolTip("Y fixed: every plot shows +- this around the channel's V0 baseline")
         self.set_value_format("", None)
         self._act_grid.setChecked(True)            # grid by default (this also resets the view)
 
@@ -109,7 +119,8 @@ class LineView(WhiskerPlotsView):
             self._act_live.setToolTip("Follow the newest data at the current zoom; also resumes [L]")
             self._act_live.setShortcut(QKeySequence("L"))
             self._act_live.triggered.connect(self._on_live)
-            self._act_reset.setToolTip("Whole buffer, auto Y, gain 1, and live again [R]")
+            self._act_reset.setToolTip("Whole buffer, auto Y (or the fixed range), gain 1, "
+                                       "and live again [R]")
         return [self._act_live]
 
     def _stream_actions(self) -> list[QAction]:
@@ -267,7 +278,11 @@ class LineView(WhiskerPlotsView):
         self._units = units
         self._open_level = open_level
         self._value_axis.setLabel(f"absolute ({units})" if units else "absolute")
+        self._y_top.setSuffix(f" {units}" if units else "")
         self._update_labels()
+
+    def _fixed_text(self) -> str:
+        return f"±{self._y_top.value():g}{' ' + self._units if self._units else ''}"
 
     def _prepare_labels(self) -> None:
         if self._t.size == 0:

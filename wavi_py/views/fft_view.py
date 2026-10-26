@@ -16,6 +16,9 @@ above it (fmin..fmax), drawn in a closed frame:
   is shown.
 
 Open (railed) gauges have nothing after the mean removal and are left out.
+The lower plot's Y auto-ranges while the colour range is Auto; with Auto off
+it is fixed to the colour range's min / max, the same amplitude scale as the
+heatmap (peak bars then rise from the min).
 Toolbar, dB, colour range, FFT window and pause: see ``spectral_base``.
 """
 
@@ -40,7 +43,7 @@ _KEYS_HELP = """\
 <table cellspacing=4>
 <tr><td><b>Space</b></td><td>pause / resume</td></tr>
 <tr><td><b>D</b></td><td>dB / linear amplitude</td></tr>
-<tr><td><b>A</b></td><td>auto colour range / the min and max boxes</td></tr>
+<tr><td><b>A</b></td><td>auto colour range / the min and max boxes (also the lower plot's Y range)</td></tr>
 <tr><td><b>W</b></td><td>FFT window length: 0.5 / 1 / 2 / 5 s (also the Spec window)</td></tr>
 <tr><td><b>= &nbsp;-</b></td><td>zoom the heatmap's frequency axis in / out from 0 Hz</td></tr>
 <tr><td><b>M</b></td><td>lower plot: peak bars / box over frequency / box over time</td></tr>
@@ -110,6 +113,7 @@ class FftView(SpectralWindow):
         self._fmin = self._hz_box(0.0, "band start")
         self._fmax = self._hz_box(1e6, "band end (clipped to fs/2)")
         self._band_auto = -1.0                 # the band end as last set to fs/2 (as shown)
+        self._low_set: object = None           # lower plot Y as last set: "auto" or (lo, hi)
         self._history = QDoubleSpinBox()
         self._history.setRange(1, 600)
         self._history.setValue(10)
@@ -235,7 +239,12 @@ class FftView(SpectralWindow):
             stats = self._box_stats(samples, newest=np.where(np.isfinite(newest), newest, np.nan))
         q05, q25, q50, q75, q95, dot = stats
         if mode == 0:                                              # peak bars from the floor
-            base = 0.0 if not self.db else (np.nanmin(dot) - 10 if np.isfinite(dot).any() else 0.0)
+            if not self._act_auto.isChecked():
+                base = self._lo.value()
+            elif self.db:
+                base = np.nanmin(dot) - 10 if np.isfinite(dot).any() else 0.0
+            else:
+                base = 0.0
             ok = np.isfinite(dot) & present
             self._set_boxes(ok, y0=np.full(n, base), height=dot - base)
             self._whiskers.setData([], [])
@@ -253,6 +262,21 @@ class FftView(SpectralWindow):
         what = ("band peak" if mode == 0 else "amplitude across the band" if mode == 1
                 else f"band peak, last {self._history.value():g} s")
         self._low.getPlotItem().setLabel("left", f"{what} ({self._unit()})" if self._unit() else what)
+        self._low_y()
+
+    def _low_y(self, force: bool = False) -> None:
+        """Lower plot Y: auto with the colour range, else the min / max boxes. Only
+        on a change, so a mouse zoom of the lower plot stays until then."""
+        lp = self._low.getPlotItem()
+        want = "auto" if self._act_auto.isChecked() else (self._lo.value(), self._hi.value())
+        if want == self._low_set and not force:
+            return
+        self._low_set = want
+        if want == "auto":
+            lp.enableAutoRange(axis="y")
+        elif want[1] > want[0]:
+            lp.disableAutoRange(axis="y")
+            lp.setYRange(*want, padding=0)
 
     def _set_boxes(self, ok: np.ndarray, y0: np.ndarray, height: np.ndarray) -> None:
         """Boxes / bars for the channels in ``ok`` only (absent ones draw nothing)."""
@@ -290,7 +314,7 @@ class FftView(SpectralWindow):
         hp.setXRange(0, self._nch, padding=0)
         hp.setYRange(0, self._fs / 2, padding=0)
         self._low.getPlotItem().setXRange(-0.7, self._nch - 0.3, padding=0)
-        self._low.getPlotItem().enableAutoRange(axis="y")
+        self._low_y(force=True)
 
     def _zoom_freq(self, f: float) -> None:
         if not self._fs:

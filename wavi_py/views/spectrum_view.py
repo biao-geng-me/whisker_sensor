@@ -17,6 +17,10 @@ gauge, is left out there). In the stacked layout a
 row is one unit of amplitude times the gain (linear), or 80 dB from -60 to
 +20 dB times the gain (dB). Each plot's corner shows the dominant frequency
 (largest bin above DC) of each gauge and its amplitude.
+
+Y fixed (toolbar): every plot shows 0 to "top" (linear), or "top" dB down to
+"span" dB below it (dB; 20 dB is a decade), the same for all channels; in the
+stacked layout that range spans one row. Linear and dB keep their own values.
 """
 
 from __future__ import annotations
@@ -36,10 +40,10 @@ _DB_ROW = (-60.0, 20.0)         # stacked dB layout: the dB range one row spans
 _KEYS_HELP = """\
 <table cellspacing=4>
 <tr><td><b>Space</b></td><td>pause / resume</td></tr>
-<tr><td><b>R</b></td><td>reset view: 0 to fs/2, auto Y, gain 1</td></tr>
+<tr><td><b>R</b></td><td>reset view: 0 to fs/2, auto Y (or the fixed range), gain 1</td></tr>
 <tr><td><b>= &nbsp;-</b></td><td>zoom frequency in / out (all plots). Keypad + - too</td></tr>
-<tr><td><b>+ &nbsp;_</b></td><td>zoom Y in / out: framed tile (stacked: trace gain)</td></tr>
-<tr><td><b>. &nbsp;,</b></td><td>zoom Y in / out: all tiles (stacked: trace gain)</td></tr>
+<tr><td><b>+ &nbsp;_</b></td><td>zoom Y in / out: framed tile (stacked: trace gain; Y fixed: top / dB span)</td></tr>
+<tr><td><b>. &nbsp;,</b></td><td>zoom Y in / out: all tiles (stacked: trace gain; Y fixed: top / dB span)</td></tr>
 <tr><td><b>arrows</b></td><td>move the data (Left: traces slide left); Left / Right all plots, Up / Down the framed tile</td></tr>
 <tr><td><b>D</b></td><td>dB / linear amplitude</td></tr>
 <tr><td><b>W</b></td><td>FFT window length: 0.5 / 1 / 2 / 5 s</td></tr>
@@ -65,6 +69,8 @@ class SpectrumView(WhiskerPlotsView):
         self._amp = np.empty((0, self._nch))       # amplitude per bin and channel
         self._units = ""
         self._peaks: list[tuple[float, float]] = []
+        self._fixed_saved = {False: (5.0, 0.0), True: (_DB_ROW[1], _DB_ROW[1] - _DB_ROW[0])}
+        self._show_fixed_boxes()
         self._act_grid.setChecked(True)            # grid by default (this also resets the view)
 
     # ------------------------------------------------------------------
@@ -76,13 +82,13 @@ class SpectrumView(WhiskerPlotsView):
             self._act_db = QAction("dB", self, checkable=True)
             self._act_db.setToolTip("Amplitude in dB re 1 unit instead of linear [D]")
             self._act_db.setShortcut(QKeySequence("D"))
-            self._act_db.toggled.connect(lambda _on: self._reset_view())
+            self._act_db.toggled.connect(self._on_db)
             self._act_window = QAction(self)
             self._act_window.setToolTip("FFT window length; click to cycle 0.5 / 1 / 2 / 5 s [W]")
             self._act_window.setShortcut(QKeySequence("W"))
             self._act_window.triggered.connect(self._cycle_window)
             self._act_window.setText(f"{_DEFAULT_WINDOW_S:g} s")
-            self._act_reset.setToolTip("0 to fs/2, auto Y, gain 1 [R]")
+            self._act_reset.setToolTip("0 to fs/2, auto Y (or the fixed range), gain 1 [R]")
         return [self._act_db, self._act_window]
 
     def _cycle_window(self) -> None:
@@ -95,7 +101,47 @@ class SpectrumView(WhiskerPlotsView):
     def set_units(self, units: str) -> None:
         """Units of the amplitudes (the Line window's sample units)."""
         self._units = units
+        self._show_fixed_boxes()
         self._update_labels()
+
+    # ------------------------------------------------------------------
+    # fixed Y: linear 0..top, dB top-span..top; each scale keeps its own
+    # ------------------------------------------------------------------
+
+    def _on_db(self, on: bool) -> None:
+        self._fixed_saved[not on] = (self._y_top.value(), self._y_span.value())
+        self._show_fixed_boxes()
+        self._reset_view()
+
+    def _show_fixed_boxes(self) -> None:
+        db = self._act_db.isChecked()
+        top, span = self._fixed_saved[db]
+        if db:
+            self._set_box(self._y_top, top, -300, 300, 1, prefix="top ", suffix=" dB")
+            self._set_box(self._y_span, span, 1, 400, 1, prefix="span ", suffix=" dB")
+        else:
+            unit = f" {self._units}" if self._units else ""
+            self._set_box(self._y_top, top, 1e-6, 1e6, 4, prefix="top ", suffix=unit)
+        self._act_y_span.setVisible(db)
+        self._y_top.setToolTip("Y fixed: the top of every plot" + (" (dB re 1 unit)" if db else ""))
+        self._y_span.setToolTip("Y fixed, dB: how far below the top every plot reaches (20 dB = a decade)")
+
+    def _fixed_range(self) -> tuple[float, float]:
+        top = self._y_top.value()
+        if self._act_db.isChecked():
+            return top - self._y_span.value(), top
+        return 0.0, top
+
+    def _fixed_text(self) -> str:
+        lo, hi = self._fixed_range()
+        unit = "dB" if self._act_db.isChecked() else self._units
+        return f"{lo:g} to {hi:g}{' ' + unit if unit else ''}"
+
+    def _zoom_fixed(self, f: float) -> None:
+        if self._act_db.isChecked():
+            self._y_span.setValue(self._y_span.value() * f)
+        else:
+            super()._zoom_fixed(f)
 
     # ------------------------------------------------------------------
     # data
@@ -128,6 +174,8 @@ class SpectrumView(WhiskerPlotsView):
         return self._f, self._values(cols)
 
     def _stacked_y(self, y: np.ndarray) -> np.ndarray:
+        if self.fixed_y:
+            return np.clip(super()._stacked_y(y), 0, None)     # dB below the range: the row base
         if not self._act_db.isChecked():
             return y * self._gain
         lo, hi = _DB_ROW
