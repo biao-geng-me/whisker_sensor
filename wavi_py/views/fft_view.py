@@ -109,6 +109,7 @@ class FftView(SpectralWindow):
         self._mode.currentIndexChanged.connect(lambda _i: (self._update_mode_widgets(), self._redraw()))
         self._fmin = self._hz_box(0.0, "band start")
         self._fmax = self._hz_box(1e6, "band end (clipped to fs/2)")
+        self._band_auto = -1.0                 # the band end as last set to fs/2 (as shown)
         self._history = QDoubleSpinBox()
         self._history.setRange(1, 600)
         self._history.setValue(10)
@@ -278,10 +279,13 @@ class FftView(SpectralWindow):
             box.blockSignals(True)
             box.setMaximum(nyq)
             box.blockSignals(False)
-        if self._fmax.value() >= nyq or self._fmax.value() == 0:
+        # a band end at the old fs/2 (not set by the user) follows the new fs/2 up too
+        v = self._fmax.value()
+        if v >= nyq or v == 0 or v == self._band_auto:
             self._fmax.blockSignals(True)
             self._fmax.setValue(nyq)
             self._fmax.blockSignals(False)
+            self._band_auto = self._fmax.value()
         hp = self._heat.getPlotItem()
         hp.setXRange(0, self._nch, padding=0)
         hp.setYRange(0, self._fs / 2, padding=0)

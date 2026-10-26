@@ -63,7 +63,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="ESP32 scan mode to set on connect and keep (server / esp32 / sim; same "
                         "spelling as daq_server --mode): legacy, quiet (62.5 Hz, OSR 512), wide "
                         "(250 Hz), optionally ,settle_us,osr,period_us,spi_hz, e.g. quiet,200,256 "
-                        "or quiet,200,256,8000 (125 Hz); default: leave as is. The Scan mode "
+                        "or quiet,200,256,8000 (125 Hz); default: leave as is (the firmware boots in "
+                        "quiet 62.5 Hz, OSR 512, all selects). The Scan mode "
                         "dropdown changes it later")
     p.add_argument("--selects", type=_arg(parse_selects), default=DEFAULT_SELECTS,
                    help=f"mux selects sent with the scan mode (default {DEFAULT_SELECTS}; "

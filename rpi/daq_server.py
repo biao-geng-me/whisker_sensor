@@ -754,10 +754,11 @@ def main(argv: Optional[list[str]] = None) -> None:
     ap.add_argument("--serial", default="/dev/ttyUSB0", help="ESP32 port, or 'none'")
     ap.add_argument("--baud", type=int, default=DEFAULT_SERIAL_BAUD)
     ap.add_argument("--mode", type=_parse_mode, default=None,
-                    help="ESP32 scan mode, sent as M...; before every B: legacy (~76 Hz), quiet"
-                         " (62.5 Hz, OSR 512) or wide (250 Hz), optionally"
-                         " ,settle_us,osr,period_us,spi_hz (e.g. quiet,200,256 or"
-                         " quiet,200,256,8000); default: leave as is")
+                    help="ESP32 scan mode, sent as M...; before every B: legacy (rate depends on the"
+                         " selects, ~89 Hz with 7), quiet (62.5 Hz, OSR 512) or wide (250 Hz),"
+                         " optionally ,settle_us,osr,period_us,spi_hz (e.g. quiet,200,256 or"
+                         " quiet,200,256,8000); default: leave as is (the firmware boots in"
+                         " quiet 62.5 Hz, OSR 512, all selects)")
     ap.add_argument("--selects", type=_parse_selects, default=None,
                     help="mux selects the ESP32 scans, e.g. 0123457 (sent as S<digits>; before"
                          " every B, since the ESP32 forgets it on reboot); default: leave as is")

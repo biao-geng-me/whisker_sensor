@@ -1,8 +1,8 @@
 """ESP32 scan modes (``whisker_daq.ino`` command ``M``) for the GUI's Scan mode
 dropdown, ``--mode`` and the Sim transport.
 
-The firmware boots in the legacy scan and forgets the mode on reboot. A
-``ScanRequest`` is what the user picked: the M arguments plus the mux selects,
+The firmware (since 9e57703) boots in quiet 62.5 Hz, OSR 512, core C1, with
+all 8 selects, and forgets any M / S setting on reboot. A ``ScanRequest`` is what the user picked: the M arguments plus the mux selects,
 sent as ``S<selects>;M<args>;B`` (the ``esp32`` command of the server and ESP32
 transports). ``ModeKeeper`` checks the INFO frames that come back:
 
@@ -10,10 +10,12 @@ transports). ``ModeKeeper`` checks the INFO frames that come back:
   INFO that still shows the old mode is ignored for ~2 s, since the firmware
   can send one before it reads the command); no matching INFO within
   ``CONFIRM_S`` is reported;
-- later, an INFO with another mode means the ESP32 rebooted (port open with
-  DTR auto-reset, a halt) and came back in legacy: the request is re-sent once.
-  If that doesn't stick either, it is reported and not sent again until the
-  user picks a mode.
+- later, an INFO with another mode or selects means the ESP32 rebooted (port
+  open with DTR auto-reset, a watchdog) and came back in its boot default: the
+  request is re-sent once, and the note says what it came back in. If that
+  doesn't stick either, it is reported and not sent again until the user picks
+  a mode. A request equal to the boot default (quiet 62.5 Hz, OSR 512, all
+  selects) survives a reboot unchanged.
 
 Qt-free, so it can be tested headless.
 """
@@ -32,16 +34,18 @@ MODE_IDS = {"legacy": 0, "quiet": 1, "wide": 2}
 LOCK_DEFAULTS = {1: (512, 8_000_000, 16_000), 2: (128, 11_428_571, 4_000)}
 SETTLE_DEFAULT_US = 200
 DEFAULT_SELECTS = "0123457"          # select 6 is dead on the current board
+BOOT_MODE = 1                        # the firmware's boot default: quiet 62.5 Hz, OSR 512
+LEGACY_MS_PER_SELECT = 1.6           # legacy scan time per select (r7: 11.2 ms for 7 selects)
 LOCKED_CLKIN_HZ = 8_000_000
 _OSR_CODE = {128: 0, 256: 1, 512: 2, 1024: 3, 2048: 4, 4096: 5, 8192: 6, 16384: 7}
 
 # (dropdown label, M arguments)
 PRESETS = (
-    ("legacy (~76 Hz)", (0,)),
+    ("legacy", (0,)),
     ("quiet 62.5 Hz, OSR 512", (1,)),
     ("quiet 62.5 Hz, OSR 256", (1, 200, 256)),
     ("quiet 125 Hz, OSR 256", (1, 200, 256, 8000)),
-    ("wide 250 Hz (experimental: overruns)", (2,)),
+    ("wide 250 Hz, OSR 128", (2,)),
 )
 
 
@@ -70,6 +74,12 @@ def parse_selects(s: str) -> str:
     if any(d not in "01234567" for d in digits):
         raise ValueError("selects: digits 0-7, e.g. 0123457 (empty = all)")
     return "".join(digits)
+
+
+def legacy_nominal_hz(sel_mask: int) -> float:
+    """Rough legacy scan rate for these selects (the measured rate replaces it):
+    the scan time grows with the number of selects (r7: 11.2 ms for 7, ~89 Hz)."""
+    return 1000.0 / (LEGACY_MS_PER_SELECT * (bin(sel_mask & 0xFF).count("1") or 8))
 
 
 def lock_params(mode: int, settle: int = 0, osr: int = 0, period: int = 0,
@@ -232,9 +242,12 @@ class ModeKeeper:
             return self._send("setting")
         if not self._reapplied:
             self._reapplied = True
+            back = describe_cfg(cfg)
+            if cfg.get("sel_mask") != self.want.sel_mask:   # e.g. the boot default's all 8
+                back += f" selects {cfg.get('selects', '?')}"
             self._reapply_note = (f"; re-applied {time.strftime('%H:%M:%S')} after the ESP32 "
-                                  f"came back in {describe_cfg(cfg)}")
-            return self._send(f"ESP32 came back in {describe_cfg(cfg)} (reboot?), re-sending")
+                                  f"came back in {back}")
+            return self._send(f"ESP32 came back in {back} (reboot?), re-sending")
         self.state = "failed"
         self.note = (f"ESP32 reports {describe_cfg(cfg)}, wanted {self.want.label}: "
                      f"{', '.join(self.want.mismatch(cfg))}; not re-sent (pick the mode to retry)")

@@ -9,8 +9,10 @@ default), ``M0;`` legacy (--rate, default 80 Hz) and ``M2;`` wide (250 Hz),
 with INFO version 4 and 1 Hz HEALTH frames in M1/M2 (``--boot-mode 0`` starts
 in legacy); ``S<digits>;`` limits the mux selects (skipped outputs read
 railed). In M1/M2, t_us advances by exactly 16000 / 4000 us per scan.
-``kill -USR1 <pid>`` reboots it: boot banner, legacy mode, all selects, text
-mode until the next ``B`` (like a halt or a DTR reset of the real board).
+``kill -USR1 <pid>`` reboots it: boot banner, the boot mode (legacy if the
+ADC is dead, as the firmware falls back), all selects, uptime and t_us from 0,
+reset reason sw in the heartbeat, text mode until the next ``B`` (like a
+watchdog or a DTR reset of the real board).
 ``kill -USR2 <pid>`` toggles an ADC lock-up (``--adc-dead`` starts in one), as
 on the ROV: no scans; legacy reports ``[halt #N] UNRECOVERED ...`` every
 1.5 s, M1/M2 five ``[halt] no conversion ...`` 0.45 s apart, then ``[halt #N]
@@ -168,6 +170,7 @@ def main() -> None:
     scan_flags = 0                       # OR-ed into the next scan
     next_beat = time.monotonic() + 1.0
     n_beat_scans = 0
+    reset_reason = 1                     # poweron; a SIGUSR1 reboot is sw (3)
 
     def say(msg: str) -> None:
         out(ef.encode_text(msg) if binary else (msg + "\r\n").encode())
@@ -207,8 +210,14 @@ def main() -> None:
     while True:
         if reboot:
             reboot.clear()
-            binary, mode, sel_mask, lk, pending, seq = False, 0, 0xFF, None, "", 0
-            period, grid_us = 1.0 / args.rate, None
+            # back in the boot mode (a dead ADC: legacy, as the firmware falls back),
+            # uptime and micros() from 0, reset reason sw
+            binary, sel_mask, pending, seq = False, 0xFF, "", 0
+            mode = 0 if dead[0] else args.boot_mode
+            lk = lock_params(1) if mode else None
+            period, grid_us = (lk[3] / 1e6 if lk else 1.0 / args.rate), None
+            boot_mono, reset_reason, n_beat_scans = time.monotonic(), 3, 0
+            next_t, next_beat = boot_mono, boot_mono + 1.0
             out(b"\r\n=================================================\r\n"
                 b"  whisker_daq (SIMULATED) rebooted\r\n" + boot_lines())
         if toggle:
@@ -254,7 +263,7 @@ def main() -> None:
                         | (0 if dead[0] else ef.BEAT_BOOT_CLOCK_OK), 1000,
                         0 if dead[0] else (3125 if not mode else int(8e6 / 2 / lk[0])),
                         n_halt, n_unrec, 0, 0x00FF if dead[0] else 0xFF0A, 0x2405, n_beat_scans,
-                        1, 0x00FF if args.adc_dead else 0xFF02)
+                        reset_reason, 0x00FF if args.adc_dead else 0xFF02)
             out(ef.encode_beat(b) if binary else (ef.beat_text(b) + "\r\n").encode())
         if now < next_t:
             time.sleep(min(next_t - now, 0.005))

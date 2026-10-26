@@ -14,6 +14,7 @@ poll the bus on their own thread.
 from __future__ import annotations
 
 import os
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -55,7 +56,7 @@ from wavi_py.config import (
 from wavi_py.daq.outliers import fill_outliers_linear
 from wavi_py.io.dat_writer import DatWriter, build_datalog_filename
 from wavi_py.scan_mode import (DEFAULT_SELECTS, PRESETS, ModeKeeper, ScanRequest, describe_cfg,
-                               parse_selects)
+                               legacy_nominal_hz, parse_selects)
 from wavi_py.transports.sim_transport import SimSignals
 from wavi_py.views import FftView, ImuView, LineView, SpectrogramView, SpectrumView
 from wavi_py.views.base import alarm_label, show_alarm
@@ -65,8 +66,7 @@ from wavi_py.views.spectral_base import FFT_WINDOWS_S
 from whisker_link.channels import SAT_CODE
 from whisker_link.esp32_frame import MV_PER_CODE, info_cfg
 
-
-LEGACY_NOMINAL_HZ = 76.0     # the legacy scan with 7 selects; the measured rate replaces it
+REBOOT_NOTE_S = 30.0         # an ESP32 reboot (with its reset reason) stays in the status line
 
 
 def _default_outpath() -> Path:
@@ -151,6 +151,9 @@ class MainWindow(QMainWindow):
         self._fault_state: dict = {}
         self._fault_marks_seen = 0
         self._n_fault_events = 0
+        self._beat_uptime: Optional[int] = None      # the last heartbeat's ESP32 uptime (ms)
+        self._reboot_note = ""
+        self._reboot_note_until = 0.0
         self._fault_log = FaultLogView()
         self._fault_sidecar = None
         self._fault_sidecar_path: Optional[Path] = None
@@ -355,10 +358,11 @@ class MainWindow(QMainWindow):
             self._mode_combo.setCurrentIndex(i)
         self._mode_combo.setToolTip(
             "ESP32 scan mode, sent as S<selects>;M<mode>;B (Server, ESP32 and Sim transports).\n"
-            "The ESP32 boots in legacy and forgets the mode on reboot: the mode shown next to\n"
-            "this is what its INFO reports, and if it comes back in another mode the choice is\n"
-            "re-sent once. 'as is' sends nothing. Wide 250 Hz overruns on the current\n"
-            "single-core firmware.")
+            "The ESP32 boots in quiet 62.5 Hz, OSR 512 (core C1) with all 8 selects and\n"
+            "forgets any mode setting on reboot: the mode shown next to this is what its INFO\n"
+            "reports, and if it comes back in another mode the choice is re-sent once.\n"
+            "'as is' sends nothing. The legacy rate depends on the selects (~89 Hz for 7);\n"
+            "the measured rate is shown.")
         self._mode_combo.activated.connect(lambda _i: self._on_scan_mode_changed(force=True))
         self._selects_edit = QLineEdit(self._initial_selects)
         self._selects_edit.setPlaceholderText("all 8")
@@ -574,6 +578,7 @@ class MainWindow(QMainWindow):
         self._pending_switches = []
         self._last_status_rec = {}
         self._fault_marks_seen = 0
+        self._beat_uptime, self._reboot_note = None, ""
         self._set_fault_state({})
         if client.is_event_stream:
             self._keeper.connected()
@@ -847,7 +852,8 @@ class MainWindow(QMainWindow):
     def _tick_esp32_mode(self, meta: dict) -> None:
         """New INFO frames: the reported scan config, a rate switch at the sample
         where it arrived (scan_hz from INFO; legacy: the rate measured before for
-        these selects, else ~76 Hz, until the measured rate comes ~2 s later),
+        these selects, else an estimate from the select count, until the measured
+        rate comes ~2 s later),
         and the keeper."""
         for n, at, info in meta.get("esp32_infos") or ():
             if n <= self._info_seen:
@@ -858,10 +864,10 @@ class MainWindow(QMainWindow):
             key = (cfg.get("mode"), cfg.get("scan_hz"), cfg.get("sel_mask"))
             if self._auto_fs and key != self._cfg_key:
                 was_locked = bool(self._cfg_key and self._cfg_key[1])
+                mask = cfg.get("sel_mask", 0xFF)
                 fs = (cfg.get("scan_hz")
-                      or (self._legacy_fs.get(cfg.get("sel_mask", 0xFF)) if cfg.get("mode") == 0
-                          else None)
-                      or (LEGACY_NOMINAL_HZ if was_locked else self._fs))
+                      or (self._legacy_fs.get(mask) if cfg.get("mode") == 0 else None)
+                      or (legacy_nominal_hz(mask) if was_locked else self._fs))
                 if self._cfg_key is not None or abs(fs - self._fs) > 1e-6 * fs:
                     self._pending_switches.append((int(at), float(fs)))
                     print(f"[MainWindow] ESP32 scan config {describe_cfg(cfg)}: "
@@ -886,9 +892,11 @@ class MainWindow(QMainWindow):
         st = meta.get("server_status") or {}
         if rows is not None:
             self._imu_last_seq = seq
-            keep = int(self._t_buffer_s * 400)
+            # the IMU's own rate and span (the whisker rate doesn't matter here);
+            # the bus holds up to 400 Hz
+            hz = min(float(st.get("hz", {}).get("RAW_IMU", 0)) or 100.0, 400.0)
+            keep = max(2, int(self._t_buffer_s * hz))
             self._imu_rows = np.vstack([self._imu_rows, rows])[-keep:]
-            hz = float(st.get("hz", {}).get("RAW_IMU", 0)) or 100.0
             n = len(self._imu_rows)
             if not self._is_paused and self._imu_view.isVisible():
                 self._imu_view.update_view(np.arange(-n + 1, 1) / hz, self._imu_rows)
@@ -896,6 +904,7 @@ class MainWindow(QMainWindow):
             self._last_status_t = st.get("t", 0)
             self._last_status_rec = st
             self._set_fault_state(st.get("esp32", {}).get("fault") or {})
+            self._note_beat(st.get("esp32", {}).get("beat"))
             self._show_status(st)
 
     # ------------------------------------------------------------------
@@ -970,14 +979,35 @@ class MainWindow(QMainWindow):
         self._fault_log.show()
         self._fault_log.raise_()
 
+    def _note_beat(self, beat: Optional[dict]) -> None:
+        """The heartbeat: a reboot (its uptime went back, or the first beat after
+        connecting is from a fresh boot) is reported once, with its reset reason,
+        in the Fault log and for ``REBOOT_NOTE_S`` in the status line."""
+        if not beat:
+            return
+        up = beat.get("uptime_ms", 0)
+        prev, self._beat_uptime = self._beat_uptime, up
+        if (prev is None and up < REBOOT_NOTE_S * 1000) or (prev is not None and up + 1000 < prev):
+            t = datetime.now() - timedelta(milliseconds=up)
+            self._reboot_note = (f"ESP32 {'booted' if prev is None else 'rebooted'} {t:%H:%M:%S}"
+                                 f" (reset: {beat.get('reset_name', '?')})")
+            self._reboot_note_until = time.monotonic() + REBOOT_NOTE_S
+            self._fault_log.append(f"{t:%Y-%m-%d %H:%M:%S}  info   {self._reboot_note}")
+
     def _show_status(self, st: dict) -> None:
         text = self._format_status(st)
+        beat = st.get("esp32", {}).get("beat")
+        style = ("QLabel { color: #c00000; font-weight: bold; }"
+                 if beat and not beat.get("converting", True) else "")
         # the line window's status bar always shows it; the panel's label
         # keeps "Recording -> path" while recording
-        for v in self._stream_views:
+        for v in (*self._stream_views, self._imu_view):
             v.set_stream_status(text)
+            if v._stream_status.styleSheet() != style:
+                v._stream_status.setStyleSheet(style)
         if not self._is_recording:
             self._path_label.setText(text)
+            self._path_label.setStyleSheet(style or "QLabel { color: #555; }")
 
     def _format_status(self, st: dict) -> str:
         """One line from the server / ESP32 status record."""
@@ -1006,6 +1036,13 @@ class MainWindow(QMainWindow):
                 errs += f" sync {e['adc_sync']}"
         if self._keeper.want is not None and self._keeper.note:
             errs += f" | mode: {self._keeper.note}"
+        # the heartbeat and a recent reboot go last: the line is cut from the left
+        b = e.get("beat")
+        if b:                                    # the firmware's 1 Hz heartbeat
+            errs += (f" | ADC {b.get('conv_hz', 0):.0f} conv/s" if b.get("converting", True)
+                     else f" | ADC NOT converting ({b.get('conv_hz', 0):.0f} conv/s)")
+        if self._reboot_note and time.monotonic() < self._reboot_note_until:
+            errs += f" | {self._reboot_note}"
         f = e.get("fault") or {}
         if f.get("level") == "fault":
             errs = f"FAULT {f.get('code')} | " + errs

@@ -5,8 +5,9 @@ sine amplitude and frequency, and noise; scan rate, drift and mains hum; the
 noise of all gauges at once; presets; taps (a
 decaying ring on one whisker, by hand or every few seconds); and faults (the
 scan flags, a sequence gap, a link CRC error, a dropout) to exercise the
-status line; and a reboot (the array comes back in the legacy scan mode, so
-the control panel's Scan mode re-applies its selection).
+status line; and a reboot (the array comes back in the firmware's boot
+default, quiet 62.5 Hz with all selects, so the control panel's Scan mode
+re-applies its selection).
 """
 
 from __future__ import annotations
@@ -67,9 +68,10 @@ class SimPanel(ViewWindow):
         grid = QGridLayout(box)
         self._rate = QComboBox()
         self._rate.addItems([f"{r:g} Hz" for r in RATES_HZ])
-        self._rate.setToolTip("Scan rate in the legacy scan mode (the locked modes, set with the "
-                              "control panel's Scan mode, run at their own rate). The GUI "
-                              "adopts a new measured rate.")
+        self._rate.setToolTip("Scan rate in the legacy scan mode (pick legacy in the control "
+                              "panel's Scan mode; the array starts in quiet 62.5 Hz, and the "
+                              "locked modes run at their own rate). The GUI adopts a new "
+                              "measured rate.")
         self._rate.currentIndexChanged.connect(lambda i: setattr(self._sig, "rate_hz", RATES_HZ[i]))
         self._noise = _spin(0, 100, 0.1, 2, " mV")
         self._noise.setToolTip("Set the white noise (RMS) of every gauge at once; "
