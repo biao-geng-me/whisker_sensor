@@ -76,6 +76,30 @@ def _default_outpath() -> Path:
     return p
 
 
+class _WrapLabel(QLabel):
+    """Word-wrapped text that never widens the window: it takes the width it is
+    given and grows in height to fit (a plain wrapped QLabel in a layout keeps the
+    height it had at the first layout and clips)."""
+
+    def __init__(self, text: str = ""):
+        super().__init__(text)
+        self.setWordWrap(True)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+
+    def setText(self, text: str) -> None:  # noqa: N802 — Qt naming
+        super().setText(text)
+        self._fit()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 — Qt naming
+        super().resizeEvent(event)
+        self._fit()
+
+    def _fit(self) -> None:
+        h = self.heightForWidth(max(1, self.width()))
+        if h > 0 and h != self.minimumHeight():
+            self.setMinimumHeight(h)
+
+
 class MainWindow(QMainWindow):
     """The wavi GUI control panel."""
 
@@ -503,9 +527,10 @@ class MainWindow(QMainWindow):
         self._progress.setTextVisible(False)
         self._progress.setMaximumHeight(8)
 
-        self._path_label = QLabel(str(self._outpath))
+        self._path_label = _WrapLabel(str(self._outpath))
         self._path_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self._path_label.setStyleSheet("QLabel { color: #555; }")
+        # the status lines (and long paths) wrap instead of widening the window
 
         self._fault_log_btn = QPushButton("Fault log")
         self._fault_log_btn.setToolTip("ESP32 / ADC faults and warnings this session")
@@ -995,7 +1020,8 @@ class MainWindow(QMainWindow):
             self._fault_log.append(f"{t:%Y-%m-%d %H:%M:%S}  info   {self._reboot_note}")
 
     def _show_status(self, st: dict) -> None:
-        text = self._format_status(st)
+        link, adc = self._format_status(st)
+        text = f"{link} | {adc}"
         beat = st.get("esp32", {}).get("beat")
         style = ("QLabel { color: #c00000; font-weight: bold; }"
                  if beat and not beat.get("converting", True) else "")
@@ -1006,11 +1032,13 @@ class MainWindow(QMainWindow):
             if v._stream_status.styleSheet() != style:
                 v._stream_status.setStyleSheet(style)
         if not self._is_recording:
-            self._path_label.setText(text)
+            self._path_label.setText(f"{link}\n{adc}")
             self._path_label.setStyleSheet(style or "QLabel { color: #555; }")
 
-    def _format_status(self, st: dict) -> str:
-        """One line from the server / ESP32 status record."""
+    def _format_status(self, st: dict) -> tuple[str, str]:
+        """The server / ESP32 status record as two lines: the link (where, rates,
+        recording, fault) and the ADC (error counters, scan mode, heartbeat). The
+        view windows show them as one line."""
         assert self._client is not None
         hz = st.get("hz", {})
         rec = st.get("rec", {})
@@ -1044,12 +1072,11 @@ class MainWindow(QMainWindow):
         if self._reboot_note and time.monotonic() < self._reboot_note_until:
             errs += f" | {self._reboot_note}"
         f = e.get("fault") or {}
-        if f.get("level") == "fault":
-            errs = f"FAULT {f.get('code')} | " + errs
+        fault = f" | FAULT {f.get('code')}" if f.get("level") == "fault" else ""
         imu = (f"IMU {hz.get('RAW_IMU', 0):g} Hz | att {hz.get('ATTITUDE', 0):g} Hz | "
                if self._client.transport_kind == "server" else "")
-        return (f"{self._client.endpoint_str} | whisker {self._fs:.2f} Hz | {imu}{pi_rec}"
-                f" | {errs}")
+        return (f"{self._client.endpoint_str} | whisker {self._fs:.2f} Hz | {imu}{pi_rec}{fault}",
+                errs)
 
     def _update_spectrum(self) -> None:
         """Amplitude spectra of the newest ``window_s`` seconds: mean removed, Hann

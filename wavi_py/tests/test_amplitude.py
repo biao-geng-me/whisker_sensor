@@ -210,3 +210,27 @@ def test_fft_lower_plot_follows_the_colour_range(fft):
     assert np.all(np.asarray(bars["y0"]) == -60)              # peak bars rise from the min
     fft._act_auto.setChecked(True)
     assert auto_y(lp)
+
+
+def _screen_x(widget, plot, x: float) -> float:
+    from PyQt6.QtCore import QPointF
+    pt = plot.getViewBox().mapViewToScene(QPointF(x, 0))
+    return widget.mapToGlobal(widget.mapFromScene(pt)).x()
+
+
+@pytest.mark.parametrize("db", [False, True])
+def test_fft_columns_line_up(app, db):
+    """Each channel's bar sits under its heatmap column, also after the labels change width."""
+    v = FftView(32, 51, 1.0)
+    v.resize(1100, 760)
+    v.show()
+    amp = np.full((51, 32), 1e-3)
+    amp[10] = 100 * (1 + np.arange(32))                       # wide colour-bar / bar labels
+    v.update_view(amp, 1000.0)
+    v._act_db.setChecked(db)
+    for _ in range(3):
+        app.processEvents()
+    hp, lp = v._heat.getPlotItem(), v._low.getPlotItem()
+    for c in (0, 15, 31):
+        assert _screen_x(v._heat, hp, c + 0.5) == pytest.approx(_screen_x(v._low, lp, c), abs=1.5)
+    v.close()
