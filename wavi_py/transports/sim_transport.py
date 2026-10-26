@@ -73,6 +73,7 @@ from whisker_link import esp32_frame as ef
 from whisker_link import wire
 from whisker_link.esp32_fault import FaultMonitor, mark_event
 from whisker_link.channels import CHANNEL_NAMES, NCH, channels_of_selects
+from whisker_link.dome_pose import LIVE_WHISKERS
 
 RAIL_CODE = (1 << 23) - 1           # a railed (open) gauge: positive full scale
 RATES_HZ = (40.0, 80.0, 200.0, 400.0, 1000.0)
@@ -129,7 +130,7 @@ class SimSignals:
     # ----- presets and edits (any thread)
 
     PRESETS = ("demo", "all live", "all live, same", "all open",
-               "noise floor", "noisy gauges", "hum 50 Hz", "hum 60 Hz", "bench")
+               "noise floor", "noisy gauges", "hum 50 Hz", "hum 60 Hz", "bench", "dome")
     PRESET_HELP = (
         "demo: 7 gauges, 0.5..12 Hz, 0.2 mV noise\n"
         "all live: every gauge, 1..16 Hz by whisker\n"
@@ -139,7 +140,9 @@ class SimSignals:
         "noisy gauges: demo plus W3_B 3 mV, W6_A 2 mV, W12 A/B 5 mV of noise\n"
         "hum 50 Hz / hum 60 Hz: demo plus 2 mV of mains hum\n"
         "bench: every gauge live with a 0.5 mV sine at 1..16 Hz, noise 0.05..0.5 mV, "
-        "1 mV of 50 Hz hum, 0.05 mV/s drift")
+        "1 mV of 50 Hz hum, 0.05 mV/s drift\n"
+        "dome: the 12 gauges wired on the ROV (W3, W8, W10, W14 open), 12 mV sines at\n"
+        "0.2..0.75 Hz with B a quarter cycle after A, so each whisker tip circles in the Dome view")
     _DEMO = (("W1_A", 5, 1), ("W1_B", 3, 1), ("W3_B", 4, 2), ("W4_A", 2, 5),
              ("W4_B", 2, 5), ("W8_B", 1, 12), ("W9_A", 6, 0.5))
 
@@ -172,6 +175,14 @@ class SimSignals:
                 self.freq_hz[:] = np.repeat(np.arange(1, NCH // 2 + 1), 2)
                 self.noise_mv[:] = self._noise_spread
                 self.hum_mv, self.drift_mv_s = 1.0, 0.05
+            elif name == "dome":
+                for k, w in enumerate(LIVE_WHISKERS):
+                    a, b = 2 * (w - 1), 2 * (w - 1) + 1
+                    self.live[a] = self.live[b] = True
+                    self.amp_mv[a] = self.amp_mv[b] = 12.0
+                    self.freq_hz[a] = self.freq_hz[b] = 0.2 + 0.05 * k
+                    self.phase_rad[b] = self.phase_rad[a] - math.pi / 2
+                    self.noise_mv[a] = self.noise_mv[b] = 0.3
             elif name == "all live":
                 self.live[:] = True
                 self.amp_mv[:] = 3

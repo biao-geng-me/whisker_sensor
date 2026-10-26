@@ -5,9 +5,10 @@
 Run OFFLINE in the CAD env (b123d013, build123d). wavi_py itself never imports
 build123d: it only reads what this writes (default ``wavi_py/assets/dome/``):
 
-  dome_mesh.npz   ``vertices`` (N, 3) float32 mm, ``faces`` (M, 3) uint32,
-                  ``part`` (M,) uint8 index into ``part_names`` (one entry per
-                  exported CAD part group), ``part_names`` (JSON string)
+  dome_mesh.npz   ``vertices`` (N, 3) float32 mm, ``normals`` (N, 3) float32
+                  unit, ``faces`` (M, 3) uint32, ``part`` (M,) uint8 index into
+                  ``part_names`` (one entry per exported CAD part), ``part_names``
+                  (JSON string)
   whiskers.json   one record per dome hole: ``hole`` (build order), ``side``
                   (L / R, from the root's x sign), ``row``, ``col``, ``root``
                   and ``tip`` (mm), ``axis`` (unit, outward), ``e1`` / ``e2``
@@ -26,6 +27,11 @@ The display mesh is the dome shell + cap plates + compartment floors (the
 ``dome`` group of export_dome_meshes), tessellated coarsely and, if still above
 ``TARGET_TRIS``, decimated by vertex clustering (plain numpy: no mesh library
 is installed in either env). Good enough to look at, not for measurement.
+build123d tessellates each B-rep face on its own, so vertices are not shared
+across faces; the normals (area-weighted over each vertex's triangles) are
+therefore smooth within a face and sharp at the CAD edges. Decimation welds
+the mesh, which would smooth across the edges too, so it is skipped when the
+coarse tessellation already fits.
 
 Bending frame per whisker: ``axis`` = n, outward along the rod; ``e1`` = the
 tube axis (+z, "forward") projected into the plane normal to n, i.e. the
@@ -96,6 +102,15 @@ def decimate_to(V, F, target):
     return best
 
 
+def vertex_normals(V, F):
+    """Area-weighted vertex normals (unit; zero for an unused vertex)."""
+    fn = np.cross(V[F[:, 1]] - V[F[:, 0]], V[F[:, 2]] - V[F[:, 0]])
+    vn = np.zeros_like(V, dtype=np.float64)
+    for k in range(3):
+        np.add.at(vn, F[:, k], fn)
+    return vn / np.maximum(np.linalg.norm(vn, axis=1, keepdims=True), 1e-12)
+
+
 def bending_frame(axis, fwd=(0.0, 0.0, 1.0)):
     n = np.asarray(axis, float)
     n = n / np.linalg.norm(n)
@@ -137,11 +152,13 @@ def main(out_dir=DEFAULT_OUT):
         names.append(name)
         off += len(V)
     V, F, P = np.concatenate(verts), np.concatenate(faces), np.concatenate(part_id)
-    # weld coincident vertices first, so clustering sees one connected mesh
-    V, F, kept = cluster_decimate(V, F, 1e-3)
-    P = P[kept]
-    V, F, kept = decimate_to(V, F, TARGET_TRIS)
-    P = P[kept]
+    if len(F) > TARGET_TRIS:
+        # weld coincident vertices first, so clustering sees one connected mesh
+        V, F, kept = cluster_decimate(V, F, 1e-3)
+        P = P[kept]
+        V, F, kept = decimate_to(V, F, TARGET_TRIS)
+        P = P[kept]
+    N = vertex_normals(V, F)
 
     rods = [edm.rod_axis(shift * r) for r in out["parts"].get("whisker_guides") or []]
     rows = int(round(float(meta["params"].get("ROWS", full.get("ROWS", 2)))))
@@ -159,7 +176,8 @@ def main(out_dir=DEFAULT_OUT):
 
     os.makedirs(out_dir, exist_ok=True)
     np.savez_compressed(os.path.join(out_dir, "dome_mesh.npz"),
-                        vertices=V.astype(np.float32), faces=F.astype(np.uint32),
+                        vertices=V.astype(np.float32), normals=N.astype(np.float32),
+                        faces=F.astype(np.uint32),
                         part=P.astype(np.uint8), part_names=np.array(json.dumps(names)))
     doc = {"frame": "collar: tube axis +z (dome forward), BR seal face z=0, ROV underside -y",
            "units": "mm",

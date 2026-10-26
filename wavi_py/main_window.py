@@ -3,7 +3,7 @@
 This is one subscriber on the SampleBus among many. It owns:
 
 - The control panel (transport selector, record, pause, view toggles, tag, auto-stop).
-- The view windows (line, spectrum, fft, spectrogram, imu).
+- The view windows (line, spectrum, fft, spectrogram, imu, dome).
 - The local processing chain: outlier removal → recording → (optional) filter → plot updates.
 
 External agent loops can subscribe to ``WaviClient.bus`` independently without
@@ -21,7 +21,7 @@ from typing import Optional
 
 import numpy as np
 from PyQt6.QtCore import QRegularExpression, QTimer, Qt
-from PyQt6.QtGui import QRegularExpressionValidator
+from PyQt6.QtGui import QGuiApplication, QRegularExpressionValidator
 from PyQt6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
@@ -208,6 +208,8 @@ class MainWindow(QMainWindow):
             self._nch, self._nfreq, self._fs, self._ns_spec, self._t_spec_s, self._t_fft_s
         )
         self._imu_view = ImuView(self._t_buffer_s)
+        # the Dome view needs PyOpenGL and a GL context: built on first use
+        self._dome_view = None
         for v, btn in ((self._line_view, self._toggle_line), (self._spectrum_view, self._toggle_spectrum),
                        (self._fft_view, self._toggle_fft),
                        (self._spec_view, self._toggle_spec), (self._imu_view, self._toggle_imu)):
@@ -247,6 +249,8 @@ class MainWindow(QMainWindow):
         # view; otherwise pyqtgraph's auto-range latches onto the full t-axis
         # the moment any sample lands and gaps the NaN-filled leading slots.
         self._samples_since_clear = 0
+        if getattr(self, "_dome_view", None) is not None:
+            self._dome_view.set_rate(self._fs)
 
     def _size_spectral(self) -> None:
         """Size (and clear) the FFT frame and the spectrogram history."""
@@ -484,7 +488,14 @@ class MainWindow(QMainWindow):
         h.addWidget(self._toggle_spectrum)
         h.addWidget(self._toggle_fft)
         h.addWidget(self._toggle_spec)
+        self._toggle_dome = QPushButton("Dome")
+        self._toggle_dome.setCheckable(True)
+        self._toggle_dome.setToolTip("3D whiskers bending on the dome (placeholder mapping and"
+                                     " calibration; needs PyOpenGL)")
+        self._toggle_dome.toggled.connect(self._toggle_dome_view)
+
         h.addWidget(self._toggle_imu)
+        h.addWidget(self._toggle_dome)
         h.addStretch(1)
         h.addWidget(self._pause_btn)
         h.addWidget(self._reset_btn)
@@ -626,6 +637,8 @@ class MainWindow(QMainWindow):
         for v in self._stream_views:
             v.set_stream_status(f"Connected to {client.endpoint_str}")
         self._last_status_t = 0.0
+        if self._dome_view is not None:
+            self._dome_view.set_bus(client.bus, self._fs)
         self._timer.start()
 
     def _disconnect(self) -> None:
@@ -635,6 +648,8 @@ class MainWindow(QMainWindow):
         if self._client is not None:
             self._client.stop()
             self._client = None
+        if self._dome_view is not None:
+            self._dome_view.set_bus(None)
 
         self._keeper.set_wanted(self._keeper.want, connected=False)
         self._esp32_cfg = None
@@ -680,6 +695,29 @@ class MainWindow(QMainWindow):
         else:
             win.hide()
 
+    def _toggle_dome_view(self, show: bool) -> None:
+        if show and self._dome_view is None:
+            try:
+                if QGuiApplication.platformName() in ("offscreen", "minimal"):
+                    raise RuntimeError(f"no OpenGL on the Qt platform '{QGuiApplication.platformName()}'")
+                from wavi_py.views.dome_view import DomeView
+                self._dome_view = DomeView(self._fs)
+            except Exception as exc:  # noqa: BLE001 — no PyOpenGL / GL context
+                QMessageBox.warning(self, "Dome view", f"Cannot open the Dome view: {exc}\n"
+                                    "(pip install PyOpenGL)")
+                self._toggle_dome.setChecked(False)
+                return
+            self._dome_view.closed.connect(lambda: self._toggle_dome.setChecked(False))
+            self._dome_view.set_paused(self._is_paused)
+            if self._client is not None:
+                self._dome_view.set_bus(self._client.bus, self._fs)
+        if self._dome_view is not None:
+            self._toggle_window(self._dome_view, show)
+
+    def _side_views(self) -> tuple:
+        """The views besides the stream views that show the status line and alarm."""
+        return (self._imu_view,) if self._dome_view is None else (self._imu_view, self._dome_view)
+
     def _set_stream_buttons_enabled(self, on: bool) -> None:
         self._pause_btn.setEnabled(on)
         self._reset_btn.setEnabled(on)
@@ -691,11 +729,15 @@ class MainWindow(QMainWindow):
         self._pause_btn.setText("Resume" if on else "Pause")
         for v in self._stream_views:
             v.set_paused(on)
+        if self._dome_view is not None:
+            self._dome_view.set_paused(on)
 
     def _on_reset_clicked(self) -> None:
         if self._client is None or not self._client.is_running:
             return
         self._client.reset()  # DAQ thread will recompute V0 on its next tick
+        if self._dome_view is not None:
+            self._dome_view.tare()
         # Skip whatever is already buffered on the bus — those samples were
         # collected under the old V0 and would briefly render with a jump
         # before the new V0 lands.
@@ -985,7 +1027,7 @@ class MainWindow(QMainWindow):
                         f"(warnings this session: {sum((f.get('warns') or {}).values())};"
                         " see the Fault log)")
         show_alarm(self._fault_banner, text, level)
-        for v in (*self._stream_views, self._imu_view):
+        for v in (*self._stream_views, *self._side_views()):
             v.set_alarm(text, level)
         self._update_fault_button()
 
@@ -1027,7 +1069,7 @@ class MainWindow(QMainWindow):
                  if beat and not beat.get("converting", True) else "")
         # the line window's status bar always shows it; the panel's label
         # keeps "Recording -> path" while recording
-        for v in (*self._stream_views, self._imu_view):
+        for v in (*self._stream_views, *self._side_views()):
             v.set_stream_status(text)
             if v._stream_status.styleSheet() != style:
                 v._stream_status.setStyleSheet(style)
@@ -1159,4 +1201,6 @@ class MainWindow(QMainWindow):
             for v in (self._line_view, self._spectrum_view, self._fft_view, self._spec_view,
                       self._imu_view, self._sim_panel, self._fault_log):
                 v.close()
+            if self._dome_view is not None:
+                self._dome_view.close()
         super().closeEvent(event)
