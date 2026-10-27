@@ -17,6 +17,7 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from PyQt6.QtGui import QImage, QPainter, QPicture  # noqa: E402
 from PyQt6.QtWidgets import QApplication, QWidget  # noqa: E402
 
 import pyqtgraph as pg  # noqa: E402
@@ -235,6 +236,66 @@ def test_grid_tiles_share_axis_pictures(app, line):
     app.processEvents()
     lefts = [p.getAxis("left").picture for p in line._tiles]
     assert all(lp is lefts[0] for lp in lefts)           # one fixed range: shared
+
+
+def _played(pic) -> QImage:
+    img = QImage(400, 400, QImage.Format.Format_ARGB32)
+    img.fill(0)
+    qp = QPainter(img)
+    pic.play(qp)
+    qp.end()
+    return img
+
+
+def _fresh_picture(ax: pg.AxisItem):
+    """What ``ax`` would draw now, generated from scratch."""
+    pic = QPicture()
+    qp = QPainter(pic)
+    if ax.style["tickFont"]:
+        qp.setFont(ax.style["tickFont"])
+    ax.drawPicture(qp, *ax.generateDrawSpecs(qp))
+    qp.end()
+    return pic
+
+
+def _settle(app, line) -> None:
+    for _ in range(2):                                   # the axis widths follow the labels
+        line._render()                                   # on the next pass
+        line.grab()
+        app.processEvents()
+    line.grab()
+
+
+@pytest.mark.parametrize("change", ["fixed_value", "zoom"])
+def test_tile_y_labels_follow_the_range(app, line, change):
+    """Regression: a shared picture keyed on r0 / span served +-1 labels for +-3."""
+    line.set_fixed_y(True)
+    _settle(app, line)
+    if change == "fixed_value":
+        line._y_top.setValue(line._y_top.value() * 3)
+    else:
+        line._zoom_y(0.5, True)                          # fixed: scales the value too
+    _settle(app, line)
+    lo, hi = line._fixed_range()
+    for p in line._tiles:
+        ax = p.getAxis("left")
+        assert ax.range == pytest.approx([lo, hi])
+        assert ax.picture is not None
+        assert _played(ax.picture) == _played(_fresh_picture(ax))
+
+
+def test_shared_axis_key_tells_symmetric_ranges_apart(line):
+    ax = line._tiles[0].getAxis("left")
+    ax.setRange(-1.0, 1.0)
+    k1 = ax._picture_key()
+    ax.setRange(-3.0, 3.0)
+    assert ax._picture_key() != k1
+    ax.setRange(-1.0, 1.0)
+    assert ax._picture_key() == k1
+    ax.setRange(-1.99, 1.99)
+    k2 = ax._picture_key()
+    ax.setRange(-1.99, 1.9899999999999998)              # float noise: still the same picture
+    assert ax._picture_key() == k2
 
 
 def test_auto_y_returns_after_a_zoom(line):
