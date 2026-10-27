@@ -220,3 +220,77 @@ def test_trail_time_going_back_restarts():
     tb = dp.TrailBuffer(1, max_s=1.0, rate_hz=10.0)
     tb.push(100.0, np.zeros((1, 3)), np.zeros(1))
     assert tb.push(0.0, np.ones((1, 3)), np.zeros(1)) and tb.count == 1
+
+
+# ----- neutral marks and deflection arrows
+
+def test_root_tips_match_whisker_shape():
+    lay = dp.DomeLayout.load(ASSET)
+    th = np.random.default_rng(5).normal(size=(len(lay), 2)) * 0.5
+    th[0] = 0.0
+    th[1] = [1e-8, 0.0]                         # the small-angle branches
+    assert np.allclose(dp.root_tips(lay, th), dp.whisker_shape(lay, th)[:, -1], atol=1e-6)
+    stacked = dp.root_tips(lay, np.stack([th, 2 * th]))
+    assert stacked.shape == (2, len(lay), 3)
+    assert np.allclose(stacked[1], dp.root_tips(lay, 2 * th))
+
+
+def test_neutral_tips_both_modes():
+    lay = dp.DomeLayout.load(ASSET)
+    shell = dp.Shell.around(lay)
+    n = dp.neutral_tips(lay, shell)
+    assert np.abs(shell.distance(n)).max() < 1e-6
+    # on the line from the pivot through the root
+    u = lay.root - dp.centre_pivots(lay)
+    w = n - dp.centre_pivots(lay)
+    assert np.allclose(np.cross(u, w), 0, atol=1e-6) and ((u * w).sum(1) > 0).all()
+    assert np.allclose(dp.neutral_tips(lay), lay.root + lay.length[:, None] * lay.axis)
+
+
+def test_tip_path_from_neutral_to_tip_on_the_shell():
+    lay = dp.DomeLayout.load(ASSET)
+    shell = dp.Shell.around(lay, radius=200.0)
+    th = np.zeros((len(lay), 2))
+    th[:, 1] = math.radians(30)
+    path = dp.tip_path(lay, th, shell, n=7)
+    assert path.shape == (len(lay), 7, 3)
+    assert np.allclose(path[:, 0], dp.neutral_tips(lay, shell))
+    assert np.allclose(path[:, -1], dp.centre_pivot_shape(lay, shell, th)[1])
+    assert np.abs(shell.distance(path.reshape(-1, 3))).max() < 1e-6
+    # on the sphere a sideways bend is a great-circle arc, evenly spaced
+    sph = lay.root[:, 2] >= lay.center[2] - 0.5
+    step = np.linalg.norm(np.diff(path[sph], axis=1), axis=2)
+    assert np.allclose(step, 2 * 200 * math.sin(math.radians(5) / 2))
+    root = dp.tip_path(lay, th, None, n=4)
+    assert np.allclose(root[:, -1], dp.whisker_shape(lay, th)[:, -1])
+
+
+def test_arrow_segments_shaft_and_head():
+    path = np.zeros((2, 5, 3))
+    path[0, :, 0] = np.linspace(0, 40, 5)       # 40 mm along +x
+    normal = np.array([[0, 0, 1.0], [0, 0, 1.0]])
+    seg = dp.arrow_segments(path, normal, head_mm=8.0, head_deg=30.0)
+    assert seg.shape == (2, 6, 2, 3)
+    assert np.allclose(seg[0, :4, 0], path[0, :-1]) and np.allclose(seg[0, :4, 1], path[0, 1:])
+    head = seg[0, 4:]
+    assert np.allclose(head[:, 0], [40, 0, 0])  # barbs start at the tip
+    b = head[:, 1] - [40, 0, 0]
+    assert np.allclose(np.linalg.norm(b, axis=1), 8.0)
+    assert np.allclose(b[:, 2], 0)              # in the plane normal to `normal`
+    assert np.allclose(b[:, 0], -8 * math.cos(math.radians(30)))
+    assert b[0, 1] == pytest.approx(-b[1, 1]) and abs(b[0, 1]) > 1
+    # zero arrow: everything collapses onto the tip
+    assert np.allclose(seg[1], 0) and np.isfinite(seg).all()
+    # short arrow: the head is at most 40 % of the chord
+    short = dp.arrow_segments(path * 0.25, normal, head_mm=8.0)
+    assert np.allclose(np.linalg.norm(short[0, 4, 1] - short[0, 4, 0]), 4.0)
+
+
+def test_shell_cover_grows_the_cylinder_in_steps():
+    sh = dp.Shell(np.array([0.0, 0, 100]), 40.0)
+    assert sh.cyl_len == 40.0
+    assert not sh.cover(np.array([[0, 40.0, 70]]))                  # within
+    assert sh.cover(np.array([[0, 40.0, 41], [np.nan] * 3]))       # 59 below -> 60
+    assert sh.cyl_len == pytest.approx(60.0)
+    assert sh.cover(np.array([[0, 40.0, -1e6]])) and sh.cyl_len == pytest.approx(400.0)
+    assert sh.uncover() and sh.cyl_len == 40.0 and not sh.uncover()

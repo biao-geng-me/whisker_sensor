@@ -79,7 +79,7 @@ def test_dome_view_shell_pivot_trail(app):
     try:
         base = np.full((40, NCH), 250.0)
         v.pose.feed(base, 250.0)                         # tare
-        assert v._centre_pivot and v._show_shell
+        assert v._centre_pivot and v._show_grid and v._show_arrows
         for k in range(10):                              # W1 swings, 10 frames at 60 Hz
             blk = base[:5].copy()
             blk[:, CHANNEL_NAMES.index("W1_A")] += 5.0 * k
@@ -121,3 +121,101 @@ def test_tube_geometry_ring_is_normal_to_the_axis():
     V, N = tube_vertices(pts, 2.0, 6, np.array([[0.0, 1.0, 0.0]]))
     assert np.allclose(N[:, 2], 0) and np.allclose(np.linalg.norm(N, axis=1), 1)
     assert np.allclose(np.hypot(V[:, 0], V[:, 1]), 2.0)
+
+
+def test_dome_view_camera_cube_marks_arrows(app):
+    from wavi_py.views import dome_view as dvm
+    from wavi_py.views.dome_camera import SNAP_VIEWS
+
+    v = dvm.DomeView(fs=250.0)
+    try:
+        glw, cam = v._glw, v._glw.cam
+        glw.resize(800, 600)
+        # the GL view matrix is the camera's
+        m = np.array(glw.viewMatrix().data()).reshape(4, 4).T     # Qt: column-major data
+        assert np.allclose(m, cam.view_matrix(), atol=1e-4)
+        # tumble past the pole: no clamp
+        for _ in range(60):
+            glw.orbit(0, 5.0)                                     # 300 deg of elevation
+        assert abs(cam.to_view([0, 0, 1])[1]) < 1.0
+        # snaps: animated from the frame timer, exact at the end
+        v.snap_view("top")
+        assert cam.animating()
+        cam.step(1e12)
+        assert np.allclose(cam.position() - cam.center, cam.distance * SNAP_VIEWS["top"][0])
+        names = {n for n, _, _ in glw.cube.faces()}
+        assert names == {"top"}
+        c = glw.cube.SIZE / 2
+        assert glw.cube.face_at(c, c) == "top"
+        glw.cube.clicked.emit("front")
+        cam.step(1e12)
+        assert np.allclose(cam.rot[2], SNAP_VIEWS["front"][0])
+        acts = {a.shortcut().toString(): a for a in v.actions()}
+        assert set(acts) >= set("0123456")
+        acts["5"].trigger()
+        cam.step(1e12)
+        assert np.allclose(cam.rot[2], SNAP_VIEWS["starboard"][0])
+        acts["0"].trigger()
+        assert v._up_item.pos[1, 1] > v._up_item.pos[0, 1]       # UP arrow points +y
+        # the UP label sits where the camera projects the arrow's end
+        up_lab, up_at = v._marks["UP"]
+        xy = glw.project(up_at)
+        g = glw.cam.view_matrix() @ np.r_[up_at, 1]
+        assert xy is not None and g[2] < 0
+        assert abs(up_lab.x() + up_lab.width() / 2 - xy[0]) <= 1
+        assert glw.project(glw.cam.position() + glw.cam.rot[2]) is None   # behind
+        assert glw.project(glw.cam.center) == pytest.approx((400, 300))
+
+        # neutral dots on the shell, arrows from them to the tips
+        base = np.full((40, NCH), 250.0)
+        v.pose.feed(base, 250.0)
+        blk = base[:5].copy()
+        blk[:, CHANNEL_NAMES.index("W1_B")] += 8.0
+        v.pose.feed(blk, 250.0)
+        v._render_pose(now=0.0)
+        assert np.abs(v.shell.distance(v._neutral_item.pos)).max() < 1e-3
+        h = len(v.layout_)
+        seg = v._arrow_item.pos.reshape(h, -1, 2, 3)
+        hole = v.pose.hole_of[1]
+        assert np.allclose(seg[hole, 0, 0], v._neutral[hole], atol=1e-3)
+        tip = v._tube_item.opts["meshdata"].vertexes().reshape(h, -1, dvm.TUBE_SIDES, 3)[:, -1]
+        assert np.allclose(seg[hole, -1, 0], tip[hole].mean(0), atol=1e-3)   # head at the tip
+        assert np.abs(v.shell.distance(seg[hole, :-2].reshape(-1, 3))).max() < 1e-3
+        v._grid_check.setChecked(False)
+        assert not v._grid_item.visible()
+        v._surface_box.setChecked(True)
+        assert v._surface_item.visible()                      # independent of the grid
+        v._arrow_box.setChecked(False)
+        v._neutral_box.setChecked(False)
+        assert not v._arrow_item.visible() and not v._neutral_item.visible()
+        v._pivot_box.setCurrentText("root")
+        assert np.allclose(v._neutral, v.layout_.root + v.layout_.length[:, None]
+                           * v.layout_.axis)
+    finally:
+        v.close()
+
+
+def test_dome_view_cylinder_grows_under_a_tip(app):
+    from wavi_py.views import dome_view as dvm
+
+    v = dvm.DomeView(fs=250.0)
+    try:
+        base = np.full((40, NCH), 250.0)
+        v.pose.feed(base, 250.0)
+        v._gain_box.setValue(8.0)
+        L0 = v.shell.cyl_len
+        n0 = len(v._grid_item.pos)
+        blk = base[:5].copy()
+        cyl = v.layout_.root[:, 2] < v.layout_.center[2] - 0.5
+        w = next(w for w, hl in v.pose.hole_of.items() if cyl[hl])
+        blk[:, CHANNEL_NAMES.index(f"W{w}_A")] -= 10.0        # 80 deg aft on a cylinder whisker
+        v.pose.feed(blk, 250.0)
+        v._render_pose(now=0.0)
+        assert v.shell.cyl_len > L0 and len(v._grid_item.pos) > n0
+        tip_z = v.trail.recent(0.0, 1.0)[0][-1, v.pose.hole_of[w], 2]
+        assert tip_z >= v.layout_.center[2] - v.shell.cyl_len
+        v.pose.feed(base, 250.0)                               # released
+        v._gain_box.setValue(3.0)                              # restart: back to the base length
+        assert v.shell.cyl_len == L0
+    finally:
+        v.close()
