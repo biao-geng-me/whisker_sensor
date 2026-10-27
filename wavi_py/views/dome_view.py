@@ -358,7 +358,7 @@ class DomeView(ViewWindow):
         tb.addSeparator()
         tb.addWidget(QLabel(" Gain "))
         self._gain_box = QDoubleSpinBox()
-        self._gain_box.setRange(0.1, 50.0)
+        self._gain_box.setRange(0.1, 1000.0)       # high: still-whisker noise is ~0.03 deg
         self._gain_box.setSingleStep(0.5)
         self._gain_box.setValue(self._gain)
         self._gain_box.setSuffix(" x")
