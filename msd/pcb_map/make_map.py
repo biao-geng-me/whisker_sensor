@@ -6,7 +6,8 @@ Gerber zip, and the ESP32 GPIO assignments (PIN_* defines) from the whisker_daq 
     python msd/pcb_map/make_map.py out.html
     python msd/pcb_map/make_map.py out.html --altium-zip A.zip --gerber-zip G.zip --firmware F.ino
 """
-import argparse, html, os, re, sys, zipfile
+import argparse
+import glob, html, os, re, sys, zipfile
 sys.path.insert(0, os.path.dirname(__file__))
 import pcbdoc, gerber
 
@@ -16,8 +17,11 @@ ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
 ap.add_argument("out", help="output .html")
 ap.add_argument("--altium-zip", default=f"{PROJ}/P25937_Whisker_Final.zip")
 ap.add_argument("--gerber-zip", default=f"{PROJ}/REV2_GERBER.zip")
-ap.add_argument("--firmware", default=os.path.join(HERE, "..", "esp32", "whisker_daq", "whisker_daq.ino"))
+ap.add_argument("--firmware", default=os.path.join(HERE, "..", "esp32", "whisker_daq"),
+                help="firmware sketch folder; its .ino and .h files are read for PIN_* and OUT_OF")
 args = ap.parse_args()
+FW_SRC = "\n".join(open(f).read() for f in sorted(glob.glob(os.path.join(args.firmware, "*.ino")) +
+                                                   glob.glob(os.path.join(args.firmware, "*.h"))))
 
 
 def zip_member(path, name):
@@ -50,7 +54,7 @@ for i, c in enumerate(comps):
 # (PIN23, PIN21, ...) are Raspberry Pi 40-pin header numbers: the layout was drawn for a Pi.
 ADS_PIN = {12: "CS", 13: "DRDY", 14: "SCLK", 15: "DOUT", 16: "DIN", 17: "CLKIN"}
 # PIN_* defines in the firmware; P1 signal names map to the firmware's names.
-_fw = dict(re.findall(r"^#define\s+PIN_(\w+)\s+(\d+)", open(args.firmware).read(), re.M))
+_fw = dict(re.findall(r"^#define\s+PIN_(\w+)\s+(\d+)", FW_SRC, re.M))
 FW_GPIO = {k: int(_fw[{"DOUT": "MISO", "DIN": "MOSI"}.get(k, k)]) for k in
            ("SCLK", "DOUT", "DIN", "CS", "DRDY", "CLKIN",
             "SELC_1", "SELB_1", "SELA_1", "SELA_2", "SELB_2", "SELC_2")}
@@ -129,7 +133,7 @@ for i, c in enumerate(comps):
         MUX[m] = pp
 assert sorted(MUX) == [1, 2]
 # cross-check against the firmware's (ADC channel, select) -> OUT table
-_ot = re.search(r"OUT_OF\[NUM_ADC_CH\]\[NUM_SEL\] = \{(.*?)\};", open(args.firmware).read(), re.S).group(1)
+_ot = re.search(r"OUT_OF\[NUM_ADC_CH\]\[NUM_SEL\] = \{(.*?)\};", FW_SRC, re.S).group(1)
 _ot = [[int(v) for v in re.findall(r"\d+", row.split("*/")[1])] for row in re.findall(r"/\*.*?\}", _ot)]
 for m, pp in MUX.items():
     for side in "XY":

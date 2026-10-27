@@ -165,12 +165,12 @@ text(1165, 99, "laptop: wavi_py", "note", "middle"); text(1165, 112, "(--transpo
 text(1165, 125, "BlueOS Pi: daq_server.py", "note", "middle")
 line((1188, 200), (1188, 132)); text(1182, 170, "USB serial", "lab", "end"); text(1182, 184, "921600 Bd", "val", "end")
 # P2 selects: ESP32 bottom -> under the board -> mux A/B/C
-for i, (x, (s_, g)) in enumerate(zip(selx, (("SELA_1", "GPIO25"), ("SELB_1", "GPIO26"), ("SELC_1", "GPIO27")))):
+for i, (x, (s_, g)) in enumerate(zip(selx, (("SELA_1", "GPIO25"), ("SELB_1", "GPIO33"), ("SELC_1", "GPIO32")))):
     yb = 560 + i * 16
     line((x, 510), (x, yb), (1150 + i * 20, yb), (1150 + i * 20, 530), cls="w p2w")
     text(1150 + i * 20 + 4, yb + 36 - i * 16 + 14, "", "val")
 text(1240, 628, "P2: SELA_1 / SELB_1 / SELC_1", "p2t", "end")
-text(1240, 642, "= GPIO25 / 26 / 27", "p2t", "end")
+text(1240, 642, "= GPIO25 / 33 / 32", "p2t", "end")
 text(1240, 658, "firmware puts the same select on mux #2 (own GPIOs)", "note", "end")
 
 # power (lower left, on the board)

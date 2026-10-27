@@ -27,12 +27,12 @@
  *    OUT n:              CONN(2n-1) and CONN(2n)
  *
  *  P1 (ADC/SPI)                     P2 (MUX selects)
- *    1 SCLK      -> GPIO18 (pin14)    1 SELC_1 -> GPIO27
- *    2 DRDY      -> GPIO4  (pin13)    2 SELB_1 -> GPIO26
- *    3 CS        -> GPIO21 (pin12)    3 SELA_1 -> GPIO25
- *    4 DOUT/MISO -> GPIO19 (pin15)    4 SELA_2 -> GPIO32
- *    5 DIN/MOSI  -> GPIO23 (pin16)    5 SELB_2 -> GPIO33
- *    6 CLKIN     -> GPIO16 (pin17)    6 SELC_2 -> GPIO14
+ *    1 SCLK      -> GPIO18 (pin14)    1 SELC_1 -> GPIO32 (D32)
+ *    2 DRDY      -> GPIO4  (pin13)    2 SELB_1 -> GPIO33 (D33)
+ *    3 CS        -> GPIO21 (pin12)    3 SELA_1 -> GPIO25 (D25)
+ *    4 DOUT/MISO -> GPIO19 (pin15)    4 SELA_2 -> GPIO26 (D26)
+ *    5 DIN/MOSI  -> GPIO23 (pin16)    5 SELB_2 -> GPIO27 (D27)
+ *    6 CLKIN     -> GPIO16 (pin17)    6 SELC_2 -> GPIO14 (D14)
  *  PCB GND <-> ESP32 GND is REQUIRED.
  *
  *  SERIAL COMMANDS (single characters)
