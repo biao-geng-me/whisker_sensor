@@ -201,8 +201,11 @@ class _SharedAxis(pg.AxisItem):
         if lv is not None and self.grid is not False:
             grid = (px(lv.mapRectToItem(self, lv.boundingRect())), self.grid)
         r0, r1 = self.range
-        q = abs(r1 - r0) * 1e-9 or 1e-12        # ... and ranges (1.99 vs 1.9899999999999998)
-        return (self.orientation, round(r0 / q), round(r1 / q), self.scale, self.autoSIPrefixScale,
+        # ... and ranges (1.99 vs 1.9899999999999998): ends to 1e-9 of the span, and the
+        # span itself, else every range with the same r0 / span (all of +-v) would match
+        span = float(f"{abs(r1 - r0):.9g}")
+        q = span * 1e-9 or 1e-12
+        return (self.orientation, span, round(r0 / q), round(r1 / q), self.scale, self.autoSIPrefixScale,
                 round(self.width(), 2), round(self.height(), 2), px(self.boundingRect()), grid,
                 id(self._tickLevels), self.style["showValues"])
 
