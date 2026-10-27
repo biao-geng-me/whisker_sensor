@@ -28,6 +28,19 @@ model. Each tip leaves a trail (one line item, per-vertex alpha fading with
 age) of the last Trail seconds. The grid spacing is set in degrees of bend
 (auto: a 1-2-5 value near 12 deg on the shell at the current gain); the
 readout next to it gives the same spacing on the shell, in degrees and mm.
+Grid and Surface toggle separately. The cylinder grows downward (in R/4
+steps) when a tip goes below its end, so the trails stay on the drawn shell.
+Neutral puts a dot at each whisker's zero-bend tip (on the shell in centre
+mode, the rest tip in root mode) and Arrows draws an arrow from it to the
+current tip, along the tip's way (an arc on the shell).
+
+Camera (``dome_camera.TrackballCamera``, replacing GLViewWidget's azimuth /
+elevation orbit, which stops at the poles): left drag tumbles freely in every
+direction, Shift + left drag rolls, Ctrl + left or middle drag pans, wheel or
+right drag zooms. A view cube (top right, click a face) and keys 1-6 snap to
+front / back / top / bottom / starboard / port, 0 to the default view; the
+triad (bottom left) and the green UP arrow show the ROV frame (the scene is
+rov-cad's collar frame: +z forward along the tube axis, +y up, -x starboard).
 
 The status bar shows the measured frame rate (paints per second) and the mean
 per-frame times: pose (bus read + pose model + tube geometry), upload
@@ -40,6 +53,7 @@ and of the whole process (all threads: DAQ reader, software GL if any).
 from __future__ import annotations
 
 import ctypes
+import math
 import os
 import sys
 import time
@@ -47,9 +61,11 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QAction, QGuiApplication, QOffscreenSurface, QOpenGLContext
-from PyQt6.QtWidgets import QCheckBox, QComboBox, QDoubleSpinBox, QLabel, QSpinBox, QToolBar
+from PyQt6.QtCore import QPointF, QRectF, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import (QAction, QColor, QFont, QGuiApplication, QKeySequence, QMatrix4x4,
+                         QOffscreenSurface, QOpenGLContext, QPainter, QPen, QPolygonF, QTransform)
+from PyQt6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QLabel, QMenu, QSpinBox,
+                             QToolBar, QToolButton, QWidget)
 
 
 def _match_pyopengl_platform() -> None:
@@ -86,9 +102,12 @@ from pyqtgraph.opengl import shaders                    # noqa: E402
 from pyqtgraph.opengl.MeshData import MeshData          # noqa: E402
 
 from wavi_py.views.base import ViewWindow               # noqa: E402
+from wavi_py.views.dome_camera import (FORWARD, SNAP_KEYS, SNAP_VIEWS, STARBOARD, UP,  # noqa: E402
+                                       TrackballCamera, look_rotation)
 from wavi_py.views.whisker_plots import _ElidedLabel    # noqa: E402
 from whisker_link.dome_pose import (DomeLayout, DomePose, Shell, TrailBuffer,  # noqa: E402
-                                    nice_grid_step)
+                                    arrow_segments, centre_pivots, neutral_tips, nice_grid_step,
+                                    tip_path)
 
 ASSET_DIR = Path(__file__).resolve().parents[1] / "assets" / "dome"
 TUBE_SIDES = 8
@@ -101,6 +120,16 @@ _GRID_COLOR = (0.25, 0.35, 0.55, 0.35)
 _SURFACE_COLOR = (0.55, 0.65, 0.85, 0.07)
 TRAIL_MAX_S = 10.0
 TRAIL_RATE_HZ = 60.0                   # trail samples per second at most
+ARROW_PTS = 8                          # points along each arrow's shaft
+_ARROW_COLOR = (0.85, 0.25, 0.08, 1.0)
+_NEUTRAL_COLOR = (0.1, 0.1, 0.12, 0.9)
+_UP_COLOR = (0.1, 0.6, 0.2, 1.0)
+SNAP_ANIM_S = 0.25
+# corner widgets: label, colour per ROV axis
+_AXES = (("Up", UP, QColor(30, 150, 50)), ("Fwd", FORWARD, QColor(40, 90, 220)),
+         ("Stbd", STARBOARD, QColor(210, 50, 40)))
+_FACE_LABEL = {"front": "FRONT", "back": "BACK", "top": "TOP", "bottom": "BOTTOM",
+               "starboard": "STBD", "port": "PORT"}
 _CMAP = pg.colormap.get("viridis")    # bend magnitude: purple straight .. yellow full
 
 # A headlight: lit from the camera, two-sided (the CAD mesh's winding is not
@@ -202,14 +231,222 @@ class _TranslucentMesh(gl.GLMeshItem):
             GL.glDepthMask(GL.GL_TRUE)
 
 
+class ViewCube(QWidget):
+    """Corner view cube: turns with the camera; a click on a face emits
+    ``clicked(view name)``. Painted with QPainter over the GL view, only when
+    the camera moves."""
+
+    clicked = pyqtSignal(str)
+    SIZE = 100
+
+    def __init__(self, glw: "_GLView"):
+        super().__init__(glw)
+        self._glw = glw
+        self._hover: Optional[str] = None
+        self.setFixedSize(self.SIZE, self.SIZE)
+        self.setMouseTracking(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("Click a face to look at it (keys: "
+                        + ", ".join(f"{k} {n}" for k, n in SNAP_KEYS.items()) + ", 0 default)")
+        # face corners in the face's own (right, up) as seen when snapped to it
+        self._quads = {}
+        for name, (n, up) in SNAP_VIEWS.items():
+            r = look_rotation(n, up)
+            self._quads[name] = np.array([n + a * r[0] + b * r[1]
+                                          for a, b in ((-1, 1), (1, 1), (1, -1), (-1, -1))])
+
+    def faces(self) -> list[tuple[str, np.ndarray, float]]:
+        """Faces toward the camera: (name, screen quad (4, 2) px, facing 0..1)."""
+        cam = self._glw.cam
+        s, c = 0.27 * self.SIZE, 0.5 * self.SIZE
+        out = []
+        for name, (n, _) in SNAP_VIEWS.items():
+            facing = float(cam.to_view(n)[2])
+            if facing > 1e-6:
+                v = cam.to_view(self._quads[name])
+                out.append((name, np.c_[c + s * v[:, 0], c - s * v[:, 1]], facing))
+        return out
+
+    def face_at(self, x: float, y: float) -> Optional[str]:
+        for name, q, _ in self.faces():
+            if QPolygonF([QPointF(*p) for p in q]).containsPoint(
+                    QPointF(x, y), Qt.FillRule.OddEvenFill):
+                return name
+        return None
+
+    def paintEvent(self, _ev) -> None:  # noqa: N802 — Qt naming
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        font = QFont(self.font())
+        font.setPixelSize(26)
+        font.setBold(True)
+        for name, q, facing in self.faces():
+            poly = QPolygonF([QPointF(*pt) for pt in q])
+            base = QColor(255, 210, 120) if name == self._hover else QColor(205, 215, 235)
+            p.setTransform(QTransform())
+            p.setPen(QPen(QColor(60, 70, 90), 1.2))
+            p.setBrush(base.darker(int(100 + 25 * (1 - facing))))
+            p.drawPolygon(poly)
+            if facing < 0.25:
+                continue
+            t = QTransform()
+            square = QPolygonF([QPointF(-50, -50), QPointF(50, -50), QPointF(50, 50),
+                                QPointF(-50, 50)])
+            if QTransform.quadToQuad(square, poly, t):
+                p.setTransform(t)
+                p.setFont(font)
+                p.setPen(QColor(30, 35, 50))
+                p.drawText(QRectF(-50, -50, 100, 100), Qt.AlignmentFlag.AlignCenter,
+                           _FACE_LABEL[name])
+        p.end()
+
+    def mousePressEvent(self, ev) -> None:  # noqa: N802 — Qt naming
+        name = self.face_at(ev.position().x(), ev.position().y())
+        if name is None or ev.button() != Qt.MouseButton.LeftButton:
+            ev.ignore()                        # a drag that starts here turns the scene
+            return
+        self.clicked.emit(name)
+
+    def mouseMoveEvent(self, ev) -> None:  # noqa: N802 — Qt naming
+        name = self.face_at(ev.position().x(), ev.position().y())
+        if name != self._hover:
+            self._hover = name
+            self.update()
+        ev.ignore()
+
+    def leaveEvent(self, ev) -> None:  # noqa: N802 — Qt naming
+        self._hover = None
+        self.update()
+
+
+class AxisTriad(QWidget):
+    """Corner triad of the ROV's axes (Up, Fwd, Stbd) as the camera sees them."""
+
+    SIZE = 110
+
+    def __init__(self, glw: "_GLView"):
+        super().__init__(glw)
+        self._glw = glw
+        self.setFixedSize(self.SIZE, self.SIZE)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+
+    def paintEvent(self, _ev) -> None:  # noqa: N802 — Qt naming
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        font = QFont(self.font())
+        font.setPixelSize(12)
+        font.setBold(True)
+        p.setFont(font)
+        c, s = self.SIZE / 2, 0.24 * self.SIZE
+        axes = [(name, self._glw.cam.to_view(v), col) for name, v, col in _AXES]
+        for name, v, col in sorted(axes, key=lambda a: a[1][2]):      # back to front
+            p.setPen(QPen(col, 3 if v[2] >= 0 else 2, Qt.PenStyle.SolidLine,
+                          Qt.PenCapStyle.RoundCap))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            flat = math.hypot(v[0], v[1])
+            if flat < 0.3:                     # along the view: a dot (toward) or a cross (away)
+                p.drawEllipse(QPointF(c, c), 5, 5)
+                if v[2] > 0:
+                    p.drawPoint(QPointF(c, c))
+                else:
+                    p.drawLine(QPointF(c - 3, c - 3), QPointF(c + 3, c + 3))
+                    p.drawLine(QPointF(c - 3, c + 3), QPointF(c + 3, c - 3))
+                d = (0.7, -0.7) if flat < 1e-3 else (v[0] / flat, -v[1] / flat)
+                at = QPointF(c + 18 * d[0], c + 18 * d[1])
+            else:
+                p.drawLine(QPointF(c, c), QPointF(c + s * v[0], c - s * v[1]))
+                at = QPointF(c + (s + 13) * v[0] / max(flat, 1.0),
+                             c - (s + 13) * v[1] / max(flat, 1.0))
+            p.drawText(QRectF(at.x() - 20, at.y() - 8, 40, 16), Qt.AlignmentFlag.AlignCenter, name)
+        p.end()
+
+
 class _GLView(gl.GLViewWidget):
-    """GLViewWidget that times its paints."""
+    """GLViewWidget with a trackball camera (free tumble), the view cube and the
+    axis triad, and timed paints."""
+
+    camera_moved = pyqtSignal()
 
     def __init__(self, *a, **kw):
         super().__init__(*a, **kw)
         self.paint_s = self.paint_cpu_s = 0.0
         self.paints = 0
         self.finish = os.environ.get("WAVI_DOME_FINISH", "") not in ("", "0")
+        self.cam = TrackballCamera(fov_deg=self.opts["fov"])
+        self._mouse = None
+        self.cube = ViewCube(self)
+        self.triad = AxisTriad(self)
+        self.camera_moved.connect(self.cube.update)
+        self.camera_moved.connect(self.triad.update)
+
+    # ----- camera (GLViewWidget's own state is not used)
+    def viewMatrix(self):  # noqa: N802 — pyqtgraph naming
+        self.opts["distance"] = self.cam.distance          # the projection's clip planes
+        return QMatrix4x4(*self.cam.view_matrix().ravel().tolist())
+
+    def cameraPosition(self):  # noqa: N802 — pyqtgraph naming
+        return pg.Vector(*self.cam.position())
+
+    def orbit(self, azim, elev):
+        """pyqtgraph's arrow keys: azimuth / elevation steps, here a tumble."""
+        k = self.cam.deg_per_px
+        self.cam.tumble(-azim / k, elev / k)
+        self.moved()
+
+    def pan(self, dx, dy, dz=0.0, relative="view"):
+        self.cam.pan(dx, dy, self.width())
+        self.moved()
+
+    def moved(self) -> None:
+        self.update()
+        self.camera_moved.emit()
+
+    def project(self, p) -> Optional[tuple[float, float]]:
+        """Widget pixel (x, y) of the world point ``p``; None behind the camera."""
+        v = self.cam.view_matrix() @ np.r_[np.asarray(p, float), 1.0]
+        if v[2] > -1e-6:
+            return None
+        f = 0.5 * self.width() / math.tan(math.radians(self.opts["fov"]) / 2)  # fov: horizontal
+        return 0.5 * self.width() + f * v[0] / -v[2], 0.5 * self.height() - f * v[1] / -v[2]
+
+    def mousePressEvent(self, ev):  # noqa: N802 — Qt naming
+        self._mouse = ev.position()
+
+    def mouseMoveEvent(self, ev):  # noqa: N802 — Qt naming
+        pos = ev.position()
+        if self._mouse is None:
+            self._mouse = pos
+        dx, dy = pos.x() - self._mouse.x(), pos.y() - self._mouse.y()
+        self._mouse = pos
+        btn, mod = ev.buttons(), ev.modifiers()
+        if btn == Qt.MouseButton.LeftButton:
+            if mod & Qt.KeyboardModifier.ControlModifier:
+                self.cam.pan(dx, dy, self.width())
+            elif mod & Qt.KeyboardModifier.ShiftModifier:
+                self.cam.roll(-dx * self.cam.deg_per_px)
+            else:
+                self.cam.tumble(dx, dy)
+        elif btn == Qt.MouseButton.MiddleButton:
+            self.cam.pan(dx, dy, self.width())
+        elif btn == Qt.MouseButton.RightButton:
+            self.cam.zoom(1.005 ** dy)
+        else:
+            return
+        self.moved()
+
+    def mouseReleaseEvent(self, ev):  # noqa: N802 — Qt naming
+        self._mouse = None
+
+    def wheelEvent(self, ev):  # noqa: N802 — Qt naming
+        delta = ev.angleDelta().y() or ev.angleDelta().x()
+        self.cam.zoom(0.999 ** delta)
+        self.moved()
+
+    def resizeEvent(self, ev):  # noqa: N802 — Qt naming
+        super().resizeEvent(ev)
+        self.cube.move(self.width() - self.cube.width() - 8, 8)
+        self.triad.move(8, self.height() - self.triad.height() - 8)
+        self.camera_moved.emit()               # labels placed in pixels
 
     def paintGL(self, *a, **kw):  # noqa: N802 — Qt naming
         t0, c0 = time.perf_counter(), time.thread_time()
@@ -269,7 +506,9 @@ class DomeView(ViewWindow):
         self._paused = False
         self._gain = 3.0
         self._tubes = True
-        self._show_shell = True
+        self._show_grid = True
+        self._show_neutral = True
+        self._show_arrows = True
         self._centre_pivot = True
         self._trail_s = 2.0
         self._grid_bend_deg = 0.0              # 0: auto
@@ -306,8 +545,31 @@ class DomeView(ViewWindow):
                                               glOptions="translucent")
         self._surface_item.setDepthValue(12)
         self._surface_item.setVisible(False)
-        for it in (self._grid_item, self._trail_item, self._surface_item):
+        # neutral dots, deflection arrows, the UP marker
+        self._neutral_item = gl.GLScatterPlotItem(size=8.0, color=_NEUTRAL_COLOR, pxMode=True,
+                                                  glOptions="translucent")
+        self._neutral_item.setDepthValue(13)
+        self._arrow_item = gl.GLLinePlotItem(mode="lines", width=2.5, antialias=True,
+                                             glOptions="translucent")
+        self._arrow_item.setDepthValue(14)
+        self._up_item = gl.GLLinePlotItem(mode="lines", width=3.0, antialias=True,
+                                          color=_UP_COLOR, glOptions="opaque")
+        for it in (self._grid_item, self._trail_item, self._surface_item, self._neutral_item,
+                   self._arrow_item, self._up_item):
             self._glw.addItem(it)
+        # their labels: plain Qt labels over the GL view, moved only when the camera moves
+        # (pyqtgraph's GLTextItem paints nothing here under Mesa / EGL)
+        self._marks: dict[str, tuple[QLabel, np.ndarray]] = {}
+        for text, col in (("UP", "#1e9632"), ("FWD", "#285adc")):
+            lab = QLabel(text, self._glw)
+            lab.setStyleSheet(f"color: {col}; font-weight: bold; font-size: 13px;"
+                              " background: transparent;")
+            lab.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            lab.adjustSize()
+            self._marks[text] = (lab, np.zeros(3))
+        self._glw.camera_moved.connect(self._place_marks)
+        self._update_marks()
+        self._glw.cube.clicked.connect(self.snap_view)
         self.reset_camera()
 
         self._build_toolbar(target_fps)
@@ -323,6 +585,7 @@ class DomeView(ViewWindow):
         self._timer.timeout.connect(self._on_frame)
         self.set_target_fps(target_fps)
         self._update_grid()
+        self._update_neutral()
         self._render_pose()
 
     # ----- scene
@@ -338,9 +601,35 @@ class DomeView(ViewWindow):
         self._dome_center = V.mean(axis=0)
 
     def reset_camera(self) -> None:
-        c = self.layout_.center - [0.0, 0.0, 0.2 * self.shell.radius]
-        self._glw.setCameraPosition(pos=pg.Vector(*c), distance=4.4 * self.shell.radius,
-                                    elevation=25, azimuth=-60)
+        """The default 3/4 view (key 0): centred, the whole shell in view."""
+        cam = self._glw.cam
+        cam.center = self.layout_.center - [0.0, 0.0, 0.2 * self.shell.radius]
+        cam.distance = 4.4 * self.shell.radius
+        cam.snap_to("home")
+        self._glw.moved()
+
+    def snap_view(self, name: str) -> None:
+        """Turn (animated) to one of the ``dome_camera.SNAP_VIEWS``, or "home"."""
+        self._glw.cam.snap_to(name, animate_s=SNAP_ANIM_S, now=time.monotonic())
+        self._glw.moved()
+
+    def _update_marks(self) -> None:
+        """The UP arrow above the shell's equator and the FWD label at its pole."""
+        R, c = self.shell.radius, self.layout_.center
+        a, b = c + 1.04 * R * UP, c + 1.32 * R * UP
+        h = 0.06 * R
+        seg = [a, b, b, b - h * UP + 0.6 * h * FORWARD, b, b - h * UP - 0.6 * h * FORWARD]
+        self._up_item.setData(pos=np.array(seg, np.float32))
+        self._marks["UP"] = (self._marks["UP"][0], b + 0.04 * R * UP)
+        self._marks["FWD"] = (self._marks["FWD"][0], c + 1.06 * R * FORWARD)
+        self._place_marks()
+
+    def _place_marks(self) -> None:
+        for lab, at in self._marks.values():
+            xy = self._glw.project(at)
+            lab.setVisible(xy is not None)
+            if xy is not None:
+                lab.move(int(xy[0] - lab.width() / 2), int(xy[1] - lab.height() / 2))
 
     def _build_toolbar(self, target_fps: float) -> None:
         tb = QToolBar("Dome")
@@ -378,24 +667,54 @@ class DomeView(ViewWindow):
         self._fps_box.setToolTip("Target render rate (frames per second)")
         self._fps_box.valueChanged.connect(self.set_target_fps)
         tb.addWidget(self._fps_box)
-        view = QAction("Reset view", self)
-        view.triggered.connect(self.reset_camera)
-        tb.addAction(view)
+        views = QToolButton()
+        views.setText("View")
+        views.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        menu = QMenu(views)
+        home = QAction("Default (reset)", self)
+        home.setShortcut(QKeySequence("0"))
+        home.triggered.connect(self.reset_camera)
+        menu.addAction(home)
+        self.addAction(home)                   # shortcuts work with the menu closed
+        for key, name in SNAP_KEYS.items():
+            act = QAction(name.capitalize(), self)
+            act.setShortcut(QKeySequence(key))
+            act.triggered.connect(lambda _=False, n=name: self.snap_view(n))
+            menu.addAction(act)
+            self.addAction(act)
+        views.setMenu(menu)
+        views.setToolTip(
+            "Snap the view (also the view cube, top right). Keys: 1 front, 2 back, 3 top,"
+            " 4 bottom, 5 starboard, 6 port, 0 default.\nMouse: left drag tumbles (no limit),"
+            " Shift+left rolls, Ctrl+left or middle pans, wheel or right drag zooms.\n"
+            "ROV frame (rov-cad collar frame): forward +z (tube axis), up +y, starboard -x.")
+        tb.addWidget(views)
 
     def _build_shell_toolbar(self) -> None:
         self.addToolBarBreak()
         tb = QToolBar("Shell")
         self.addToolBar(tb)
-        self._shell_box = QCheckBox("Shell")
-        self._shell_box.setChecked(self._show_shell)
-        self._shell_box.setToolTip("Scribe shell: grid on an imaginary sphere + cylinder"
-                                   " concentric with the dome")
-        self._shell_box.toggled.connect(self.set_shell_visible)
-        tb.addWidget(self._shell_box)
+        self._grid_check = QCheckBox("Grid")
+        self._grid_check.setChecked(self._show_grid)
+        self._grid_check.setToolTip("Scribe shell grid: an imaginary sphere + cylinder"
+                                    " concentric with the dome")
+        self._grid_check.toggled.connect(self.set_grid_visible)
+        tb.addWidget(self._grid_check)
         self._surface_box = QCheckBox("Surface")
-        self._surface_box.setToolTip("Also a faint translucent shell surface")
+        self._surface_box.setToolTip("A faint translucent shell surface")
         self._surface_box.toggled.connect(self.set_surface_visible)
         tb.addWidget(self._surface_box)
+        self._neutral_box = QCheckBox("Neutral")
+        self._neutral_box.setChecked(self._show_neutral)
+        self._neutral_box.setToolTip("A dot at each whisker's zero-bend tip (on the shell in"
+                                     " centre mode)")
+        self._neutral_box.toggled.connect(self.set_neutral_visible)
+        tb.addWidget(self._neutral_box)
+        self._arrow_box = QCheckBox("Arrows")
+        self._arrow_box.setChecked(self._show_arrows)
+        self._arrow_box.setToolTip("An arrow from each neutral dot to the current tip")
+        self._arrow_box.toggled.connect(self.set_arrows_visible)
+        tb.addWidget(self._arrow_box)
         tb.addWidget(QLabel(" Pivot "))
         self._pivot_box = QComboBox()
         self._pivot_box.addItems(["centre", "root"])
@@ -415,7 +734,7 @@ class DomeView(ViewWindow):
         self._trail_box.setToolTip("Tip trail length, fading with age (0: off)")
         self._trail_box.valueChanged.connect(self.set_trail_s)
         tb.addWidget(self._trail_box)
-        tb.addWidget(QLabel(" Grid "))
+        tb.addWidget(QLabel(" Grid every "))
         self._grid_box = QDoubleSpinBox()
         self._grid_box.setRange(0.0, 45.0)
         self._grid_box.setDecimals(2)
@@ -451,20 +770,45 @@ class DomeView(ViewWindow):
         auto = "" if self._grid_bend_deg else "auto "
         self._grid_label.setText(f" {auto}{bend:g} deg bend = {shell_deg:g} deg / {mm:.0f} mm"
                                  f" on the shell (R {self.shell.radius:.0f}) ")
-        self._grid_item.setVisible(self._show_shell)
+        self._grid_item.setVisible(self._show_grid)
 
-    def set_shell_visible(self, on: bool) -> None:
-        self._show_shell = bool(on)
-        self._grid_item.setVisible(self._show_shell)
-        self._surface_item.setVisible(self._show_shell and self._surface_box.isChecked())
+    def _shell_changed(self) -> None:
+        """The shell's radius or cylinder length changed: grid, surface, marks."""
+        self._surface_item.setMeshData(meshdata=shell_surface(self.shell))
+        self._update_grid()
+        self._update_marks()
+
+    def _restart_trail(self) -> None:
+        """Gain / pivot / radius changed: the old trail and the cylinder's growth go."""
+        self.trail.clear()
+        if self.shell.uncover():
+            self._shell_changed()
+
+    def set_grid_visible(self, on: bool) -> None:
+        self._show_grid = bool(on)
+        self._grid_item.setVisible(self._show_grid)
 
     def set_surface_visible(self, on: bool) -> None:
-        self._surface_item.setVisible(bool(on) and self._show_shell)
+        self._surface_item.setVisible(bool(on))
+
+    def set_neutral_visible(self, on: bool) -> None:
+        self._show_neutral = bool(on)
+        self._neutral_item.setVisible(self._show_neutral)
+
+    def set_arrows_visible(self, on: bool) -> None:
+        self._show_arrows = bool(on)
+        self._arrow_item.setVisible(self._show_arrows)
+        self._render_pose()
 
     def set_centre_pivot(self, on: bool) -> None:
         self._centre_pivot = bool(on)
-        self.trail.clear()
+        self._restart_trail()
+        self._update_neutral()
         self._render_pose()
+
+    def _update_neutral(self) -> None:
+        self._neutral = neutral_tips(self.layout_, self.shell if self._centre_pivot else None)
+        self._neutral_item.setData(pos=self._neutral.astype(np.float32))
 
     def set_trail_s(self, secs: float) -> None:
         self._trail_s = float(secs)
@@ -477,9 +821,9 @@ class DomeView(ViewWindow):
     def set_shell_radius(self, r: float) -> None:
         self._shell_radius = float(r)
         self.shell = Shell.around(self.layout_, self._shell_radius)
-        self._surface_item.setMeshData(meshdata=shell_surface(self.shell))
         self.trail.clear()
-        self._update_grid()
+        self._shell_changed()
+        self._update_neutral()
         self._render_pose()
 
     # ----- control (main window)
@@ -509,7 +853,7 @@ class DomeView(ViewWindow):
 
     def _set_gain(self, g: float) -> None:
         self._gain = float(g)
-        self.trail.clear()                     # the old trail was drawn at the old gain
+        self._restart_trail()                  # the old trail was drawn at the old gain
         self._update_grid()
         self._render_pose()
 
@@ -532,6 +876,8 @@ class DomeView(ViewWindow):
     def _on_frame(self) -> None:
         if not self.isVisible() or self.isMinimized():
             return
+        if self._glw.cam.step(time.monotonic()):         # a snap turning
+            self._glw.moved()
         roll = self.stats.roll(self._glw)
         if roll:
             self._stats_label.setText(
@@ -568,6 +914,19 @@ class DomeView(ViewWindow):
             b[np.linalg.norm(b, axis=1) < 1e-9] = lay.e2[np.linalg.norm(b, axis=1) < 1e-9]
         return b / np.linalg.norm(b, axis=1, keepdims=True)
 
+    def _arrows(self, mag: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """(segment points, colours) of the neutral -> tip arrows, float32;
+        transparent for a whisker without data."""
+        shell = self.shell if self._centre_pivot else None
+        th = self.pose.angles() * self._gain
+        path = tip_path(self.layout_, th, shell, ARROW_PTS)
+        pivot = centre_pivots(self.layout_) if self._centre_pivot else self.layout_.root
+        seg = arrow_segments(path, path[:, -1] - pivot, head_mm=max(6.0, 0.05 * self.shell.radius))
+        n_per = seg.shape[1] * 2
+        col = np.tile(np.array(_ARROW_COLOR, np.float32), (len(seg), n_per, 1))
+        col[~np.isfinite(mag), :, 3] = 0.0
+        return seg.reshape(-1, 3).astype(np.float32), col.reshape(-1, 4)
+
     def _render_pose(self, t0: Optional[float] = None, now: Optional[float] = None) -> None:
         """Draw the latest pose; ``now`` (s, monotonic by default) stamps the trail."""
         t0 = time.perf_counter() if t0 is None else t0
@@ -576,6 +935,9 @@ class DomeView(ViewWindow):
                                    n_root=N_ROOT, n_shaft=N_SHAFT)
         col = self._colors(mag)                                  # (H, 4)
         n_pts = pts.shape[1]
+        if self._centre_pivot and self.shell.cover(pts[:, -1]):
+            self._shell_changed()                    # the cylinder grew under a tip
+        arrows = self._arrows(mag) if self._show_arrows else None
         trail = None
         if self._trail_s > 0:
             tips = np.where(np.isfinite(mag)[:, None], pts[:, -1], np.nan)
@@ -600,6 +962,8 @@ class DomeView(ViewWindow):
         if trail is not None:
             self._trail_item.setData(pos=trail[0].astype(np.float32),
                                      color=trail[1].astype(np.float32))
+        if arrows is not None:
+            self._arrow_item.setData(pos=arrows[0], color=arrows[1])
         t2 = time.perf_counter()
         self.stats.frames += 1
         self.stats.pose_s += t1 - t0

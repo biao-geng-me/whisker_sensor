@@ -23,7 +23,9 @@ hemisphere + a cylinder down the tube axis) and the centre-pivot mode, in which
 each whisker turns about the dome centre (or, on the cylinder part, the axis
 point at its height) so that its tip moves on the shell; on the sphere part a
 bend of phi moves the tip phi of arc, i.e. ``radius * phi`` mm. ``TrailBuffer``
-keeps the tips' recent path for the trails.
+keeps the tips' recent path for the trails; ``neutral_tips`` / ``tip_path`` /
+``arrow_segments`` give each whisker's zero-bend mark and the arrow from it
+to the current tip.
 
 The dome geometry and each hole's bending frame come from
 ``wavi_py/assets/dome/whiskers.json`` (wavi_py/tools/export_dome_assets.py):
@@ -272,7 +274,29 @@ class Shell:
     def __post_init__(self) -> None:
         self.center = np.asarray(self.center, dtype=np.float64)
         if self.cyl_len <= 0:
-            self.cyl_len = 0.6 * self.radius
+            self.cyl_len = 1.0 * self.radius
+        self.base_cyl_len = self.cyl_len
+
+    def cover(self, p: np.ndarray, step: float = 0.0) -> bool:
+        """Lengthen the cylinder (in ``step`` mm increments, default R / 4) so
+        it reaches down past points ``p`` (..., 3), up to the 10 R of ``hit``;
+        True when it grew (redraw the grid)."""
+        z = np.asarray(p)[..., 2]
+        z = z[np.isfinite(z)]
+        if not len(z):
+            return False
+        need = min(self.center[2] - float(z.min()), 10 * self.radius)
+        if need <= self.cyl_len:
+            return False
+        step = step or self.radius / 4
+        self.cyl_len = math.ceil(need / step) * step
+        return True
+
+    def uncover(self) -> bool:
+        """Back to the initial cylinder length; True if that changed it."""
+        grown = self.cyl_len != self.base_cyl_len
+        self.cyl_len = self.base_cyl_len
+        return grown
 
     @classmethod
     def around(cls, layout: DomeLayout, radius: float = 0.0) -> "Shell":
@@ -364,13 +388,10 @@ def centre_pivots(layout: DomeLayout) -> np.ndarray:
     return piv
 
 
-def centre_pivot_shape(layout: DomeLayout, shell: Shell, theta: np.ndarray,
-                       n_pts: int = 15) -> tuple[np.ndarray, np.ndarray]:
-    """Centre-pivot mode: each whisker turns about its centre pivot, so its tip
-    scribes on ``shell``. The rest direction is from the pivot through the
-    root; ``theta`` (H, 2) rad tilts it toward the hole's e1 / e2 (made normal
-    to that direction). Returns (polylines (H, n_pts, 3), tips (H, 3)): drawn
-    straight from the hole to the tip, so the whisker stays attached."""
+def centre_pivot_tips(layout: DomeLayout, shell: Shell, theta: np.ndarray) -> np.ndarray:
+    """Centre-pivot tips on ``shell``, (..., H, 3) for ``theta`` (..., H, 2)
+    rad: the rest direction, pivot -> root, tilted by |theta| toward the hole's
+    e1 / e2 (made normal to that direction)."""
     th = np.nan_to_num(np.asarray(theta, dtype=np.float64))
     piv = centre_pivots(layout)
     u = layout.root - piv
@@ -378,13 +399,78 @@ def centre_pivot_shape(layout: DomeLayout, shell: Shell, theta: np.ndarray,
     e1 = layout.e1 - np.einsum("ij,ij->i", layout.e1, u)[:, None] * u
     e1 /= np.linalg.norm(e1, axis=1, keepdims=True)
     e2 = np.cross(u, e1)
-    phi = np.hypot(th[:, 0], th[:, 1])
+    phi = np.hypot(th[..., 0], th[..., 1])[..., None]
     safe = np.where(phi > 1e-12, phi, 1.0)
-    d = (th[:, :1] * e1 + th[:, 1:] * e2) / safe[:, None]
-    v = np.cos(phi)[:, None] * u + np.sin(phi)[:, None] * d
-    tips = shell.hit(piv, v)
+    d = (th[..., :1] * e1 + th[..., 1:] * e2) / safe
+    v = np.cos(phi) * u + np.sin(phi) * d
+    o = np.broadcast_to(piv, v.shape)
+    return shell.hit(o.reshape(-1, 3), v.reshape(-1, 3)).reshape(v.shape)
+
+
+def centre_pivot_shape(layout: DomeLayout, shell: Shell, theta: np.ndarray,
+                       n_pts: int = 15) -> tuple[np.ndarray, np.ndarray]:
+    """Centre-pivot mode: each whisker turns about its centre pivot, so its tip
+    scribes on ``shell`` (``centre_pivot_tips``). Returns (polylines (H, n_pts,
+    3), tips (H, 3)): drawn straight from the hole to the tip, so the whisker
+    stays attached."""
+    tips = centre_pivot_tips(layout, shell, theta)
     s = np.linspace(0.0, 1.0, n_pts)[None, :, None]
     return layout.root[:, None, :] + s * (tips - layout.root)[:, None, :], tips
+
+
+def root_tips(layout: DomeLayout, theta: np.ndarray, lr: float = LR_MM) -> np.ndarray:
+    """Tips of ``whisker_shape`` (the physical root model), (..., H, 3) for
+    ``theta`` (..., H, 2), in closed form."""
+    th = np.nan_to_num(np.asarray(theta, dtype=np.float64))
+    phi = np.hypot(th[..., 0], th[..., 1])[..., None]
+    safe = np.where(phi > 1e-9, phi, 1.0)
+    d = np.where(phi > 1e-9, (th[..., :1] * layout.e1 + th[..., 1:] * layout.e2) / safe,
+                 layout.e1)
+    k = lr / safe                                                       # root radius
+    small = phi < 1e-6
+    ls = np.maximum(layout.length - lr, 0.0)[:, None]
+    u = np.where(small, lr * phi / 2, k * (1 - np.cos(phi))) + ls * np.sin(phi)
+    w = np.where(small, lr, k * np.sin(phi)) + ls * np.cos(phi)
+    return layout.root + u * d + w * layout.axis
+
+
+def neutral_tips(layout: DomeLayout, shell: Optional[Shell] = None) -> np.ndarray:
+    """(H, 3) zero-bend tips: on ``shell`` (centre-pivot mode) or, without
+    one, the physical rest tips (root + length along the axis)."""
+    zero = np.zeros((len(layout), 2))
+    return centre_pivot_tips(layout, shell, zero) if shell is not None else root_tips(layout, zero)
+
+
+def tip_path(layout: DomeLayout, theta: np.ndarray, shell: Optional[Shell] = None,
+             n: int = 8) -> np.ndarray:
+    """(H, n, 3) the tip's way from neutral (zero bend) to ``theta``, the
+    bend scaled 0..1: on the shell in centre-pivot mode (an arc of the sphere
+    / a curve on the cylinder), the root model's tips otherwise."""
+    th = np.asarray(theta, dtype=np.float64)[None] * np.linspace(0.0, 1.0, n)[:, None, None]
+    p = centre_pivot_tips(layout, shell, th) if shell is not None else root_tips(layout, th)
+    return p.transpose(1, 0, 2)
+
+
+def arrow_segments(path: np.ndarray, normal: np.ndarray, head_mm: float = 8.0,
+                   head_deg: float = 25.0) -> np.ndarray:
+    """Arrows along ``path`` (H, n, 3) as line segments (H, n + 1, 2, 3): the
+    n - 1 pieces of the shaft, then the two barbs of the head, which lie in
+    the plane normal to ``normal`` (H, 3; e.g. the shell's outward normal at
+    the tip). Each barb is ``head_mm`` long, but at most 40 % of the arrow's
+    chord, so a zero arrow collapses to a point at its tip."""
+    shaft = np.stack([path[:, :-1], path[:, 1:]], axis=2)              # (H, n-1, 2, 3)
+    tip = path[:, -1]
+    t = tip - path[:, -2]
+    tn = np.linalg.norm(t, axis=1, keepdims=True)
+    t = t / np.maximum(tn, 1e-12)
+    side = np.cross(normal, t)
+    side /= np.maximum(np.linalg.norm(side, axis=1, keepdims=True), 1e-12)
+    chord = np.linalg.norm(tip - path[:, 0], axis=1, keepdims=True)
+    h = np.minimum(head_mm, 0.4 * chord)
+    a = math.radians(head_deg)
+    barbs = [tip - h * (math.cos(a) * t + sgn * math.sin(a) * side) for sgn in (1, -1)]
+    head = np.stack([np.stack([tip, b], axis=1) for b in barbs], axis=1)  # (H, 2, 2, 3)
+    return np.concatenate([shaft, head], axis=1)
 
 
 def nice_grid_step(gain: float, target_deg: float = 12.0) -> float:
