@@ -12,9 +12,9 @@
 // ── Pins ─────────────────────────────────────────────────────────────────────
 #define PIN_SCLK   18
 #define PIN_MISO   19
-#define PIN_MOSI   23
+#define PIN_MOSI    5   // D5: in the middle of the P1 group (was GPIO23 before 2026-10-27)
 #define PIN_CS     21
-#define PIN_DRDY   17   // TX2: in the middle of the P1 group (was GPIO4 before 2026-10-27)
+#define PIN_DRDY    4
 #define PIN_CLKIN  16
 
 // P2 pins 1-6 land in order on the DevKit V1 left row D32, D33, D25, D26, D27,
@@ -30,11 +30,9 @@
 
 // OPTIONAL hardware reset — requires the U4 pin-11 rework (PIN11_REWORK.md).
 // Leave at 0 while pin 11 is still tied to 3.3 V.
-#define PIN_RESET       4   // D4; only driven when HAVE_HW_RESET (was GPIO17)
+#define PIN_RESET      17
 #define HAVE_HW_RESET  0
 
-// Safety: the boot probe checks whether any select line is still jumpered to
-// GND before driving it. Set to 0 only if you deliberately want to bypass it.
 // Every signal on its own GPIO (PIN_RESET only matters with HAVE_HW_RESET).
 #define PIN_LIST_ PIN_SCLK, PIN_MISO, PIN_MOSI, PIN_CS, PIN_DRDY, PIN_CLKIN, \
                   PIN_SELA_1, PIN_SELB_1, PIN_SELC_1, PIN_SELA_2, PIN_SELB_2, PIN_SELC_2, PIN_RESET
@@ -45,6 +43,8 @@ constexpr bool pinsDistinct_(const int *p, int n) {
 constexpr int PINS_[] = { PIN_LIST_ };
 static_assert(pinsDistinct_(PINS_, sizeof(PINS_) / sizeof(PINS_[0])), "two signals share a GPIO");
 
+// Safety: the boot probe checks whether any select line is still jumpered to
+// GND before driving it. Set to 0 only if you deliberately want to bypass it.
 #define PROBE_SELECTS  1
 
 // ── Clocking ─────────────────────────────────────────────────────────────────
