@@ -97,7 +97,7 @@ static bool sim_pulse = true;            // narrow DRDY pulse after a read that 
 // ---------------------------------------------------------------- pins
 // The simulated board's wiring (P2 straight onto D32, D33, D25, D26, D27, D14).
 // Kept separate from the firmware's PIN_* defines so a mismatch shows up.
-enum { P_CS = 21, P_DRDY = 4, P_CLKIN = 16, P_A1 = 25, P_B1 = 33, P_C1 = 32, P_A2 = 26, P_B2 = 27,
+enum { P_CS = 21, P_DRDY = 17, P_CLKIN = 16, P_A1 = 25, P_B1 = 33, P_C1 = 32, P_A2 = 26, P_B2 = 27,
        P_C2 = 14 };
 static uint8_t sim_level[40], sim_mode[40];
 

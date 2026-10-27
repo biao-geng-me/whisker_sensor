@@ -18,7 +18,7 @@ Related, not a lock-up: on 2026-10-26 (firmware 2e9d8dc, first full 12-gauge set
 
 ## What is known
 
-- **No hardware reset on this board.** The schematic (MAIN.SchDoc in /shared/rc/whiskers/MSD_P25937/, traced with /scratch/bigeme/whisker_dev/sch/net.py) shows U4 (ADS131M04, TSSOP-20) pin 11 SYNC/RESET tied straight to the 3V3 net. AVDD (pin 1) and DVDD (pin 20) share that 3V3 with the bridge excitation. CS → PIN27, CLKIN (pin 17) → PIN07, DRDY (pin 13) → PIN29. The headers carry no reset line, and GPIO17 (`PIN_RESET` in daq_common.h, `HAVE_HW_RESET 0`) connects to nothing.
+- **No hardware reset on this board.** The schematic (MAIN.SchDoc in /shared/rc/whiskers/MSD_P25937/, traced with /scratch/bigeme/whisker_dev/sch/net.py) shows U4 (ADS131M04, TSSOP-20) pin 11 SYNC/RESET tied straight to the 3V3 net. AVDD (pin 1) and DVDD (pin 20) share that 3V3 with the bridge excitation. CS → PIN27, CLKIN (pin 17) → PIN07, DRDY (pin 13) → PIN29. The headers carry no reset line, and GPIO4 (`PIN_RESET` in daq_common.h, `HAVE_HW_RESET 0`; GPIO17 before 2026-10-27, now DRDY) connects to nothing and is not driven.
 - **The datasheet sets no power-order requirement.** The ADS131M04 datasheet (SBAS890D §8.4) says the power-on reset completes within 250 µs and the ADC converts whenever CLKIN toggles. "Power the PCB after the ESP32" is the MSD team's empirical workaround, not a documented requirement.
 - **It is not just a missing clock.** In bench round 7 (2026-10-26, firmware 2e9d8dc, /scratch/bigeme/whisker_dev/bench_1023/r7/r7_clkin_pull.bin), pulling the CLKIN jumper while streaming quiet stopped all conversions (0 DRDY/s, 5 halts, then UNRECOVERED and retries every 5 s). But CLOCK still read back 0x0F0A, the configured value, and the ADC recovered by itself at the first retry after the jumper went back. The real lock-up reads 0x00FF and needs a power cycle, so the ADC's register/digital state is corrupted, not merely unclocked.
 - **A software RESET command doesn't help** in the observed state (the ADC answers reads but ignores the CLOCK write).
@@ -32,7 +32,7 @@ Related, not a lock-up: on 2026-10-26 (firmware 2e9d8dc, first full 12-gauge set
 ## Tests to run when it is reopened
 
 1. **Power-order trials,** about 5 boots each. After each boot, check the banner's `CLOCK readback = … (config ACCEPTED)` and the beats' `boot_clock_rb` / BOOT_REC_FAIL flag. The orders: PCB first, then the ESP32; ESP32 first, then the PCB; both on one switch (closest to the ROV); and replugging the ESP32 USB with the PCB on (closest to a mid-dive Pi/ESP32 reboot).
-2. **Reset-pin test during a real lock-up.** Briefly short U4 pin 11 to GND and release it, then see whether the next retry gives `[adc ok]`. If it does: lift pin 11 (or cut its trace), add a 10 kΩ pull-up to 3V3, wire it to ESP32 GPIO17, and set `HAVE_HW_RESET 1`. The firmware's last recovery step then pulses it. If it doesn't, the fix is an ESP32-controlled load switch on the PCB 5 V feed (~0.6 A).
+2. **Reset-pin test during a real lock-up.** Briefly short U4 pin 11 to GND and release it, then see whether the next retry gives `[adc ok]`. If it does: lift pin 11 (or cut its trace), add a 10 kΩ pull-up to 3V3, wire it to ESP32 GPIO4 (D4), and set `HAVE_HW_RESET 1`. The firmware's last recovery step then pulses it. If it doesn't, the fix is an ESP32-controlled load switch on the PCB 5 V feed (~0.6 A).
 3. **Supply dip:** briefly sag the bench supply while streaming to see whether a dip reproduces it.
 
 ## Detection and reporting (in place)
