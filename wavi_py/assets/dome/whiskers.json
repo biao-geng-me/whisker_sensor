@@ -3,6 +3,14 @@
  "units": "mm",
  "bending_frame": "axis n outward; e1 = +z projected normal to n (meridional); e2 = n x e1 (circumferential)",
  "source": "rov-cad whisker_dome.build(clamp_collar.dome_full_params()), via wavi_py/tools/export_dome_assets.py",
+ "dome": {
+  "center": [
+   0.0,
+   0.0,
+   119.0
+  ],
+  "radius": 56.945
+ },
  "grid": {
   "rows": 3,
   "cols": 2,

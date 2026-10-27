@@ -131,3 +131,92 @@ def test_dome_pose_pipeline():
     assert np.degrees(mag[2]) == pytest.approx(20.0)
     assert pts[2, -1, 0] > lay.root[2, 0] + 30               # tip leans toward +e1
     assert np.allclose(pts[1, -1], lay.root[1] + [0, 0, 130])
+
+
+# ----- scribe shell, centre pivot, trails
+
+def test_layout_center_from_asset_and_fallback():
+    lay = dp.DomeLayout.load(ASSET)
+    assert lay.center[:2] == pytest.approx([0, 0]) and lay.dome_radius > 50
+    fit = dp.DomeLayout(lay.root, lay.axis, lay.e1, lay.e2, lay.length)
+    assert fit.center[2] == pytest.approx(lay.center[2], abs=3.0)
+
+
+def test_centre_pivots_sphere_and_cylinder():
+    lay = dp.DomeLayout.load(ASSET)
+    piv = dp.centre_pivots(lay)
+    cyl = lay.root[:, 2] < lay.center[2] - 0.5
+    assert cyl.any() and (~cyl).any()          # this dome has both kinds
+    assert np.allclose(piv[~cyl], lay.center)
+    assert np.allclose(piv[cyl, :2], 0) and np.allclose(piv[cyl, 2], lay.root[cyl, 2])
+
+
+@pytest.mark.parametrize("scale", [0.0, 0.2, 0.8, 1.4])
+def test_centre_pivot_tips_on_shell(scale):
+    lay = dp.DomeLayout.load(ASSET)
+    shell = dp.Shell.around(lay)
+    th = np.random.default_rng(3).normal(size=(len(lay), 2)) * scale
+    pts, tips = dp.centre_pivot_shape(lay, shell, th, n_pts=9)
+    assert np.abs(shell.distance(tips)).max() < 1e-6
+    assert np.allclose(pts[:, 0], lay.root) and np.allclose(pts[:, -1], tips)
+
+
+def test_centre_pivot_sphere_arc_equals_bend():
+    lay = dp.DomeLayout.load(ASSET)
+    shell = dp.Shell.around(lay, radius=200.0)
+    sph = lay.root[:, 2] >= lay.center[2] - 0.5
+    th = np.zeros((len(lay), 2))
+    th[:, 1] = math.radians(10)               # sideways: stays on the sphere
+    _, rest = dp.centre_pivot_shape(lay, shell, np.zeros_like(th))
+    _, tips = dp.centre_pivot_shape(lay, shell, th)
+    a, b = rest[sph] - lay.center, tips[sph] - lay.center
+    ang = np.arccos(np.einsum("ij,ij->i", a, b) / 200.0 ** 2)
+    assert np.degrees(ang) == pytest.approx(10.0, abs=1e-6)
+
+
+def test_shell_hit_crosses_equator_both_ways():
+    sh = dp.Shell(np.array([0.0, 0, 100]), 50.0)
+    o = np.array([[0.0, 0, 100], [0.0, 0, 90], [0.0, 0, 100]])
+    v = np.array([[1.0, 0, -1], [0.0, 0.2, 1], [0.0, 0, 1]])
+    v /= np.linalg.norm(v, axis=1, keepdims=True)
+    p = sh.hit(o, v)
+    assert np.abs(sh.distance(p)).max() < 1e-9
+    assert p[0, 2] == pytest.approx(50.0)                      # cylinder, 45 deg down
+    assert p[2] == pytest.approx([0, 0, 150])                  # pole
+
+
+def test_shell_grid_on_surface_and_spacing():
+    sh = dp.Shell(np.zeros(3), 100.0)
+    g = sh.grid(math.radians(15))
+    assert np.abs(sh.distance(g.reshape(-1, 3))).max() < 1e-6
+    rings = {round(z, 6) for z in g[:, :, 2].ravel() if z > 0}
+    assert any(abs(z - 100 * math.cos(math.radians(15))) < 1e-6 for z in rings)
+    assert dp.nice_grid_step(3.0) == 5.0 and dp.nice_grid_step(1.0) == 10.0
+
+
+def test_trail_buffer_window_rate_and_wrap():
+    tb = dp.TrailBuffer(2, max_s=1.0, rate_hz=10.0)
+    for k in range(40):                         # 4 s at 10 Hz: wraps the ring
+        tb.push(k * 0.1, np.full((2, 3), float(k)), np.full(2, 0.1))
+    assert not tb.push(3.95, np.zeros((2, 3)), np.zeros(2))   # faster than 10 Hz
+    pos, mag, age = tb.recent(3.9, 0.5)
+    assert pos[:, 0, 0].tolist() == [34.0, 35.0, 36.0, 37.0, 38.0, 39.0]
+    assert age[-1] == pytest.approx(0) and age[0] == pytest.approx(0.5)
+    p, m, a = tb.segments(3.9, 0.5)
+    assert p.shape == (2 * 5 * 2, 3) and a.max() <= 1 and a.min() >= 0
+    assert a[1] > a[0]                          # fades with age
+
+
+def test_trail_gap_is_transparent():
+    tb = dp.TrailBuffer(1, max_s=1.0, rate_hz=10.0)
+    for k, x in enumerate([0.0, 1.0, np.nan, 3.0]):
+        tb.push(k * 0.1, np.full((1, 3), x), np.zeros(1))
+    p, m, a = tb.segments(0.3, 1.0)
+    assert np.isfinite(p).all()
+    assert (a.reshape(-1, 2)[1:] == 0).all() and (a.reshape(-1, 2)[0] > 0).all()
+
+
+def test_trail_time_going_back_restarts():
+    tb = dp.TrailBuffer(1, max_s=1.0, rate_hz=10.0)
+    tb.push(100.0, np.zeros((1, 3)), np.zeros(1))
+    assert tb.push(0.0, np.ones((1, 3)), np.zeros(1)) and tb.count == 1

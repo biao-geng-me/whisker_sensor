@@ -13,7 +13,8 @@ build123d: it only reads what this writes (default ``wavi_py/assets/dome/``):
                   (L / R, from the root's x sign), ``row``, ``col``, ``root``
                   and ``tip`` (mm), ``axis`` (unit, outward), ``e1`` / ``e2``
                   (the bending frame, see below), plus ``frame`` / ``units`` /
-                  ``source`` metadata
+                  ``source`` metadata and ``dome``: the hemisphere's ``center``
+                  (on the tube axis, at the equator) and outer ``radius``, mm
 
 Both are plain arrays / JSON, so a glTF or web front end can reuse them as is.
 
@@ -185,6 +186,8 @@ def main(out_dir=DEFAULT_OUT):
                             "e2 = n x e1 (circumferential)",
            "source": "rov-cad whisker_dome.build(clamp_collar.dome_full_params()), "
                      "via wavi_py/tools/export_dome_assets.py",
+           "dome": {"center": [0.0, 0.0, round(-float(meta["seal_face_z"]), 4)],
+                    "radius": float(meta["params"].get("R", full.get("R", 0)))},
            "grid": {"rows": rows, "cols": cols,
                     "pitch": float(meta["params"].get("PITCH", 0)),
                     "wlen": float(meta["params"].get("WLEN", 0))},
