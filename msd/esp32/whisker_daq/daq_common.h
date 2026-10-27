@@ -17,11 +17,15 @@
 #define PIN_DRDY    4
 #define PIN_CLKIN  16
 
-#define PIN_SELC_1 27
-#define PIN_SELB_1 26
+// P2 pins 1-6 land in order on the DevKit V1 left row D32, D33, D25, D26, D27,
+// D14, so one straight 6-wire cable with a 1x6 housing at each end fits.
+// (Before 2026-10-27: SELC_1 27, SELB_1 26, SELA_1 25, SELA_2 32, SELB_2 33,
+// SELC_2 14; the wiring must match the firmware.)
+#define PIN_SELC_1 32
+#define PIN_SELB_1 33
 #define PIN_SELA_1 25
-#define PIN_SELA_2 32
-#define PIN_SELB_2 33
+#define PIN_SELA_2 26
+#define PIN_SELB_2 27
 #define PIN_SELC_2 14
 
 // OPTIONAL hardware reset — requires the U4 pin-11 rework (PIN11_REWORK.md).

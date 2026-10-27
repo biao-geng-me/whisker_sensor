@@ -48,23 +48,25 @@ extern TaskHandle_t g_hostTask;     // whisker_daq.ino
 // The reader is lkStep() (one conversion) and keeps all its state in g_lk, so
 // it can later move to its own pinned FreeRTOS task with the TX queue as the
 // hand-over to a sender task.
-static_assert(PIN_SELA_2 >= 32 && PIN_SELB_2 >= 32 && PIN_SELA_1 < 32 && PIN_SELB_1 < 32 &&
-              PIN_SELC_1 < 32 && PIN_SELC_2 < 32 && PIN_CS < 32 && PIN_DRDY < 32,
-              "muxFast / csFast assume these GPIO banks");
+static_assert(PIN_CS < 32 && PIN_DRDY < 32, "csFast / drdyLowFast assume GPIO bank 0");
 
 // Direct GPIO register access: digitalWrite x 6 took ~10 us per mux switch.
+// Each select may sit on either bank (GPIO < 32: OUT, >= 32: OUT1); the masks
+// are built from the PIN_SEL* defines, so the select pins can be reassigned.
 static uint32_t g_muxSet0[NUM_SEL], g_muxClr0[NUM_SEL], g_muxSet1[NUM_SEL], g_muxClr1[NUM_SEL];
 void muxFastInit() {
-    const uint32_t all0 = (1UL << PIN_SELA_1) | (1UL << PIN_SELB_1) | (1UL << PIN_SELC_1) |
-                          (1UL << PIN_SELC_2);
-    const uint32_t all1 = (1UL << (PIN_SELA_2 - 32)) | (1UL << (PIN_SELB_2 - 32));
+    // select bit (0 = A, 1 = B, 2 = C) of each line; mux 1 and mux 2 get the same select
+    const uint8_t pin[6] = { PIN_SELA_1, PIN_SELB_1, PIN_SELC_1, PIN_SELA_2, PIN_SELB_2, PIN_SELC_2 };
+    const uint8_t bit[6] = { 0, 1, 2, 0, 1, 2 };
     for (uint8_t sel = 0; sel < NUM_SEL; sel++) {
-        uint32_t s0 = ((sel & 1) ? 1UL << PIN_SELA_1 : 0) | ((sel & 2) ? 1UL << PIN_SELB_1 : 0) |
-                      ((sel & 4) ? (1UL << PIN_SELC_1) | (1UL << PIN_SELC_2) : 0);
-        uint32_t s1 = ((sel & 1) ? 1UL << (PIN_SELA_2 - 32) : 0) |
-                      ((sel & 2) ? 1UL << (PIN_SELB_2 - 32) : 0);
-        g_muxSet0[sel] = s0; g_muxClr0[sel] = all0 & ~s0;
-        g_muxSet1[sel] = s1; g_muxClr1[sel] = all1 & ~s1;
+        uint32_t s0 = 0, c0 = 0, s1 = 0, c1 = 0;
+        for (uint8_t i = 0; i < 6; i++) {
+            const bool hi = (sel >> bit[i]) & 1;
+            if (pin[i] < 32) (hi ? s0 : c0) |= 1UL << pin[i];
+            else             (hi ? s1 : c1) |= 1UL << (pin[i] - 32);
+        }
+        g_muxSet0[sel] = s0; g_muxClr0[sel] = c0;
+        g_muxSet1[sel] = s1; g_muxClr1[sel] = c1;
     }
 }
 static inline void muxFast(uint8_t sel) {
