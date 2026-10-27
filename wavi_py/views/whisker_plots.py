@@ -25,9 +25,13 @@ back with ``set_paused`` / ``set_stream_controls_enabled``. The status bar's
 right side shows the panel's stream status line (``set_stream_status``); its
 left side keeps transient messages (probe readout, hints).
 
-Y scale (toolbar "Y auto" / "Y fixed" and its value box): auto is pyqtgraph's
-per-plot auto-range (Link Y: one range fitted over all tiles; stacked: a fixed
-gain the Y keys change). Fixed gives every tile, the single plot and every
+Y scale (toolbar "Y auto" / "Y fixed" and its value box): auto fits each plot
+to its data, padded as pyqtgraph pads (Link Y: one range fitted over all tiles;
+stacked: a fixed gain the Y keys change). The window fits it from the curves
+it has just drawn, and only re-ranges when data would leave the view or the
+fit moved by over 5 % (pyqtgraph's own auto-range re-fits every plot after
+every setData, and noise then re-generates every axis on every frame); a
+mouse zoom still turns auto off and the A button turns it back on. Fixed gives every tile, the single plot and every
 stacked row the same Y range, ``_fixed_range`` from the value box(es), so the
 channels can be compared by eye; the Y keys then change that value, and Reset
 view puts the fixed range back (it stays fixed). Typing a value switches to
@@ -37,11 +41,16 @@ Every plot has a value label in its corner (on the right of each row in the
 stacked layout), refreshed at ~7 Hz; the subclass supplies the text.
 
 Redraw cost: new data and mouse-driven range changes only mark the view dirty;
-it is redrawn from a timer at most ~30 times a second, and not at all while
-hidden. After a redraw the scene's deferred range / auto-range work is done at
-once, so the paint that follows changes nothing and Qt paints once, not twice.
-Axes (which also draw the grid lines across the plot) are cached as pixmaps,
-so an axis whose ticks did not move is blitted instead of re-rendered.
+the shared render scheduler (``render_sched``) redraws it at most ``MAX_HZ``
+times a second (and no less than ``MIN_HZ`` when the windows together are
+over budget), not at all while hidden or minimised. After a redraw the
+scene's deferred range / auto-range work is done at once, so the paint that
+follows changes nothing and Qt paints once, not twice. Axes (which also draw
+the grid lines across the plot) are cached as pixmaps, so an axis whose ticks
+did not move is blitted instead of re-rendered, and the grid's tiles share
+the axis pictures they have in common (``_SharedAxis``: one set of time ticks
+per frame, not 16). Curves are bare ``PlotCurveItem``s with their bounds
+handed over with the data.
 
 Subclasses implement ``_has_data``, ``_plot_data``, ``_label_html`` and
 ``_probe_text``, and may override the other ``_``-hooks marked below.
@@ -53,7 +62,7 @@ import math
 import time
 
 import numpy as np
-from PyQt6.QtCore import QEvent, QPointF, QRectF, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QEvent, QPointF, QRectF, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QAction, QFont, QFontMetricsF, QKeySequence, QPainter, QPixmapCache
 from PyQt6.QtWidgets import (QAbstractSpinBox, QApplication, QComboBox, QDoubleSpinBox,
                              QGraphicsRectItem, QLabel, QLineEdit, QMessageBox, QStackedWidget,
@@ -62,6 +71,7 @@ from PyQt6.QtWidgets import (QAbstractSpinBox, QApplication, QComboBox, QDoubleS
 import pyqtgraph as pg
 
 from wavi_py.views.base import ViewWindow
+from wavi_py.views.render_sched import GraphicsLayoutWidget, PlotWidget, scheduler
 
 
 RED = (220, 40, 40)
@@ -70,14 +80,14 @@ GAUGE_NAMES = ("A", "B")
 HTML_COLOR = ("#dc2828", "#2850dc")
 _PROBE_PEN = pg.mkPen((90, 90, 90), width=1, style=pg.QtCore.Qt.PenStyle.DashLine)
 _PEN_W = 1                      # stacked + grid: wider pens cost 3-6x the paint time
-_SINGLE_PEN_W = 2
+_SINGLE_PEN_W = 2               # single: while there are fewer points than pixel columns
 LABEL_PERIOD_S = 0.15           # value labels refresh at ~7 Hz
 _LABEL_FILL = pg.mkBrush(255, 255, 255, 225)
 ZOOM_STEP = 1.25                # zoom keys
 _PAN_STEP = 0.1                 # arrow keys: fraction of the visible span
-_FRAME_S = 1 / 30               # redraw at most ~30 times a second
 _FOCUS_PEN = pg.mkPen((255, 150, 0), width=2)
 _PIXMAP_CACHE_KB = 128 * 1024
+_FIT_TOL = 0.05                 # auto Y: re-fit when the fitted range moved by 5 % of its span
 
 STACKED, GRID, SINGLE = 0, 1, 2                # pages of the QStackedWidget
 
@@ -106,12 +116,162 @@ def _cache(item: pg.GraphicsObject) -> None:
         QPixmapCache.setCacheLimit(_PIXMAP_CACHE_KB)
 
 
+class _ViewBox(pg.ViewBox):
+    """Y auto-range fitted by the window (``_fit_y``) from the data it has just drawn,
+    instead of by pyqtgraph from every curve's bounds after every setData. The auto
+    state itself is still pyqtgraph's (a mouse zoom turns it off, the A button and
+    Reset view on), so ``on_auto`` asks the window to fit again when it is turned on."""
+
+    on_auto = None
+
+    def updateAutoRange(self) -> None:  # noqa: N802 — pyqtgraph naming
+        if self.state["autoRange"][0] is not False:
+            super().updateAutoRange()       # X auto (the A button): pyqtgraph's own, both axes
+        else:
+            self._autoRangeNeedsUpdate = False
+
+    def enableAutoRange(self, axis=None, enable=True, x=None, y=None) -> None:  # noqa: N802
+        super().enableAutoRange(axis, enable, x, y)
+        # setXRange & co. call this with x=False / y=False: that turns auto off
+        on = enable is not False if x is None and y is None else (x or y) not in (None, False)
+        if on and self.on_auto is not None:
+            self.on_auto()
+
+
+def _fit_y(vb: pg.ViewBox, lo: float, hi: float) -> None:
+    """Auto Y of ``vb`` for data spanning ``lo``..``hi``, padded as pyqtgraph pads.
+
+    Applied at once if data would fall outside the view; otherwise only when the
+    fitted range moved by more than ``_FIT_TOL`` of its span, so noise does not
+    re-range (and re-generate the axis of) every plot on every frame."""
+    if not (math.isfinite(lo) and math.isfinite(hi)):
+        return
+    y0, y1 = vb.viewRange()[1]
+    if hi > lo:
+        pad = (hi - lo) * vb.suggestPadding(1)
+        lo2, hi2 = lo - pad, hi + pad
+        if lo >= y0 and hi <= y1 and abs(lo2 - y0) + abs(hi2 - y1) <= _FIT_TOL * (hi2 - lo2):
+            return
+    else:                                   # flat: keep the span, centre it (pyqtgraph's rule)
+        q = 0.25 * (y1 - y0)
+        if y0 + q <= lo <= y1 - q:
+            return
+        lo2 = hi2 = lo
+    vb.setRange(yRange=(lo2, hi2), padding=0.0, disableAutoRange=False)
+
+
+class _SharedAxis(pg.AxisItem):
+    """An axis that reuses the picture of another one that would draw the same: the
+    grid's tiles share one time range and size, so their ticks, labels and grid lines
+    are generated once per frame instead of once per tile (likewise the Y axes when
+    the tiles share a Y range)."""
+
+    _pictures: dict = {}
+
+    def paint(self, p, opt, widget) -> None:
+        if self.picture is None:
+            key = self._picture_key()
+            pic = _SharedAxis._pictures.get(key)
+            if pic is None:
+                super().paint(p, opt, widget)          # generates self.picture and plays it
+                if len(_SharedAxis._pictures) > 256:
+                    _SharedAxis._pictures.clear()
+                _SharedAxis._pictures[key] = self.picture
+                return
+            self.picture = pic
+        self.picture.play(p)
+
+    def updateAutoSIPrefix(self) -> None:  # noqa: N802 — pyqtgraph naming
+        """Called on every range change; the tiles show no axis label (and the top /
+        right axes are hidden), so skip re-setting the hidden label's HTML."""
+        if self.label.isVisible():
+            super().updateAutoSIPrefix()
+            return
+        self.autoSIPrefixScale = 1.0
+        self.labelUnitPrefix = ""
+        self.picture = None
+        self.update()
+
+    def _picture_key(self) -> tuple:
+        """Everything the picture depends on that differs between the tiles' axes."""
+        def px(r) -> tuple:                     # to 0.01 px: linked views map with float noise
+            return tuple(round(v, 2) for v in (r.x(), r.y(), r.width(), r.height()))
+        lv = self.linkedView()
+        grid = None
+        if lv is not None and self.grid is not False:
+            grid = (px(lv.mapRectToItem(self, lv.boundingRect())), self.grid)
+        r0, r1 = self.range
+        q = abs(r1 - r0) * 1e-9 or 1e-12        # ... and ranges (1.99 vs 1.9899999999999998)
+        return (self.orientation, round(r0 / q), round(r1 / q), self.scale, self.autoSIPrefixScale,
+                round(self.width(), 2), round(self.height(), 2), px(self.boundingRect()), grid,
+                id(self._tickLevels), self.style["showValues"])
+
+
+class _Curve(pg.PlotCurveItem):
+    """A bare curve (PlotDataItem's per-setData bookkeeping costs more than the curve)
+    whose data bounds come with the data (``_set_curves`` finds them for all curves in
+    one pass) instead of a nanmin / nanmax per curve and axis after every setData."""
+
+    _bounds = None
+
+    def dataBounds(self, ax, frac=1.0, orthoRange=None):  # noqa: N803 — pyqtgraph naming
+        if self._bounds is None or frac < 1.0 or orthoRange is not None:
+            return super().dataBounds(ax, frac, orthoRange)
+        return self._bounds[ax]
+
+
+def _curve(plot: pg.PlotItem, color, width: int, name: str | None) -> _Curve:
+    curve = _Curve(pen=pg.mkPen(color=color, width=width), name=name)
+    plot.addItem(curve)
+    return curve
+
+
+def set_pen_width(curves, width: int) -> None:
+    """Change the curves' pen width (only if it differs: setPen repaints)."""
+    for curve in curves:
+        pen = curve.opts["pen"]
+        if pen.width() != width:
+            pen = pg.mkPen(pen)
+            pen.setWidth(width)
+            curve.setPen(pen)
+
+
+def _set_curves(curves: list[_Curve], x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Row ``c`` of ``y`` into ``curves[c]``; gaps (NaN, e.g. dB of a railed gauge) break
+    the line. Returns each row's min and max (NaN for an all-NaN row)."""
+    finite = bool(np.isfinite(y).all())
+    with np.errstate(invalid="ignore"):
+        lo = np.fmin.reduce(y, axis=1)                       # NaN-skipping, no warnings
+        hi = np.fmax.reduce(y, axis=1)
+    xb = (float(x[0]), float(x[-1])) if len(x) else (None, None)
+    for c, curve in enumerate(curves):
+        ok = len(x) and np.isfinite(lo[c]) and np.isfinite(hi[c])
+        curve._bounds = (xb, (float(lo[c]), float(hi[c])) if ok else (None, None))
+        curve.setData(x, y[c], connect="all" if finite else "finite", skipFiniteCheck=finite)
+    return lo, hi
+
+
+def auto_width(ax: pg.AxisItem) -> float:
+    """The width a left axis would take for its current tick labels (pyqtgraph's own rule)."""
+    w = ax.textWidth + ax.style["tickTextOffset"][0] + max(0, ax.style["tickLength"])
+    if ax.label.isVisible():
+        w += ax.label.boundingRect().height() * 0.8
+    return float(int(w + 0.999))
+
+
 def _value_label() -> pg.TextItem:
     label = pg.TextItem(anchor=(0, 0), fill=_LABEL_FILL)
     label.setZValue(100)
     # text is only re-laid out at the label rate; blit it from a cache otherwise
     label.textItem.setCacheMode(label.textItem.CacheMode.DeviceCoordinateCache)
     return label
+
+
+def _set_html(label: pg.TextItem, html: str) -> None:
+    """setHtml re-lays out the text and re-renders its cache: only on a change."""
+    if getattr(label, "_html", None) != html:
+        label._html = html
+        label.setHtml(html)
 
 
 def _px_font(px: int, lo: int, hi: int) -> QFont:
@@ -163,6 +323,8 @@ class WhiskerPlotsView(ViewWindow):
     VALUE_AXIS_LABEL = ""            # title of the stacked layout's value-label column
     STACKED_CENTRE = 0.0             # fixed Y, stacked: the row offset sits this far up the range
     STACKED_LABEL_SAMPLE = "A -0000.0   B -0000.0"   # widest stacked value label
+    MAX_HZ = 30.0                    # redraw rate cap (see render_sched)
+    MIN_HZ = 20.0                    # ... and what the render budget may lower it to
 
     def __init__(self, nsensor: int, nch: int):
         super().__init__()
@@ -178,14 +340,11 @@ class WhiskerPlotsView(ViewWindow):
         self._labels_t = 0.0
         self._paused = False
         self._focus_tile: int | None = None        # grid: target of Up/Down, framed
-        self._last_render = 0.0
-        self._render_timer = QTimer(self)
-        self._render_timer.setSingleShot(True)
-        self._render_timer.timeout.connect(self._render)
+        scheduler().register(self, self._render, self.MAX_HZ, self.MIN_HZ)
         x_label, x_units = self.X_LABEL
 
         # --- stacked: one axis, sensor i at Y-offset i
-        self._stacked = pg.PlotWidget()
+        self._stacked = PlotWidget(viewBox=_ViewBox())
         self._stacked.setBackground("w")
         self._stacked.setLabel("bottom", x_label, units=x_units)
         self._stacked.setLabel("left", "Whisker")
@@ -196,7 +355,7 @@ class WhiskerPlotsView(ViewWindow):
         for c in range(self._nch):
             color = RED if (c % 2) == 0 else BLUE
             name = GAUGE_NAMES[c] if c < 2 else None
-            self._stacked_curves.append(self._stacked.plot(pen=pg.mkPen(color=color, width=_PEN_W), name=name))
+            self._stacked_curves.append(_curve(self._stacked.getPlotItem(), color, _PEN_W, name))
         # value labels: a column right of the axis, one label per whisker row
         self._stacked.showAxis("right")
         self._value_axis = self._stacked.getAxis("right")
@@ -213,13 +372,17 @@ class WhiskerPlotsView(ViewWindow):
         vb.sigResized.connect(self._place_stacked_labels)
 
         # --- grid: one tile per sensor
-        self._grid = pg.GraphicsLayoutWidget()
+        self._grid = GraphicsLayoutWidget()
         self._grid.setBackground("w")
         ncol = math.ceil(math.sqrt(self._nsensor))
         self._tiles: list[pg.PlotItem] = []
         self._grid_curves: list[pg.PlotDataItem] = []
         for s in range(self._nsensor):
-            p = self._grid.addPlot(row=s // ncol, col=s % ncol, title=f"W{s + 1}")
+            p = self._grid.addPlot(row=s // ncol, col=s % ncol, title=f"W{s + 1}", viewBox=_ViewBox(),
+                                   # all four: the hidden top / right ones follow every range change too
+                                   axisItems={o: _SharedAxis(o) for o in ("bottom", "left", "top", "right")})
+            p.hideAxis("top")                       # shown when passed in
+            p.hideAxis("right")
             _show_grid(p)
             if self._tiles:
                 p.setXLink(self._tiles[0])
@@ -229,19 +392,18 @@ class WhiskerPlotsView(ViewWindow):
             for g in range(2):
                 color = RED if g == 0 else BLUE
                 name = GAUGE_NAMES[g] if s == 0 else None
-                self._grid_curves.append(p.plot(pen=pg.mkPen(color=color, width=_PEN_W), name=name))
+                self._grid_curves.append(_curve(p, color, _PEN_W, name))
         self._tile_labels = [self._corner_label(p) for p in self._tiles]
         self._focus_frames = [self._frame(p) for p in self._tiles]
 
         # --- single: one sensor filling the window (double-click to enter)
-        self._single_plot = pg.PlotWidget()
+        self._single_plot = PlotWidget(viewBox=_ViewBox())
         self._single_plot.setBackground("w")
         self._single_plot.setLabel("bottom", x_label, units=x_units)
         _show_grid(self._single_plot.getPlotItem())
         _add_gauge_legend(self._single_plot.getPlotItem())
-        self._single_curves = [
-            self._single_plot.plot(pen=pg.mkPen(color=color, width=_SINGLE_PEN_W), name=name)
-            for color, name in ((RED, "A"), (BLUE, "B"))]
+        self._single_curves = [_curve(self._single_plot.getPlotItem(), color, _SINGLE_PEN_W, name)
+                               for color, name in ((RED, "A"), (BLUE, "B"))]
         self._single_label = self._corner_label(self._single_plot.getPlotItem())
 
         self._pages = QStackedWidget()
@@ -263,6 +425,7 @@ class WhiskerPlotsView(ViewWindow):
 
         for p in self._all_plots():
             p.getViewBox().sigRangeChangedManually.connect(self._on_manual_range)
+            p.getViewBox().on_auto = self._request_render
 
         self._build_toolbar()
         self._stream_status = _ElidedLabel()
@@ -747,19 +910,18 @@ class WhiskerPlotsView(ViewWindow):
     # ------------------------------------------------------------------
 
     def _request_render(self) -> None:
-        """Redraw soon, at most every ``_FRAME_S``; repeated requests coalesce."""
-        if not self._render_timer.isActive():
-            wait = self._last_render + _FRAME_S - time.monotonic()
-            self._render_timer.start(max(0, int(wait * 1000)))
+        """Redraw soon (the render scheduler); repeated requests coalesce."""
+        scheduler().request(self)
 
     def _render(self, labels: bool = False) -> None:
-        self._render_timer.stop()
-        self._last_render = time.monotonic()
+        scheduler().done(self)
         if not self.isVisible():
             return                                         # showEvent renders
         self._before_redraw()
         self._redraw()
-        if labels or self._last_render - self._labels_t >= LABEL_PERIOD_S:
+        if self._pages.currentIndex() == GRID:
+            self._align_tiles()
+        if labels or time.monotonic() - self._labels_t >= LABEL_PERIOD_S:
             self._update_labels()
         # do the deferred range / auto-range / transform updates now, not in paintEvent:
         # changes made during a paint schedule a second paint
@@ -794,22 +956,47 @@ class WhiskerPlotsView(ViewWindow):
         if page == STACKED:
             x, y = self._plot_data(self._stacked.getPlotItem(), slice(None))
             y = (self._stacked_y(y) + self._offsets).T.copy()      # contiguous rows, one per curve
-            finite = bool(np.isfinite(y).all())
-            for c, curve in enumerate(self._stacked_curves):
-                curve.setData(x, y[c], skipFiniteCheck=finite)
+            _set_curves(self._stacked_curves, x, y)
         elif page == GRID:
             x, y = self._plot_data(self._tiles[0], slice(None))
             y = y.T.copy()
-            finite = bool(np.isfinite(y).all())
-            for c, curve in enumerate(self._grid_curves):
-                curve.setData(x, y[c], skipFiniteCheck=finite)
-            if self._act_link_y.isChecked() and self._link_auto and not self.fixed_y:
-                self._fit_linked_y(y)
+            lo, hi = _set_curves(self._grid_curves, x, y)
+            if self._act_link_y.isChecked():
+                if self._link_auto and not self.fixed_y:
+                    self._fit_linked_y(y)
+            elif not self.fixed_y:
+                self._fit_tiles_y(self._tiles, lo, hi)
         elif self._single is not None:
             c0 = 2 * self._single
             x, y = self._plot_data(self._single_plot.getPlotItem(), slice(c0, min(c0 + 2, self._nch)))
-            for g in range(y.shape[1]):
-                self._single_curves[g].setData(x, y[:, g])
+            y = y.T.copy()
+            # dense (decimated: a min/max envelope) draws as a band whatever the pen width,
+            # and a 2 px pen costs ~3.5x the paint of a 1 px one there
+            sparse = len(x) <= self._single_plot.getPlotItem().getViewBox().width()
+            set_pen_width(self._single_curves, _SINGLE_PEN_W if sparse else _PEN_W)
+            lo, hi = _set_curves(self._single_curves, x, y)
+            if not self.fixed_y:
+                self._fit_tiles_y([self._single_plot.getPlotItem()], lo, hi)
+
+    def _align_tiles(self) -> None:
+        """All tiles' left axes as wide as the widest needs (its tick labels as of the last
+        paint), so every tile's plot area, and so its time axis, has the same width: the
+        16 time axes then share one picture (``_SharedAxis``) and the plots line up."""
+        axes = [p.getAxis("left") for p in self._tiles]
+        need = max(auto_width(ax) for ax in axes)
+        have = axes[0].fixedWidth
+        if have is None or need > have or need < have - 8:
+            for ax in axes:
+                ax.setWidth(need)
+
+    @staticmethod
+    def _fit_tiles_y(plots: list[pg.PlotItem], lo: np.ndarray, hi: np.ndarray) -> None:
+        """Auto Y of each plot in auto mode, from its two curves' min / max."""
+        for i, p in enumerate(plots):
+            vb = p.getViewBox()
+            if vb.state["autoRange"][1] is not False:
+                _fit_y(vb, float(np.fmin.reduce(lo[2 * i:2 * i + 2])),
+                       float(np.fmax.reduce(hi[2 * i:2 * i + 2])))
 
     def _fit_linked_y(self, y: np.ndarray) -> None:
         """Link Y, auto: one Y range over all tiles' data (pyqtgraph's per-tile
@@ -882,9 +1069,9 @@ class WhiskerPlotsView(ViewWindow):
         page = self._pages.currentIndex()
         if page == STACKED:
             for s, label in enumerate(self._stacked_labels):
-                label.setHtml(self._label_html(s, compact=True))
+                _set_html(label, self._label_html(s, compact=True))
         elif page == GRID:
             for s, label in enumerate(self._tile_labels):
-                label.setHtml(self._label_html(s, compact=False))
+                _set_html(label, self._label_html(s, compact=False))
         elif self._single is not None:
-            self._single_label.setHtml(self._label_html(self._single, compact=False))
+            _set_html(self._single_label, self._label_html(self._single, compact=False))

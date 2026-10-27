@@ -36,19 +36,18 @@ def fill_outliers_linear(x: np.ndarray) -> np.ndarray:
     if n < 3:
         return out
 
+    # median / MAD of all columns at once; only columns with outliers loop
+    med = np.median(out, axis=0)
+    dev = np.abs(out - med)
+    mad = np.median(dev, axis=0)
+    with np.errstate(invalid="ignore"):
+        bad = dev > (_MAD_K * _MAD_SCALE) * mad      # NaN MAD (gaps): nothing flagged
+    bad[:, ~(mad > 0)] = False                        # constant column: passed through
     indices = np.arange(n)
-    for c in range(out.shape[1]):
-        col = out[:, c]
-        med = np.median(col)
-        mad = np.median(np.abs(col - med))
-        if mad <= 0:
-            continue
-        threshold = _MAD_K * _MAD_SCALE * mad
-        bad = np.abs(col - med) > threshold
-        if not bad.any():
-            continue
-        good = ~bad
+    for c in np.flatnonzero(bad.any(axis=0)):
+        good = ~bad[:, c]
         if good.sum() < 2:
             continue
-        col[bad] = np.interp(indices[bad], indices[good], col[good])
+        col = out[:, c]
+        col[~good] = np.interp(indices[~good], indices[good], col[good])
     return out

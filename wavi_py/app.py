@@ -7,6 +7,7 @@ is only the Qt-based front door.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 from wavi_py.config import (
@@ -90,6 +91,11 @@ def main(argv: list[str] | None = None) -> int:
 
     from wavi_py.main_window import MainWindow
 
+    if os.environ.get("WAVI_PG_OPENGL", "") not in ("", "0"):
+        # plot windows drawn through OpenGL viewports: slower than the default raster
+        # path on software GL (llvmpipe); try it on a real GPU with tools/viz_bench --opengl
+        import pyqtgraph as pg
+        pg.setConfigOptions(useOpenGL=True)
     app = QApplication(sys.argv)
     win = MainWindow(
         transport=args.transport,
