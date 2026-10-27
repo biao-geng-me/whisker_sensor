@@ -31,7 +31,7 @@
  *    2 DRDY      -> GPIO4  (pin13)    2 SELB_1 -> GPIO33 (D33)
  *    3 CS        -> GPIO21 (pin12)    3 SELA_1 -> GPIO25 (D25)
  *    4 DOUT/MISO -> GPIO19 (pin15)    4 SELA_2 -> GPIO26 (D26)
- *    5 DIN/MOSI  -> GPIO23 (pin16)    5 SELB_2 -> GPIO27 (D27)
+ *    5 DIN/MOSI  -> GPIO5  (pin16)    5 SELB_2 -> GPIO27 (D27)
  *    6 CLKIN     -> GPIO16 (pin17)    6 SELC_2 -> GPIO14 (D14)
  *  PCB GND <-> ESP32 GND is REQUIRED.
  *
@@ -1724,7 +1724,9 @@ static void hostSetup() {
     }
 
     pinMode(PIN_CS, OUTPUT);  cs_high();
+#if HAVE_HW_RESET
     pinMode(PIN_RESET, OUTPUT); digitalWrite(PIN_RESET, HIGH);   // idle = not reset
+#endif
 
     // ledcAttach returns a BOOL in core 3.x, not a frequency
     bool ok = ledcAttach(PIN_CLKIN, CLKIN_HZ, 1);

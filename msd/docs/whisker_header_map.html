@@ -343,9 +343,9 @@ tr.q td { color: var(--mut); font-style: italic; }
 <circle cx="27.48" cy="28.60" r="0.78" class="psig" style="fill:var(--p1)"><title>P1 pin 6: CLKIN → ESP32 GPIO16</title></circle>
 <text transform="translate(28.03,26.40) rotate(-90)" class="clab">CLKIN</text>
 <text x="27.48" y="31.90" text-anchor="middle" class="cgpio">16</text>
-<circle cx="30.02" cy="28.60" r="0.78" class="psig" style="fill:var(--p1)"><title>P1 pin 5: DIN → ESP32 GPIO23</title></circle>
+<circle cx="30.02" cy="28.60" r="0.78" class="psig" style="fill:var(--p1)"><title>P1 pin 5: DIN → ESP32 GPIO5</title></circle>
 <text transform="translate(30.57,26.40) rotate(-90)" class="clab">DIN</text>
-<text x="30.02" y="31.90" text-anchor="middle" class="cgpio">23</text>
+<text x="30.02" y="31.90" text-anchor="middle" class="cgpio">5</text>
 <circle cx="32.56" cy="28.60" r="0.78" class="psig" style="fill:var(--p1)"><title>P1 pin 4: DOUT → ESP32 GPIO19</title></circle>
 <text transform="translate(33.11,26.40) rotate(-90)" class="clab">DOUT</text>
 <text x="32.56" y="31.90" text-anchor="middle" class="cgpio">19</text>
@@ -754,7 +754,7 @@ tr.q td { color: var(--mut); font-style: italic; }
 <tr><td>2</td><td>DRDY</td><td><b>GPIO4</b></td><td>right row, pin 11 (D4)</td><td>ADC → ESP32</td><td class="mut">U4 pin 13</td><td class="mut">data ready, falling edge = new conversion</td></tr>
 <tr><td>3</td><td>CS</td><td><b>GPIO21</b></td><td>right row, pin 5 (D21)</td><td>ESP32 → ADC</td><td class="mut">U4 pin 12</td><td class="mut">SPI chip select</td></tr>
 <tr><td>4</td><td>DOUT</td><td><b>GPIO19</b></td><td>right row, pin 6 (D19)</td><td>ADC → ESP32</td><td class="mut">U4 pin 15</td><td class="mut">SPI data out (MISO)</td></tr>
-<tr><td>5</td><td>DIN</td><td><b>GPIO23</b></td><td>right row, pin 1 (D23)</td><td>ESP32 → ADC</td><td class="mut">U4 pin 16</td><td class="mut">SPI data in (MOSI)</td></tr>
+<tr><td>5</td><td>DIN</td><td><b>GPIO5</b></td><td>right row, pin 8 (D5)</td><td>ESP32 → ADC</td><td class="mut">U4 pin 16</td><td class="mut">SPI data in (MOSI)</td></tr>
 <tr><td>6</td><td>CLKIN</td><td><b>GPIO16</b></td><td>right row, pin 10 (RX2)</td><td>ESP32 → ADC</td><td class="mut">U4 pin 17</td><td class="mut">ADC master clock (LEDC PWM, 0.8 MHz now)</td></tr>
         </tbody></table></div></div>
       <div class="card"><h3>P2 <small>mux selects · to CD4097B (U3)</small></h3><div class="scroll"><table class="ctl">
@@ -818,10 +818,8 @@ tr.q td { color: var(--mut); font-style: italic; }
 <text x="235" y="383.5" text-anchor="end" class="dkuse dkg">GND → PCB ground</text>
 <circle cx="275" cy="400.5" r="6.5" class="dkpin dkoff" style=""/>
 <text x="287" y="404.5" text-anchor="start" class="dklab dkdim">VIN</text>
-<circle cx="415" cy="106.5" r="6.5" class="dkpin" style="fill:var(--p1)"/>
-<text x="403" y="110.5" text-anchor="end" class="dklab">D23</text>
-<path d="M424,106.5 H450" class="dklead" style="stroke:var(--p1)"/>
-<text x="455" y="110.5" text-anchor="start" class="dkuse" style="fill:var(--p1)">P1-5 · DIN</text>
+<circle cx="415" cy="106.5" r="6.5" class="dkpin dkoff" style=""/>
+<text x="403" y="110.5" text-anchor="end" class="dklab dkdim">D23</text>
 <circle cx="415" cy="127.5" r="6.5" class="dkpin dkoff" style=""/>
 <text x="403" y="131.5" text-anchor="end" class="dklab dkdim">D22</text>
 <circle cx="415" cy="148.5" r="6.5" class="dkpin dkoff" style=""/>
@@ -840,8 +838,10 @@ tr.q td { color: var(--mut); font-style: italic; }
 <text x="403" y="236.5" text-anchor="end" class="dklab">D18</text>
 <path d="M424,232.5 H450" class="dklead" style="stroke:var(--p1)"/>
 <text x="455" y="236.5" text-anchor="start" class="dkuse" style="fill:var(--p1)">P1-1 · SCLK</text>
-<circle cx="415" cy="253.5" r="6.5" class="dkpin dkoff" style=""/>
-<text x="403" y="257.5" text-anchor="end" class="dklab dkdim">D5</text>
+<circle cx="415" cy="253.5" r="6.5" class="dkpin" style="fill:var(--p1)"/>
+<text x="403" y="257.5" text-anchor="end" class="dklab">D5</text>
+<path d="M424,253.5 H450" class="dklead" style="stroke:var(--p1)"/>
+<text x="455" y="257.5" text-anchor="start" class="dkuse" style="fill:var(--p1)">P1-5 · DIN</text>
 <circle cx="415" cy="274.5" r="6.5" class="dkpin dkoff" style=""/>
 <text x="403" y="278.5" text-anchor="end" class="dklab dkdim">TX2</text>
 <circle cx="415" cy="295.5" r="6.5" class="dkpin" style="fill:var(--p1)"/>

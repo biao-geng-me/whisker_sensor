@@ -95,10 +95,11 @@ static std::vector<SimStall> sim_stalls;
 static bool sim_pulse = true;            // narrow DRDY pulse after a read that leaves data
 
 // ---------------------------------------------------------------- pins
-// The simulated board's wiring (P2 straight onto D32, D33, D25, D26, D27, D14).
+// The simulated board's wiring (P2 straight onto D32, D33, D25, D26, D27, D14;
+// P1 DIN on D5).
 // Kept separate from the firmware's PIN_* defines so a mismatch shows up.
 enum { P_CS = 21, P_DRDY = 4, P_CLKIN = 16, P_A1 = 25, P_B1 = 33, P_C1 = 32, P_A2 = 26, P_B2 = 27,
-       P_C2 = 14 };
+       P_C2 = 14, P_SCLK = 18, P_MISO = 19, P_MOSI = 5 };
 static uint8_t sim_level[40], sim_mode[40];
 
 static const uint8_t SIM_OUT_OF[4][8] = {
@@ -563,6 +564,13 @@ void mock_reg_write(uint32_t a, uint32_t v) {
 static uint32_t spiActualHz(uint32_t f) {
     uint32_t n = (80000000u + f - 1) / f;
     return 80000000u / (n ? n : 1);
+}
+void SPIClass::begin(int sck, int miso, int mosi, int ss) {
+    if (sck != P_SCLK || miso != P_MISO || mosi != P_MOSI || ss != P_CS) {
+        fprintf(stderr, "sim: SPI pins %d/%d/%d/%d do not match the board's SCLK/MISO/MOSI/CS %d/%d/%d/%d\n",
+                sck, miso, mosi, ss, P_SCLK, P_MISO, P_MOSI, P_CS);
+        exit(3);
+    }
 }
 void SPIClass::beginTransaction(const SPISettings &s) { adc.spiHz = spiActualHz(s.hz); }
 uint8_t SPIClass::transfer(uint8_t b) {

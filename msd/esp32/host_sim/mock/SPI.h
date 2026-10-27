@@ -12,7 +12,7 @@ class SPISettings {
 class SPIClass {
   public:
     explicit SPIClass(int) {}
-    void begin(int, int, int, int) {}
+    void begin(int sck, int miso, int mosi, int ss);
     void beginTransaction(const SPISettings &s);
     void endTransaction() {}
     uint8_t transfer(uint8_t b);
