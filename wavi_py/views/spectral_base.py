@@ -11,6 +11,11 @@ control panel owns it: the window emits ``fftWindowChanged`` and gets
 ``set_fft_window`` back), Reset view (R), Keys. = / - zoom the frequency axis
 from 0 Hz. The right of the status bar shows the stream status line; the
 left, the value under the mouse.
+
+New data only marks the window dirty; the shared render scheduler
+(``render_sched``) redraws it at most ``MAX_HZ`` times a second while shown.
+The auto colour range is estimated from at most ``_LEVEL_SAMPLES`` values
+spread evenly over what is shown (a spectrogram holds millions).
 """
 
 from __future__ import annotations
@@ -21,12 +26,14 @@ from PyQt6.QtGui import QAction, QKeySequence
 from PyQt6.QtWidgets import QComboBox, QDoubleSpinBox, QLabel, QMessageBox, QToolBar
 
 from wavi_py.views.base import ViewWindow
+from wavi_py.views.render_sched import scheduler
 from wavi_py.views.whisker_plots import _ElidedLabel
 
 FFT_WINDOWS_S = (0.5, 1.0, 2.0, 5.0)
 DB_FLOOR = -120.0
 _LIN_LEVELS = (0.0, 5.0)
 _DB_LEVELS = (-60.0, 20.0)
+_LEVEL_SAMPLES = 1 << 16
 
 
 def to_db(a: np.ndarray) -> np.ndarray:
@@ -41,10 +48,12 @@ class SpectralWindow(ViewWindow):
 
     TITLE = "Wavi"
     KEYS_HELP = ""
+    MAX_HZ = 10.0                    # redraw rate cap (see render_sched)
 
     def __init__(self, fft_window_s: float):
         super().__init__()
         self.setWindowTitle(self.TITLE)
+        scheduler().register(self, self._redraw, self.MAX_HZ)
         self._units = ""
         self._levels_saved = {False: _LIN_LEVELS, True: _DB_LEVELS}
 
@@ -183,6 +192,9 @@ class SpectralWindow(ViewWindow):
         """Colour range for values ``v`` (already in dB if dB is on)."""
         if not self._act_auto.isChecked():
             return self._lo.value(), self._hi.value()
+        v = v.ravel()
+        if v.size > _LEVEL_SAMPLES:
+            v = v[np.linspace(0, v.size - 1, _LEVEL_SAMPLES).astype(np.intp)]
         finite = v[np.isfinite(v)]
         if finite.size == 0:
             return self._levels_saved[self.db]
@@ -224,6 +236,10 @@ class SpectralWindow(ViewWindow):
 
     def _redraw(self) -> None:
         """Hook: redraw from the stored data with the current options."""
+
+    def _request_redraw(self) -> None:
+        """New data: redraw soon (the render scheduler)."""
+        scheduler().request(self)
 
     def _show_keys(self) -> None:
         box = QMessageBox(QMessageBox.Icon.NoIcon, f"{self.TITLE} keys", self.KEYS_HELP, parent=self)

@@ -13,6 +13,7 @@ poll the bus on their own thread.
 
 from __future__ import annotations
 
+import math
 import os
 import time
 from datetime import datetime, timedelta
@@ -39,8 +40,6 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from scipy.signal import detrend
-
 from wavi_py.client import WaviClient
 from wavi_py.config import (
     DEFAULT_FS_HZ,
@@ -54,6 +53,7 @@ from wavi_py.config import (
     MIN_REC_LEN_S,
 )
 from wavi_py.daq.outliers import fill_outliers_linear
+from wavi_py.daq.spectra import SPEC_COL_HZ, SpecHistory, amp_spectra, amp_spectrum
 from wavi_py.io.dat_writer import DatWriter, build_datalog_filename
 from wavi_py.scan_mode import (DEFAULT_SELECTS, PRESETS, ModeKeeper, ScanRequest, describe_cfg,
                                legacy_nominal_hz, parse_selects)
@@ -205,7 +205,7 @@ class MainWindow(QMainWindow):
         self._spectrum_view = SpectrumView(self._nsensor, self._nch)
         self._fft_view = FftView(self._nch, self._nfreq, self._t_fft_s)
         self._spec_view = SpectrogramView(
-            self._nch, self._nfreq, self._fs, self._ns_spec, self._t_spec_s, self._t_fft_s
+            self._nch, self._nfreq, self._fs, self._spec_hop, self._t_spec_s, self._t_fft_s
         )
         self._imu_view = ImuView(self._t_buffer_s)
         # the Dome view needs PyOpenGL and a GL context: built on first use
@@ -256,8 +256,10 @@ class MainWindow(QMainWindow):
         """Size (and clear) the FFT frame and the spectrogram history."""
         self._n_fft_window = max(2, int(round(self._fs * self._t_fft_s)))
         self._nfreq = self._n_fft_window // 2 + 1
-        self._spec_cols = max(1, int(self._t_spec_s * self._fs / self._ns_spec))
-        self._spec_data = np.zeros((self._nfreq * self._nch, self._spec_cols), dtype=np.float32)
+        # a spectrogram column every ``hop`` samples (ns_spec, but at most SPEC_COL_HZ a second)
+        self._spec_hop = max(self._ns_spec, math.ceil(self._fs / SPEC_COL_HZ))
+        self._spec_cols = max(1, int(self._t_spec_s * self._fs / self._spec_hop))
+        self._spec_hist = SpecHistory(self._nfreq * self._nch, self._spec_cols)
         self._fft_map = np.zeros((self._nfreq, self._nch), dtype=np.float32)
         self._samples_since_spec_update = 0
         for v in (getattr(self, "_fft_view", None), getattr(self, "_spec_view", None)):
@@ -274,11 +276,8 @@ class MainWindow(QMainWindow):
     def _set_spec_span(self, secs: float) -> None:
         """Spectrogram history length; keeps the newest columns."""
         self._t_spec_s = float(secs)
-        cols = max(1, int(self._t_spec_s * self._fs / self._ns_spec))
-        new = np.zeros((self._spec_data.shape[0], cols), dtype=np.float32)
-        keep = min(cols, self._spec_cols)
-        new[:, -keep:] = self._spec_data[:, -keep:]
-        self._spec_data, self._spec_cols = new, cols
+        self._spec_cols = max(1, int(self._t_spec_s * self._fs / self._spec_hop))
+        self._spec_hist.resize(self._spec_cols)
         self._spec_view.set_span(self._t_spec_s)
 
     def _t_of(self, idx: int) -> float:
@@ -599,7 +598,7 @@ class MainWindow(QMainWindow):
         self._samples_since_spec_update = 0
         self._samples_since_clear = 0
         self._sig.fill(np.nan)
-        self._spec_data.fill(0)
+        self._spec_hist.clear()
         self._fft_map.fill(0)
         # Force the metadata-latching path in _on_tick to re-run; otherwise
         # the new bus's V0 is ignored and FFT/plots use stale offsets.
@@ -743,7 +742,7 @@ class MainWindow(QMainWindow):
         # before the new V0 lands.
         self._last_seq = self._client.bus.total_published
         self._sig.fill(np.nan)
-        self._spec_data.fill(0)
+        self._spec_hist.clear()
         self._fft_map.fill(0)
         self._samples_since_spec_update = 0
         self._samples_since_clear = 0
@@ -891,10 +890,9 @@ class MainWindow(QMainWindow):
             if self._spectrum_view.isVisible():
                 self._update_spectrum()
 
-            # FFT / spectrogram: update every batch (mirrors n_update=1 default).
-            if self._samples_since_spec_update >= self._ns_spec:
+            # FFT / spectrogram: a column every hop samples
+            if self._samples_since_spec_update >= self._spec_hop:
                 self._update_fft_and_spec()
-                self._samples_since_spec_update = 0
 
     def _ingest(self, samples: np.ndarray, first_idx: int) -> None:
         """Samples ``first_idx``... (all at the current rate) into the rolling buffer
@@ -1133,43 +1131,31 @@ class MainWindow(QMainWindow):
     def _amp_spectrum(self, x: np.ndarray) -> Optional[np.ndarray]:
         """(nfreq, nch) amplitude of the samples ``x`` (n, nch): mean removed, Hann
         window, scaled so a sine of amplitude a reads a; None if ``x`` has gaps."""
-        # float64: a railed gauge (~1200 mV, constant) leaves ~1e-4 of float32 rounding
-        # after the mean removal, which would read as a tiny peak instead of nothing
-        x = x.astype(np.float64)
-        if not np.isfinite(x).all():
-            return None
-        n = x.shape[0]
-        w = np.hanning(n)
-        # Mean removal, not a linear detrend: with a 1 s window a 1 Hz sine is one cycle,
-        # and a line fitted to one cycle takes ~45 % of its amplitude (5 mV read as 2.7).
-        # Slow drift is kept out of the higher bins by the Hann window.
-        amp = np.abs(np.fft.rfft(detrend(x, axis=0, type="constant") * w[:, None], axis=0))
-        amp *= 2 * self._scale / w.sum()
-        amp[0] /= 2
-        if n % 2 == 0:
-            amp[-1] /= 2
-        amp[amp < 1e-9] = 0                    # round-off of a constant (railed) gauge
-        return amp
+        return amp_spectrum(x, self._scale)
 
     def _update_fft_and_spec(self) -> None:
-        """Recompute the current FFT (``do_fft`` in wavi.m:901-914, but with the
-        Spectrum window's method: mean removed, Hann window, amplitude-scaled)."""
-        if self._samples_since_clear < self._n_fft_window:
+        """The spectrogram columns that fell due (one per ``hop`` samples, each the
+        spectrum of the ``fft_window`` seconds ending there; ``do_fft`` in
+        wavi.m:901-914, with the Spectrum window's method) and the FFT frame."""
+        hop, n = self._spec_hop, self._n_fft_window
+        k = self._samples_since_spec_update // hop
+        self._samples_since_spec_update -= k * hop
+        # column j ends this many samples before the newest one
+        back = self._samples_since_spec_update + hop * np.arange(min(k, self._spec_cols) - 1, -1, -1)
+        back = back[back + n <= self._samples_since_clear]          # whole window buffered
+        if back.size == 0:
             return
-        amp = self._amp_spectrum(self._sig[-self._n_fft_window:])
-        if amp is None:
-            return
-        self._fft_map = amp.astype(np.float32)
-
-        # Spectrogram: shift columns left, drop new frame at right edge.
-        self._spec_data[:, :-1] = self._spec_data[:, 1:]
-        self._spec_data[:, -1] = self._fft_map.reshape(-1, order="F")
-
-        # the spectrogram history above is kept regardless; only redraw what is shown
+        ends = self._ns_tot - back
+        frames = amp_spectra(self._sig[ends[:, None] - n + np.arange(n)], self._scale)
+        frames = frames.astype(np.float32)
+        self._spec_hist.push(frames)
+        self._fft_map = frames[-1]
+        # the spectrogram history above is kept regardless; the windows only mark
+        # themselves dirty here and read the data when they redraw
         if self._fft_view.isVisible():
             self._fft_view.update_view(self._fft_map, self._fs)
         if self._spec_view.isVisible():
-            self._spec_view.update_view(self._spec_data, self._fs, self._ns_spec / self._fs)
+            self._spec_view.update_view(self._spec_hist, self._fs, hop / self._fs)
 
     def _write_record(self, cleaned: np.ndarray, first_idx: int) -> None:
         assert self._dat_writer is not None

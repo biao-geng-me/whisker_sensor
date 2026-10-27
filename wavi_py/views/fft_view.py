@@ -37,7 +37,9 @@ from PyQt6.QtWidgets import QComboBox, QDoubleSpinBox, QHBoxLayout, QLabel, QVBo
 
 import pyqtgraph as pg
 
+from wavi_py.views.render_sched import PlotWidget
 from wavi_py.views.spectral_base import SpectralWindow, to_db
+from wavi_py.views.whisker_plots import auto_width as _auto_width
 from whisker_link.channels import CHANNEL_NAMES
 
 _MODES = ("Peak bars", "Box over frequency", "Box over time")
@@ -57,14 +59,6 @@ Mouse over the heatmap: channel, frequency and amplitude in the status bar."""
 
 def _whisker_ticks(nch: int, offset: float) -> list[list[tuple[float, str]]]:
     return [[(2 * w + offset, f"W{w + 1}") for w in range(nch // 2)]]
-
-
-def _auto_width(ax: pg.AxisItem) -> float:
-    """The width a left axis would take for its current tick labels (pyqtgraph's own rule)."""
-    w = ax.textWidth + ax.style["tickTextOffset"][0] + max(0, ax.style["tickLength"])
-    if ax.label.isVisible():
-        w += ax.label.boundingRect().height() * 0.8
-    return float(int(w + 0.999))
 
 
 def _frame(plot: pg.PlotItem) -> None:
@@ -95,7 +89,7 @@ class FftView(SpectralWindow):
         self.setCentralWidget(central)
 
         # top: heatmap channel x frequency
-        self._heat = pg.PlotWidget()
+        self._heat = PlotWidget()
         self._heat.setBackground("w")
         hp = self._heat.getPlotItem()
         hp.setLabel("left", "Frequency", units="Hz")
@@ -144,7 +138,7 @@ class FftView(SpectralWindow):
             lambda: self._mode.setCurrentIndex((self._mode.currentIndex() + 1) % len(_MODES)))
         self.addAction(act_mode)
 
-        self._low = pg.PlotWidget()
+        self._low = PlotWidget()
         self._low.setBackground("w")
         lp = self._low.getPlotItem()
         lp.getAxis("bottom").setTicks(_whisker_ticks(self._nch, 0.5))
@@ -198,7 +192,7 @@ class FftView(SpectralWindow):
             self._hist.popleft()
         if new_axis:
             self._reset_axes()
-        self._redraw()
+        self._request_redraw()
 
     def _freqs(self) -> np.ndarray:
         return np.linspace(0, self._fs / 2, self._nfreq)
@@ -230,6 +224,9 @@ class FftView(SpectralWindow):
         self._cbar.axis.setLabel(self._unit())
         self._draw_lower()
         self._align_plots()                     # tick labels may have changed width
+        # the deferred range / layout work now, not in the paint (which would then paint twice)
+        for w in (self._heat, self._low):
+            w.scene().prepareForPaint()
 
     def _draw_lower(self) -> None:
         mode = self._mode.currentIndex()

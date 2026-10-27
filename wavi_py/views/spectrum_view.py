@@ -61,6 +61,8 @@ class SpectrumView(WhiskerPlotsView):
     KEYS_HELP = _KEYS_HELP
     VALUE_AXIS_LABEL = "peak"
     STACKED_LABEL_SAMPLE = "A 000.0 Hz 000.00   B 000.0 Hz 000.00"
+    MAX_HZ = 10.0                    # spectra of a 0.5-5 s window: 10 redraws a second is plenty
+    MIN_HZ = 2.5
 
     def __init__(self, nsensor: int, nch: int):
         super().__init__(nsensor, nch)
