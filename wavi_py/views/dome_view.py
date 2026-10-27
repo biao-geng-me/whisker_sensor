@@ -17,6 +17,18 @@ while paused.
 
 Mapping, calibration and bend model are PLACEHOLDERS (see dome_pose).
 
+Scribe shell (second toolbar row): an imaginary sphere + cylinder concentric
+with the dome (``dome_pose.Shell``) drawn as one grid line item (latitude
+rings and meridians on the sphere, rings and axial lines on the cylinder) and,
+optionally, a faint translucent surface. Pivot "centre" turns every whisker
+about the dome centre (the axis point at its height on the cylinder part), so
+the tips move on the shell and a bend of phi is phi of arc there; the whisker
+is drawn straight from its hole to that tip. Pivot "root" is the physical
+model. Each tip leaves a trail (one line item, per-vertex alpha fading with
+age) of the last Trail seconds. The grid spacing is set in degrees of bend
+(auto: a 1-2-5 value near 12 deg on the shell at the current gain); the
+readout next to it gives the same spacing on the shell, in degrees and mm.
+
 The status bar shows the measured frame rate (paints per second) and the mean
 per-frame times: pose (bus read + pose model + tube geometry), upload
 (handing the arrays to pyqtgraph; the GL buffer upload itself happens in the
@@ -37,7 +49,7 @@ from typing import Optional
 import numpy as np
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QAction, QGuiApplication, QOffscreenSurface, QOpenGLContext
-from PyQt6.QtWidgets import QCheckBox, QDoubleSpinBox, QLabel, QSpinBox, QToolBar
+from PyQt6.QtWidgets import QCheckBox, QComboBox, QDoubleSpinBox, QLabel, QSpinBox, QToolBar
 
 
 def _match_pyopengl_platform() -> None:
@@ -75,7 +87,8 @@ from pyqtgraph.opengl.MeshData import MeshData          # noqa: E402
 
 from wavi_py.views.base import ViewWindow               # noqa: E402
 from wavi_py.views.whisker_plots import _ElidedLabel    # noqa: E402
-from whisker_link.dome_pose import DomeLayout, DomePose  # noqa: E402
+from whisker_link.dome_pose import (DomeLayout, DomePose, Shell, TrailBuffer,  # noqa: E402
+                                    nice_grid_step)
 
 ASSET_DIR = Path(__file__).resolve().parents[1] / "assets" / "dome"
 TUBE_SIDES = 8
@@ -84,6 +97,10 @@ N_ROOT, N_SHAFT = 6, 8                 # polyline: 15 points per whisker
 COLOR_FULL_DEG = 45.0                  # colour map top (after the display gain)
 _GREY = (0.6, 0.6, 0.6, 1.0)
 _DOME_COLOR = (0.80, 0.82, 0.86, 1.0)
+_GRID_COLOR = (0.25, 0.35, 0.55, 0.35)
+_SURFACE_COLOR = (0.55, 0.65, 0.85, 0.07)
+TRAIL_MAX_S = 10.0
+TRAIL_RATE_HZ = 60.0                   # trail samples per second at most
 _CMAP = pg.colormap.get("viridis")    # bend magnitude: purple straight .. yellow full
 
 # A headlight: lit from the camera, two-sided (the CAD mesh's winding is not
@@ -153,6 +170,38 @@ def tube_vertices(pts: np.ndarray, radius: float, sides: int,
     return verts.reshape(-1, 3), ring.reshape(-1, 3)
 
 
+def shell_surface(shell: Shell, n_az: int = 72, n_pol: int = 24, n_z: int = 6) -> MeshData:
+    """A triangle mesh of the shell (hemisphere + cylinder), for the faint surface."""
+    R, c = shell.radius, shell.center
+    pol = np.r_[np.linspace(0, np.pi / 2, n_pol + 1)]
+    az = np.linspace(0, 2 * np.pi, n_az, endpoint=False)
+    sph = np.stack([np.sin(pol)[:, None] * np.cos(az), np.sin(pol)[:, None] * np.sin(az),
+                    np.cos(pol)[:, None] + 0 * az], -1) * R
+    z = -np.linspace(0, shell.cyl_len, n_z + 1)[1:]
+    cyl = np.stack([R * np.cos(az) + 0 * z[:, None], R * np.sin(az) + 0 * z[:, None],
+                    z[:, None] + 0 * az], -1)
+    rows = np.concatenate([sph, cyl]) + c                      # (Nr, n_az, 3)
+    nr = len(rows)
+    i, j = np.meshgrid(np.arange(nr - 1), np.arange(n_az), indexing="ij")
+    a, b = i * n_az + j, i * n_az + (j + 1) % n_az
+    f = np.concatenate([np.stack([a, b, b + n_az], -1).reshape(-1, 3),
+                        np.stack([a, b + n_az, a + n_az], -1).reshape(-1, 3)])
+    return MeshData(vertexes=rows.reshape(-1, 3).astype(np.float32), faces=f.astype(np.uint32))
+
+
+class _TranslucentMesh(gl.GLMeshItem):
+    """Blended, depth-tested but not depth-writing, drawn after the opaque
+    items (depth value); restores the depth mask so the next clear works."""
+
+    def paint(self):
+        from OpenGL import GL
+        GL.glDepthMask(GL.GL_FALSE)
+        try:
+            super().paint()
+        finally:
+            GL.glDepthMask(GL.GL_TRUE)
+
+
 class _GLView(gl.GLViewWidget):
     """GLViewWidget that times its paints."""
 
@@ -220,12 +269,19 @@ class DomeView(ViewWindow):
         self._paused = False
         self._gain = 3.0
         self._tubes = True
+        self._show_shell = True
+        self._centre_pivot = True
+        self._trail_s = 2.0
+        self._grid_bend_deg = 0.0              # 0: auto
+        self._shell_radius = 0.0               # 0: auto (rest tips' reach)
 
         self.layout_ = DomeLayout.load(asset_dir / "whiskers.json")
         self.pose = DomePose(self.layout_)
         n_pts = N_ROOT + N_SHAFT + 1
         self._tube_faces = tube_faces(len(self.layout_), n_pts, TUBE_SIDES)
         self._lut = _CMAP.getLookupTable(0.0, 1.0, 256, alpha=True) / 255.0
+        self.shell = Shell.around(self.layout_, self._shell_radius)
+        self.trail = TrailBuffer(len(self.layout_), TRAIL_MAX_S, TRAIL_RATE_HZ)
 
         self._glw = _GLView()
         self._glw.setBackgroundColor((245, 245, 248))
@@ -238,9 +294,24 @@ class DomeView(ViewWindow):
         self._line_item.setVisible(False)
         self._glw.addItem(self._tube_item)
         self._glw.addItem(self._line_item)
+        # shell grid, trails and the optional surface: blended, drawn after the opaque items
+        self._grid_item = gl.GLLinePlotItem(mode="lines", width=1.0, antialias=False,
+                                            glOptions="translucent")
+        self._grid_item.setDepthValue(10)
+        self._trail_item = gl.GLLinePlotItem(mode="lines", width=2.0, antialias=True,
+                                             glOptions="translucent")
+        self._trail_item.setDepthValue(11)
+        self._surface_item = _TranslucentMesh(meshdata=shell_surface(self.shell), smooth=False,
+                                              shader=None, color=_SURFACE_COLOR,
+                                              glOptions="translucent")
+        self._surface_item.setDepthValue(12)
+        self._surface_item.setVisible(False)
+        for it in (self._grid_item, self._trail_item, self._surface_item):
+            self._glw.addItem(it)
         self.reset_camera()
 
         self._build_toolbar(target_fps)
+        self._build_shell_toolbar()
         self._stats_label = QLabel()
         self.statusBar().addWidget(self._stats_label)
         self._stream_status = _ElidedLabel()
@@ -251,6 +322,7 @@ class DomeView(ViewWindow):
         self._timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._timer.timeout.connect(self._on_frame)
         self.set_target_fps(target_fps)
+        self._update_grid()
         self._render_pose()
 
     # ----- scene
@@ -266,8 +338,9 @@ class DomeView(ViewWindow):
         self._dome_center = V.mean(axis=0)
 
     def reset_camera(self) -> None:
-        c = self.layout_.root.mean(axis=0)
-        self._glw.setCameraPosition(pos=pg.Vector(*c), distance=520, elevation=25, azimuth=-60)
+        c = self.layout_.center - [0.0, 0.0, 0.2 * self.shell.radius]
+        self._glw.setCameraPosition(pos=pg.Vector(*c), distance=4.4 * self.shell.radius,
+                                    elevation=25, azimuth=-60)
 
     def _build_toolbar(self, target_fps: float) -> None:
         tb = QToolBar("Dome")
@@ -285,7 +358,7 @@ class DomeView(ViewWindow):
         tb.addSeparator()
         tb.addWidget(QLabel(" Gain "))
         self._gain_box = QDoubleSpinBox()
-        self._gain_box.setRange(0.1, 50.0)
+        self._gain_box.setRange(0.1, 1000.0)       # high: still-whisker noise is ~0.03 deg
         self._gain_box.setSingleStep(0.5)
         self._gain_box.setValue(self._gain)
         self._gain_box.setSuffix(" x")
@@ -308,6 +381,106 @@ class DomeView(ViewWindow):
         view = QAction("Reset view", self)
         view.triggered.connect(self.reset_camera)
         tb.addAction(view)
+
+    def _build_shell_toolbar(self) -> None:
+        self.addToolBarBreak()
+        tb = QToolBar("Shell")
+        self.addToolBar(tb)
+        self._shell_box = QCheckBox("Shell")
+        self._shell_box.setChecked(self._show_shell)
+        self._shell_box.setToolTip("Scribe shell: grid on an imaginary sphere + cylinder"
+                                   " concentric with the dome")
+        self._shell_box.toggled.connect(self.set_shell_visible)
+        tb.addWidget(self._shell_box)
+        self._surface_box = QCheckBox("Surface")
+        self._surface_box.setToolTip("Also a faint translucent shell surface")
+        self._surface_box.toggled.connect(self.set_surface_visible)
+        tb.addWidget(self._surface_box)
+        tb.addWidget(QLabel(" Pivot "))
+        self._pivot_box = QComboBox()
+        self._pivot_box.addItems(["centre", "root"])
+        self._pivot_box.setCurrentIndex(0 if self._centre_pivot else 1)
+        self._pivot_box.setToolTip("centre: whiskers turn about the dome centre, tips move on"
+                                   " the shell (display aid); root: the physical bend model")
+        self._pivot_box.currentTextChanged.connect(lambda t: self.set_centre_pivot(t == "centre"))
+        tb.addWidget(self._pivot_box)
+        tb.addWidget(QLabel(" Trail "))
+        self._trail_box = QDoubleSpinBox()
+        self._trail_box.setRange(0.0, TRAIL_MAX_S)
+        self._trail_box.setSingleStep(0.5)
+        self._trail_box.setDecimals(1)
+        self._trail_box.setSuffix(" s")
+        self._trail_box.setSpecialValueText("off")
+        self._trail_box.setValue(self._trail_s)
+        self._trail_box.setToolTip("Tip trail length, fading with age (0: off)")
+        self._trail_box.valueChanged.connect(self.set_trail_s)
+        tb.addWidget(self._trail_box)
+        tb.addWidget(QLabel(" Grid "))
+        self._grid_box = QDoubleSpinBox()
+        self._grid_box.setRange(0.0, 45.0)
+        self._grid_box.setDecimals(2)
+        self._grid_box.setSingleStep(0.5)
+        self._grid_box.setSuffix(" deg bend")
+        self._grid_box.setSpecialValueText("auto")
+        self._grid_box.setToolTip("Grid spacing in degrees of bend (0: auto, a 1-2-5 value)")
+        self._grid_box.valueChanged.connect(self.set_grid_step)
+        tb.addWidget(self._grid_box)
+        self._grid_label = QLabel()
+        tb.addWidget(self._grid_label)
+        tb.addWidget(QLabel(" R "))
+        self._radius_box = QDoubleSpinBox()
+        self._radius_box.setRange(0.0, 2000.0)
+        self._radius_box.setDecimals(0)
+        self._radius_box.setSingleStep(10.0)
+        self._radius_box.setSuffix(" mm")
+        self._radius_box.setSpecialValueText("auto")
+        self._radius_box.setToolTip("Shell radius (0: auto, where the tips are at rest)")
+        self._radius_box.valueChanged.connect(self.set_shell_radius)
+        tb.addWidget(self._radius_box)
+
+    # ----- shell
+    def grid_step_bend_deg(self) -> float:
+        return self._grid_bend_deg or nice_grid_step(self._gain)
+
+    def _update_grid(self) -> None:
+        bend = self.grid_step_bend_deg()
+        shell_deg = max(bend * self._gain, 1.0)        # Shell.grid's floor
+        seg = self.shell.grid(np.radians(shell_deg)).reshape(-1, 3)
+        self._grid_item.setData(pos=seg.astype(np.float32), color=_GRID_COLOR)
+        mm = self.shell.radius * np.radians(shell_deg)
+        auto = "" if self._grid_bend_deg else "auto "
+        self._grid_label.setText(f" {auto}{bend:g} deg bend = {shell_deg:g} deg / {mm:.0f} mm"
+                                 f" on the shell (R {self.shell.radius:.0f}) ")
+        self._grid_item.setVisible(self._show_shell)
+
+    def set_shell_visible(self, on: bool) -> None:
+        self._show_shell = bool(on)
+        self._grid_item.setVisible(self._show_shell)
+        self._surface_item.setVisible(self._show_shell and self._surface_box.isChecked())
+
+    def set_surface_visible(self, on: bool) -> None:
+        self._surface_item.setVisible(bool(on) and self._show_shell)
+
+    def set_centre_pivot(self, on: bool) -> None:
+        self._centre_pivot = bool(on)
+        self.trail.clear()
+        self._render_pose()
+
+    def set_trail_s(self, secs: float) -> None:
+        self._trail_s = float(secs)
+        self._trail_item.setVisible(self._trail_s > 0)
+
+    def set_grid_step(self, bend_deg: float) -> None:
+        self._grid_bend_deg = float(bend_deg)
+        self._update_grid()
+
+    def set_shell_radius(self, r: float) -> None:
+        self._shell_radius = float(r)
+        self.shell = Shell.around(self.layout_, self._shell_radius)
+        self._surface_item.setMeshData(meshdata=shell_surface(self.shell))
+        self.trail.clear()
+        self._update_grid()
+        self._render_pose()
 
     # ----- control (main window)
     def set_bus(self, bus, fs: Optional[float] = None) -> None:
@@ -336,6 +509,8 @@ class DomeView(ViewWindow):
 
     def _set_gain(self, g: float) -> None:
         self._gain = float(g)
+        self.trail.clear()                     # the old trail was drawn at the old gain
+        self._update_grid()
         self._render_pose()
 
     def set_tubes(self, on: bool) -> None:
@@ -379,18 +554,38 @@ class DomeView(ViewWindow):
         c[~np.isfinite(mag)] = _GREY
         return c
 
-    def _render_pose(self, t0: Optional[float] = None) -> None:
+    def _binormals(self, pts: np.ndarray) -> np.ndarray:
+        """(H, 3) unit normal of each whisker's (planar) polyline's plane."""
+        lay = self.layout_
+        if self._centre_pivot:                 # straight hole -> tip: any normal to it
+            t = pts[:, -1] - pts[:, 0]
+            b = np.cross(t, lay.e2)
+            weak = np.linalg.norm(b, axis=1) < 1e-6 * np.linalg.norm(t, axis=1)
+            b[weak] = np.cross(t[weak], lay.e1[weak])
+        else:
+            th = np.nan_to_num(self.pose.angles())
+            b = th[:, :1] * lay.e2 - th[:, 1:] * lay.e1          # n x d, unnormalised
+            b[np.linalg.norm(b, axis=1) < 1e-9] = lay.e2[np.linalg.norm(b, axis=1) < 1e-9]
+        return b / np.linalg.norm(b, axis=1, keepdims=True)
+
+    def _render_pose(self, t0: Optional[float] = None, now: Optional[float] = None) -> None:
+        """Draw the latest pose; ``now`` (s, monotonic by default) stamps the trail."""
         t0 = time.perf_counter() if t0 is None else t0
-        pts, mag = self.pose.shape(self._gain, n_root=N_ROOT, n_shaft=N_SHAFT)
+        now = time.monotonic() if now is None else now
+        pts, mag = self.pose.shape(self._gain, self.shell if self._centre_pivot else None,
+                                   n_root=N_ROOT, n_shaft=N_SHAFT)
         col = self._colors(mag)                                  # (H, 4)
         n_pts = pts.shape[1]
+        trail = None
+        if self._trail_s > 0:
+            tips = np.where(np.isfinite(mag)[:, None], pts[:, -1], np.nan)
+            self.trail.push(now, tips, mag)
+            tp, tm, ta = self.trail.segments(now, self._trail_s)
+            tc = self._colors(tm)
+            tc[:, 3] = ta
+            trail = (tp, tc)
         if self._tubes:
-            th = np.nan_to_num(self.pose.angles())
-            lay = self.layout_
-            bdir = th[:, :1] * lay.e2 - th[:, 1:] * lay.e1       # n x d, unnormalised
-            nb = np.linalg.norm(bdir, axis=1, keepdims=True)
-            bnorm = np.where(nb > 1e-9, bdir / np.maximum(nb, 1e-12), lay.e2)
-            V, N = tube_vertices(pts, TUBE_RADIUS_MM, TUBE_SIDES, bnorm)
+            V, N = tube_vertices(pts, TUBE_RADIUS_MM, TUBE_SIDES, self._binormals(pts))
             C = np.repeat(col, n_pts * TUBE_SIDES, axis=0)
             t1 = time.perf_counter()
             md = _MeshData(vertexes=V.astype(np.float32), faces=self._tube_faces,
@@ -402,6 +597,9 @@ class DomeView(ViewWindow):
             C = np.repeat(col, 2 * (n_pts - 1), axis=0)
             t1 = time.perf_counter()
             self._line_item.setData(pos=seg.astype(np.float32), color=C.astype(np.float32))
+        if trail is not None:
+            self._trail_item.setData(pos=trail[0].astype(np.float32),
+                                     color=trail[1].astype(np.float32))
         t2 = time.perf_counter()
         self.stats.frames += 1
         self.stats.pose_s += t1 - t0

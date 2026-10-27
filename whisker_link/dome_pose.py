@@ -18,6 +18,13 @@ PLACEHOLDERS, isolated so each can be swapped alone:
   length ``LR_MM`` (data_processing/bend_angle.m), the bend angle being the
   angle at the root's top. No load, no shaft deflection, no undulation.
 
+Display aid, not physics: the scribe ``Shell`` (a sphere on the dome's
+hemisphere + a cylinder down the tube axis) and the centre-pivot mode, in which
+each whisker turns about the dome centre (or, on the cylinder part, the axis
+point at its height) so that its tip moves on the shell; on the sphere part a
+bend of phi moves the tip phi of arc, i.e. ``radius * phi`` mm. ``TrailBuffer``
+keeps the tips' recent path for the trails.
+
 The dome geometry and each hole's bending frame come from
 ``wavi_py/assets/dome/whiskers.json`` (wavi_py/tools/export_dome_assets.py):
 ``axis`` n outward, ``e1`` meridional (toward the dome's front, +z), ``e2`` =
@@ -74,14 +81,31 @@ class DomeLayout:
     e2: np.ndarray
     length: np.ndarray
     labels: list = field(default_factory=list)
+    # the hemisphere's centre (on the tube axis +z, at the equator) and radius
+    center: Optional[np.ndarray] = None
+    dome_radius: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.center is None:             # an older asset: the point nearest all axes
+            m = np.zeros((3, 3))
+            b = np.zeros(3)
+            for r, a in zip(self.root, self.axis):
+                pr = np.eye(3) - np.outer(a, a)
+                m += pr
+                b += pr @ r
+            c = np.linalg.lstsq(m, b, rcond=None)[0]
+            self.center = np.array([0.0, 0.0, c[2]])
+        self.center = np.asarray(self.center, dtype=np.float64)
 
     @classmethod
     def load(cls, path) -> "DomeLayout":
         doc = json.loads(Path(path).read_text())
         ws = doc["whiskers"]
         arr = lambda k: np.array([w[k] for w in ws], dtype=np.float64)    # noqa: E731
+        dome = doc.get("dome") or {}
         return cls(arr("root"), arr("axis"), arr("e1"), arr("e2"), arr("length"),
-                   [f"{w['side']}{w['row']}{w['col']}" for w in ws])
+                   [f"{w['side']}{w['row']}{w['col']}" for w in ws],
+                   dome.get("center"), float(dome.get("radius", 0.0)))
 
     def __len__(self) -> int:
         return len(self.root)
@@ -232,6 +256,210 @@ def whisker_shape(layout: DomeLayout, theta: np.ndarray, n_root: int = 6, n_shaf
 
 
 # ---------------------------------------------------------------------------
+# scribe shell: a sphere on the dome's hemisphere + a cylinder down the tube
+# ---------------------------------------------------------------------------
+@dataclass
+class Shell:
+    """An imaginary drawing surface concentric with the dome: the sphere of
+    ``radius`` round ``center`` above the equator (z >= center z) and the
+    cylinder of the same radius round the tube axis (+z through ``center``)
+    below it, down to ``cyl_len`` under the equator. Whisker tips scribe on it."""
+
+    center: np.ndarray
+    radius: float
+    cyl_len: float = 0.0
+
+    def __post_init__(self) -> None:
+        self.center = np.asarray(self.center, dtype=np.float64)
+        if self.cyl_len <= 0:
+            self.cyl_len = 0.6 * self.radius
+
+    @classmethod
+    def around(cls, layout: DomeLayout, radius: float = 0.0) -> "Shell":
+        """``radius`` 0: the rest tips' reach, mean root distance from its
+        pivot + mean whisker length."""
+        if radius <= 0:
+            piv = centre_pivots(layout)
+            radius = float(np.mean(np.linalg.norm(layout.root - piv, axis=1))
+                           + np.mean(layout.length))
+        return cls(layout.center, radius)
+
+    def on_cylinder(self, p: np.ndarray) -> np.ndarray:
+        return p[..., 2] < self.center[2]
+
+    def distance(self, p: np.ndarray) -> np.ndarray:
+        """Signed distance of points (..., 3) from the shell surface."""
+        d = p - self.center
+        r_sph = np.linalg.norm(d, axis=-1)
+        r_cyl = np.hypot(d[..., 0], d[..., 1])
+        return np.where(self.on_cylinder(p), r_cyl, r_sph) - self.radius
+
+    def hit(self, origin: np.ndarray, v: np.ndarray) -> np.ndarray:
+        """Where rays (H, 3) from ``origin`` (inside the shell) along unit
+        ``v`` leave it, (H, 3); the cylinder is taken as unbounded below."""
+        o = origin - self.center
+        # sphere: |o + t v| = R, the far root
+        b = np.einsum("ij,ij->i", o, v)
+        c = np.einsum("ij,ij->i", o, o) - self.radius ** 2
+        t_s = -b + np.sqrt(np.maximum(b * b - c, 0.0))
+        # cylinder: |(o + t v)_xy| = R
+        a2 = v[:, 0] ** 2 + v[:, 1] ** 2
+        b2 = o[:, 0] * v[:, 0] + o[:, 1] * v[:, 1]
+        c2 = o[:, 0] ** 2 + o[:, 1] ** 2 - self.radius ** 2
+        with np.errstate(divide="ignore", invalid="ignore"):
+            t_c = (-b2 + np.sqrt(np.maximum(b2 * b2 - a2 * c2, 0.0))) / a2
+        t_c = np.where(a2 > 1e-12, t_c, np.inf)
+        z_s = o[:, 2] + t_s * v[:, 2]
+        z_c = o[:, 2] + t_c * v[:, 2]
+        # the exit is on the sphere part when that hit is above the equator
+        # and the cylinder part when its hit is below it; exactly one holds
+        # for an origin inside (both at the equator itself)
+        t = np.where(z_s >= 0, t_s, np.where(z_c <= 0, t_c, t_s))
+        t = np.minimum(t, 10 * self.radius)         # straight down the axis: no exit
+        return origin + t[:, None] * v
+
+    def grid(self, step_rad: float, n_ring: int = 96) -> np.ndarray:
+        """Grid line segments (N, 2, 3), ``step_rad`` apart: latitude rings
+        and meridians on the sphere (pole on the tube axis), and on the
+        cylinder the meridians continued as axial lines plus rings every
+        ``radius * step_rad`` mm (the same arc length as on the sphere)."""
+        R, c = self.radius, self.center
+        step = max(float(step_rad), math.radians(1.0))
+        segs = []
+        ring = np.linspace(0, 2 * np.pi, n_ring + 1)
+        cr, sr = np.cos(ring), np.sin(ring)
+
+        def poly(p):
+            segs.append(np.stack([p[:-1], p[1:]], axis=1))
+
+        # sphere: rings at polar angle k*step from the pole, equator included
+        pol = list(np.arange(step, np.pi / 2 - 1e-6, step)) + [np.pi / 2]
+        for a in pol:
+            poly(c + np.c_[R * np.sin(a) * cr, R * np.sin(a) * sr, np.full_like(cr, R * np.cos(a))])
+        # meridians, from the first ring down the sphere and the cylinder
+        n_mer = max(int(round(2 * np.pi / step)), 4)
+        a = np.linspace(pol[0], np.pi / 2, 24)
+        zc = np.linspace(0, -self.cyl_len, 8)
+        for k in range(n_mer):
+            ph = 2 * np.pi * k / n_mer
+            u = np.array([np.cos(ph), np.sin(ph)])
+            sph = c + np.c_[R * np.sin(a)[:, None] * u, R * np.cos(a)]
+            cyl = c + np.c_[np.tile(R * u, (len(zc), 1)), zc]
+            poly(np.vstack([sph, cyl[1:]]))
+        # cylinder rings
+        dz = R * step
+        for z in np.arange(dz, self.cyl_len + 1e-6, dz):
+            poly(c + np.c_[R * cr, R * sr, np.full_like(cr, -z)])
+        return np.concatenate(segs)
+
+
+def centre_pivots(layout: DomeLayout) -> np.ndarray:
+    """(H, 3) centre pivots: the dome centre for a root on the sphere part
+    (at or above the equator), the point on the tube axis at the root's height
+    for one on the cylinder part."""
+    c = layout.center
+    cyl = layout.root[:, 2] < c[2] - 0.5
+    piv = np.tile(c, (len(layout), 1))
+    piv[cyl, 2] = layout.root[cyl, 2]
+    return piv
+
+
+def centre_pivot_shape(layout: DomeLayout, shell: Shell, theta: np.ndarray,
+                       n_pts: int = 15) -> tuple[np.ndarray, np.ndarray]:
+    """Centre-pivot mode: each whisker turns about its centre pivot, so its tip
+    scribes on ``shell``. The rest direction is from the pivot through the
+    root; ``theta`` (H, 2) rad tilts it toward the hole's e1 / e2 (made normal
+    to that direction). Returns (polylines (H, n_pts, 3), tips (H, 3)): drawn
+    straight from the hole to the tip, so the whisker stays attached."""
+    th = np.nan_to_num(np.asarray(theta, dtype=np.float64))
+    piv = centre_pivots(layout)
+    u = layout.root - piv
+    u /= np.linalg.norm(u, axis=1, keepdims=True)
+    e1 = layout.e1 - np.einsum("ij,ij->i", layout.e1, u)[:, None] * u
+    e1 /= np.linalg.norm(e1, axis=1, keepdims=True)
+    e2 = np.cross(u, e1)
+    phi = np.hypot(th[:, 0], th[:, 1])
+    safe = np.where(phi > 1e-12, phi, 1.0)
+    d = (th[:, :1] * e1 + th[:, 1:] * e2) / safe[:, None]
+    v = np.cos(phi)[:, None] * u + np.sin(phi)[:, None] * d
+    tips = shell.hit(piv, v)
+    s = np.linspace(0.0, 1.0, n_pts)[None, :, None]
+    return layout.root[:, None, :] + s * (tips - layout.root)[:, None, :], tips
+
+
+def nice_grid_step(gain: float, target_deg: float = 12.0) -> float:
+    """Auto grid spacing in degrees of BEND: a 1-2-5 value whose drawn
+    spacing (times the display gain) is nearest ``target_deg``."""
+    vals = np.array([m * 10.0 ** e for e in range(-2, 3) for m in (1, 2, 5)])
+    return float(vals[np.argmin(np.abs(np.log(vals * gain / target_deg)))])
+
+
+class TrailBuffer:
+    """Ring buffer of tip positions (and bend magnitudes) with their times,
+    for the scribe trails. ``push`` keeps at most ``rate_hz`` samples a second,
+    so the capacity covers ``max_s`` seconds whatever the frame rate."""
+
+    def __init__(self, n_whisker: int, max_s: float = 10.0, rate_hz: float = 60.0):
+        self.rate_hz = float(rate_hz)
+        self.cap = int(math.ceil(max_s * rate_hz)) + 2
+        self.pos = np.full((self.cap, n_whisker, 3), np.nan)
+        self.mag = np.full((self.cap, n_whisker), np.nan)
+        self.t = np.full(self.cap, -np.inf)
+        self.head = 0                       # next slot
+        self.count = 0
+
+    def clear(self) -> None:
+        self.pos[:] = np.nan
+        self.mag[:] = np.nan
+        self.t[:] = -np.inf
+        self.head = self.count = 0
+
+    def push(self, t: float, tips: np.ndarray, mag: np.ndarray) -> bool:
+        """Store the tips (H, 3) at time ``t`` s (NaN rows: no data, a gap)."""
+        if self.count:
+            dt = t - self.t[(self.head - 1) % self.cap]
+            if dt < 0:                          # time went back (a new clock): start over
+                self.clear()
+            elif dt < 0.999 / self.rate_hz:
+                return False
+        self.pos[self.head] = tips
+        self.mag[self.head] = mag
+        self.t[self.head] = t
+        self.head = (self.head + 1) % self.cap
+        self.count = min(self.count + 1, self.cap)
+        return True
+
+    def recent(self, now: float, window_s: float):
+        """The samples of the last ``window_s`` s, oldest first: positions
+        (K, H, 3), magnitudes (K, H), ages (K,) s."""
+        n = min(self.count, int(math.ceil(window_s * self.rate_hz)) + 2)
+        idx = (self.head - n + np.arange(n)) % self.cap
+        age = now - self.t[idx]
+        keep = age <= window_s
+        idx = idx[keep]
+        return self.pos[idx], self.mag[idx], age[keep]
+
+    def segments(self, now: float, window_s: float):
+        """Trail line segments for one combined line item: positions
+        (2 * (K - 1) * H, 3) as (start, end) pairs per whisker and step, the
+        bend magnitude at each end and alpha 1 -> 0 with age; segments touching
+        a gap are NaN-free with alpha 0."""
+        pos, mag, age = self.recent(now, window_s)
+        if len(age) < 2:
+            return np.zeros((0, 3)), np.zeros(0), np.zeros(0)
+        a = np.clip(1.0 - age / window_s, 0.0, 1.0)                     # (K,)
+        p = np.stack([pos[:-1], pos[1:]], axis=2)                       # (K-1, H, 2, 3)
+        m = np.stack([mag[:-1], mag[1:]], axis=2)                       # (K-1, H, 2)
+        al = np.broadcast_to(np.stack([a[:-1], a[1:]], axis=1)[:, None, :], m.shape).copy()
+        ok = np.isfinite(p).all(axis=(2, 3))                            # (K-1, H)
+        al[~ok] = 0.0
+        p = np.where(ok[..., None, None], p, 0.0)
+        # whisker-major, so each whisker's trail is contiguous
+        return (p.transpose(1, 0, 2, 3).reshape(-1, 3), m.transpose(1, 0, 2).reshape(-1),
+                al.transpose(1, 0, 2).reshape(-1))
+
+
+# ---------------------------------------------------------------------------
 # the whole pipeline
 # ---------------------------------------------------------------------------
 class DomePose:
@@ -271,9 +499,15 @@ class DomePose:
         """(H, 2) rad, theta_x / theta_y per hole."""
         return self.calibration.apply(self.delta_ab())
 
-    def shape(self, gain: float = 1.0, **kw) -> tuple[np.ndarray, np.ndarray]:
+    def shape(self, gain: float = 1.0, shell: Optional[Shell] = None, **kw) \
+            -> tuple[np.ndarray, np.ndarray]:
         """(polylines (H, S, 3) mm, bend magnitude (H,) rad, NaN = no data),
-        angles times the display ``gain``."""
+        angles times the display ``gain``. With ``shell``: centre-pivot mode
+        (tips on the shell, ``centre_pivot_shape``), else the physical root
+        (``whisker_shape``)."""
         th = self.angles() * gain
         mag = np.hypot(th[:, 0], th[:, 1])
+        if shell is not None:
+            n_pts = kw.get("n_root", 6) + kw.get("n_shaft", 6) + 1
+            return centre_pivot_shape(self.layout, shell, th, n_pts)[0], mag
         return whisker_shape(self.layout, th, **kw), mag
