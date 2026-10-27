@@ -233,6 +233,7 @@ for ref, pins in CTL.items():
                  else f'<circle cx="{p["x"]:.2f}" cy="{fy(y):.2f}" r="0.78"')
         o.append(shape + f' class="psig" style="fill:{col}"><title>{ref} pin {n}: {sig["name"]} → ESP32 GPIO{sig["gpio"]}</title>'
                  + ('</rect>' if n == 1 else '</circle>'))
+        o.append(f'<text x="{p["x"]:.2f}" y="{fy(y) + .42:.2f}" text-anchor="middle" class="cpn">{n}</text>')
         o.append(f'<text transform="translate({p["x"] + .55:.2f},{fy(y) - 2.2:.2f}) rotate(-90)" class="clab">{sig["short"]}</text>')
         o.append(f'<text x="{p["x"]:.2f}" y="{fy(y) + 3.3:.2f}" text-anchor="middle" class="cgpio">{sig["gpio"]}</text>')
     o.append(f'<text x="{x1 + 1.2:.2f}" y="{fy(y) + .3:.2f}" class="hlab" style="fill:{col}">{ref}</text>')
@@ -349,6 +350,7 @@ for g in sorted(gauges, key=wkey):
 # Silkscreen labels, antenna end first, top view with the antenna up and USB down.
 DK_L = ["EN", "VP", "VN", "D34", "D35", "D32", "D33", "D25", "D26", "D27", "D14", "D12", "D13", "GND", "VIN"]
 DK_R = ["D23", "D22", "TX0", "RX0", "D21", "D19", "D18", "D5", "TX2", "RX2", "D4", "D2", "D15", "GND", "3V3"]
+DK_SILK2 = {"TX2": " / D17", "RX2": " / D16"}   # some clones print these instead
 _DK_ALIAS = {"VP": 36, "VN": 39, "TX0": 1, "RX0": 3, "TX2": 17, "RX2": 16}
 def gpio_of(lab):
     if lab in _DK_ALIAS:
@@ -385,8 +387,10 @@ def devkit_svg():
             else:
                 cls, sty = "dkpin dkoff", ""
             s.append(f'<circle cx="{cx}" cy="{y}" r="6.5" class="{cls}" style="{sty}"/>')
+            if use:
+                s.append(f'<text x="{cx}" y="{y + 3.5}" text-anchor="middle" class="dkpn">{use[1]}</text>')
             s.append(f'<text x="{cx + (12 if side == "L" else -12)}" y="{y + 4}" text-anchor="{"start" if side == "L" else "end"}" '
-                     f'class="dklab{"" if (use or gnd) else " dkdim"}">{lab}</text>')
+                     f'class="dklab{"" if (use or gnd) else " dkdim"}">{lab}{DK_SILK2.get(lab, "")}</text>')
             if use or gnd:
                 tx = cx + (-40 if side == "L" else 40)
                 a = "end" if side == "L" else "start"

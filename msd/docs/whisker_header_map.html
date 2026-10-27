@@ -46,6 +46,8 @@ svg.board { width: 100%; min-width: 560px; height: auto; display: block; }
 .hlab { font: 600 3.2px var(--f-display); paint-order: stroke; stroke: var(--pcb); stroke-width: .8; }
 .hsub { font: 500 1.9px var(--f-mono); fill: var(--silk); paint-order: stroke; stroke: var(--pcb); stroke-width: .6; }
 .clab { font: 600 1.25px var(--f-mono); fill: var(--silk); paint-order: stroke; stroke: var(--pcb); stroke-width: .45; }
+.cpn { font: 700 1.05px var(--f-mono); fill: #fff; pointer-events: none; }
+.dkpn { font: 700 9.5px var(--f-mono); fill: #fff; pointer-events: none; }
 .cgpio { font: 600 1.35px var(--f-mono); fill: #fff; paint-order: stroke; stroke: var(--pcb); stroke-width: .5; }
 .gnd { fill: none; stroke: #fff; stroke-width: .45; stroke-dasharray: .7 .45; }
 .gndlab { font: 600 2px var(--f-mono); fill: #fff; paint-order: stroke; stroke: var(--pcb); stroke-width: .6; }
@@ -317,42 +319,54 @@ tr.q td { color: var(--mut); font-style: italic; }
 <text x="36.91" y="4.67" text-anchor="end" class="glab">16B</text>
 <rect x="66.44" y="28.40" width="15.90" height="3.2" rx="0.8" class="hbox" style="stroke:var(--p2)"/>
 <circle cx="68.04" cy="30.00" r="0.78" class="psig" style="fill:var(--p2)"><title>P2 pin 6: SELC_2 → ESP32 GPIO14</title></circle>
+<text x="68.04" y="30.42" text-anchor="middle" class="cpn">6</text>
 <text transform="translate(68.59,27.80) rotate(-90)" class="clab">SELC2</text>
 <text x="68.04" y="33.30" text-anchor="middle" class="cgpio">14</text>
 <circle cx="70.58" cy="30.00" r="0.78" class="psig" style="fill:var(--p2)"><title>P2 pin 5: SELB_2 → ESP32 GPIO27</title></circle>
+<text x="70.58" y="30.42" text-anchor="middle" class="cpn">5</text>
 <text transform="translate(71.13,27.80) rotate(-90)" class="clab">SELB2</text>
 <text x="70.58" y="33.30" text-anchor="middle" class="cgpio">27</text>
 <circle cx="75.66" cy="30.00" r="0.78" class="psig" style="fill:var(--p2)"><title>P2 pin 3: SELA_1 → ESP32 GPIO25</title></circle>
+<text x="75.66" y="30.42" text-anchor="middle" class="cpn">3</text>
 <text transform="translate(76.21,27.80) rotate(-90)" class="clab">SELA1</text>
 <text x="75.66" y="33.30" text-anchor="middle" class="cgpio">25</text>
 <rect x="79.99" y="29.25" width="1.5" height="1.5" class="psig" style="fill:var(--p2)"><title>P2 pin 1: SELC_1 → ESP32 GPIO32</title></rect>
+<text x="80.74" y="30.42" text-anchor="middle" class="cpn">1</text>
 <text transform="translate(81.29,27.80) rotate(-90)" class="clab">SELC1</text>
 <text x="80.74" y="33.30" text-anchor="middle" class="cgpio">32</text>
 <circle cx="78.20" cy="30.00" r="0.78" class="psig" style="fill:var(--p2)"><title>P2 pin 2: SELB_1 → ESP32 GPIO33</title></circle>
+<text x="78.20" y="30.42" text-anchor="middle" class="cpn">2</text>
 <text transform="translate(78.75,27.80) rotate(-90)" class="clab">SELB1</text>
 <text x="78.20" y="33.30" text-anchor="middle" class="cgpio">33</text>
 <circle cx="73.12" cy="30.00" r="0.78" class="psig" style="fill:var(--p2)"><title>P2 pin 4: SELA_2 → ESP32 GPIO26</title></circle>
+<text x="73.12" y="30.42" text-anchor="middle" class="cpn">4</text>
 <text transform="translate(73.67,27.80) rotate(-90)" class="clab">SELA2</text>
 <text x="73.12" y="33.30" text-anchor="middle" class="cgpio">26</text>
 <text x="83.54" y="30.30" class="hlab" style="fill:var(--p2)">P2</text>
 <text x="83.54" y="32.60" class="hsub">mux selects</text>
 <rect x="25.88" y="27.00" width="15.90" height="3.2" rx="0.8" class="hbox" style="stroke:var(--p1)"/>
 <circle cx="37.64" cy="28.60" r="0.78" class="psig" style="fill:var(--p1)"><title>P1 pin 2: DRDY → ESP32 GPIO4</title></circle>
+<text x="37.64" y="29.02" text-anchor="middle" class="cpn">2</text>
 <text transform="translate(38.19,26.40) rotate(-90)" class="clab">DRDY</text>
 <text x="37.64" y="31.90" text-anchor="middle" class="cgpio">4</text>
 <circle cx="27.48" cy="28.60" r="0.78" class="psig" style="fill:var(--p1)"><title>P1 pin 6: CLKIN → ESP32 GPIO16</title></circle>
+<text x="27.48" y="29.02" text-anchor="middle" class="cpn">6</text>
 <text transform="translate(28.03,26.40) rotate(-90)" class="clab">CLKIN</text>
 <text x="27.48" y="31.90" text-anchor="middle" class="cgpio">16</text>
 <circle cx="30.02" cy="28.60" r="0.78" class="psig" style="fill:var(--p1)"><title>P1 pin 5: DIN → ESP32 GPIO5</title></circle>
+<text x="30.02" y="29.02" text-anchor="middle" class="cpn">5</text>
 <text transform="translate(30.57,26.40) rotate(-90)" class="clab">DIN</text>
 <text x="30.02" y="31.90" text-anchor="middle" class="cgpio">5</text>
 <circle cx="32.56" cy="28.60" r="0.78" class="psig" style="fill:var(--p1)"><title>P1 pin 4: DOUT → ESP32 GPIO19</title></circle>
+<text x="32.56" y="29.02" text-anchor="middle" class="cpn">4</text>
 <text transform="translate(33.11,26.40) rotate(-90)" class="clab">DOUT</text>
 <text x="32.56" y="31.90" text-anchor="middle" class="cgpio">19</text>
 <rect x="39.43" y="27.85" width="1.5" height="1.5" class="psig" style="fill:var(--p1)"><title>P1 pin 1: SCLK → ESP32 GPIO18</title></rect>
+<text x="40.18" y="29.02" text-anchor="middle" class="cpn">1</text>
 <text transform="translate(40.73,26.40) rotate(-90)" class="clab">SCLK</text>
 <text x="40.18" y="31.90" text-anchor="middle" class="cgpio">18</text>
 <circle cx="35.10" cy="28.60" r="0.78" class="psig" style="fill:var(--p1)"><title>P1 pin 3: CS → ESP32 GPIO21</title></circle>
+<text x="35.10" y="29.02" text-anchor="middle" class="cpn">3</text>
 <text transform="translate(35.65,26.40) rotate(-90)" class="clab">CS</text>
 <text x="35.10" y="31.90" text-anchor="middle" class="cgpio">21</text>
 <text x="42.98" y="28.90" class="hlab" style="fill:var(--p1)">P1</text>
@@ -451,7 +465,7 @@ tr.q td { color: var(--mut); font-style: italic; }
       <span><i class="sw" style="background:var(--h1)"></i>Sense pin (even CONN → INA351 IN−), colored by header</span>
       <span><i class="sw" style="background:var(--gold);border-radius:1px"></i>Square pad = pin 1</span>
       <span><i class="sw" style="background:var(--p1)"></i>P1 ADC SPI</span>
-      <span><i class="sw" style="background:var(--p2)"></i>P2 mux selects (number below each pin = ESP32 GPIO)</span>
+      <span><i class="sw" style="background:var(--p2)"></i>P2 mux selects (number on each pin = header pin 1–6, below it = ESP32 GPIO)</span>
       <span><i class="sw" style="background:none;border:2px solid #e0b400"></i>GND ★ = MD1 pin 2, recommended ESP32 ground point</span>
       <span><i class="sw" style="background:#ff9ad5;border-radius:1px"></i>REF divider: R7 (3V3 → REF), R8 (REF → GND), C4 (1 µF); two copies, top and bottom edge; <b style="color:#c9a400">REF ▸</b> = the C4 end on the REF net (measure REF here)</span>
       <span><i class="sw" style="background:#b9c2bc;border-radius:1px"></i>CD4097B mux pads (gold = OUT input, blue = COM to ADC); <b style="color:#e03131">red ring</b> = suspect channel</span>
@@ -786,26 +800,32 @@ tr.q td { color: var(--mut); font-style: italic; }
 <circle cx="275" cy="190.5" r="6.5" class="dkpin dkoff" style=""/>
 <text x="287" y="194.5" text-anchor="start" class="dklab dkdim">D35</text>
 <circle cx="275" cy="211.5" r="6.5" class="dkpin" style="fill:var(--p2)"/>
+<text x="275" y="215.0" text-anchor="middle" class="dkpn">1</text>
 <text x="287" y="215.5" text-anchor="start" class="dklab">D32</text>
 <path d="M266,211.5 H240" class="dklead" style="stroke:var(--p2)"/>
 <text x="235" y="215.5" text-anchor="end" class="dkuse" style="fill:var(--p2)">P2-1 · SELC_1</text>
 <circle cx="275" cy="232.5" r="6.5" class="dkpin" style="fill:var(--p2)"/>
+<text x="275" y="236.0" text-anchor="middle" class="dkpn">2</text>
 <text x="287" y="236.5" text-anchor="start" class="dklab">D33</text>
 <path d="M266,232.5 H240" class="dklead" style="stroke:var(--p2)"/>
 <text x="235" y="236.5" text-anchor="end" class="dkuse" style="fill:var(--p2)">P2-2 · SELB_1</text>
 <circle cx="275" cy="253.5" r="6.5" class="dkpin" style="fill:var(--p2)"/>
+<text x="275" y="257.0" text-anchor="middle" class="dkpn">3</text>
 <text x="287" y="257.5" text-anchor="start" class="dklab">D25</text>
 <path d="M266,253.5 H240" class="dklead" style="stroke:var(--p2)"/>
 <text x="235" y="257.5" text-anchor="end" class="dkuse" style="fill:var(--p2)">P2-3 · SELA_1</text>
 <circle cx="275" cy="274.5" r="6.5" class="dkpin" style="fill:var(--p2)"/>
+<text x="275" y="278.0" text-anchor="middle" class="dkpn">4</text>
 <text x="287" y="278.5" text-anchor="start" class="dklab">D26</text>
 <path d="M266,274.5 H240" class="dklead" style="stroke:var(--p2)"/>
 <text x="235" y="278.5" text-anchor="end" class="dkuse" style="fill:var(--p2)">P2-4 · SELA_2</text>
 <circle cx="275" cy="295.5" r="6.5" class="dkpin" style="fill:var(--p2)"/>
+<text x="275" y="299.0" text-anchor="middle" class="dkpn">5</text>
 <text x="287" y="299.5" text-anchor="start" class="dklab">D27</text>
 <path d="M266,295.5 H240" class="dklead" style="stroke:var(--p2)"/>
 <text x="235" y="299.5" text-anchor="end" class="dkuse" style="fill:var(--p2)">P2-5 · SELB_2</text>
 <circle cx="275" cy="316.5" r="6.5" class="dkpin" style="fill:var(--p2)"/>
+<text x="275" y="320.0" text-anchor="middle" class="dkpn">6</text>
 <text x="287" y="320.5" text-anchor="start" class="dklab">D14</text>
 <path d="M266,316.5 H240" class="dklead" style="stroke:var(--p2)"/>
 <text x="235" y="320.5" text-anchor="end" class="dkuse" style="fill:var(--p2)">P2-6 · SELC_2</text>
@@ -827,28 +847,34 @@ tr.q td { color: var(--mut); font-style: italic; }
 <circle cx="415" cy="169.5" r="6.5" class="dkpin dkoff" style=""/>
 <text x="403" y="173.5" text-anchor="end" class="dklab dkdim">RX0</text>
 <circle cx="415" cy="190.5" r="6.5" class="dkpin" style="fill:var(--p1)"/>
+<text x="415" y="194.0" text-anchor="middle" class="dkpn">3</text>
 <text x="403" y="194.5" text-anchor="end" class="dklab">D21</text>
 <path d="M424,190.5 H450" class="dklead" style="stroke:var(--p1)"/>
 <text x="455" y="194.5" text-anchor="start" class="dkuse" style="fill:var(--p1)">P1-3 · CS</text>
 <circle cx="415" cy="211.5" r="6.5" class="dkpin" style="fill:var(--p1)"/>
+<text x="415" y="215.0" text-anchor="middle" class="dkpn">4</text>
 <text x="403" y="215.5" text-anchor="end" class="dklab">D19</text>
 <path d="M424,211.5 H450" class="dklead" style="stroke:var(--p1)"/>
 <text x="455" y="215.5" text-anchor="start" class="dkuse" style="fill:var(--p1)">P1-4 · DOUT</text>
 <circle cx="415" cy="232.5" r="6.5" class="dkpin" style="fill:var(--p1)"/>
+<text x="415" y="236.0" text-anchor="middle" class="dkpn">1</text>
 <text x="403" y="236.5" text-anchor="end" class="dklab">D18</text>
 <path d="M424,232.5 H450" class="dklead" style="stroke:var(--p1)"/>
 <text x="455" y="236.5" text-anchor="start" class="dkuse" style="fill:var(--p1)">P1-1 · SCLK</text>
 <circle cx="415" cy="253.5" r="6.5" class="dkpin" style="fill:var(--p1)"/>
+<text x="415" y="257.0" text-anchor="middle" class="dkpn">5</text>
 <text x="403" y="257.5" text-anchor="end" class="dklab">D5</text>
 <path d="M424,253.5 H450" class="dklead" style="stroke:var(--p1)"/>
 <text x="455" y="257.5" text-anchor="start" class="dkuse" style="fill:var(--p1)">P1-5 · DIN</text>
 <circle cx="415" cy="274.5" r="6.5" class="dkpin dkoff" style=""/>
-<text x="403" y="278.5" text-anchor="end" class="dklab dkdim">TX2</text>
+<text x="403" y="278.5" text-anchor="end" class="dklab dkdim">TX2 / D17</text>
 <circle cx="415" cy="295.5" r="6.5" class="dkpin" style="fill:var(--p1)"/>
-<text x="403" y="299.5" text-anchor="end" class="dklab">RX2</text>
+<text x="415" y="299.0" text-anchor="middle" class="dkpn">6</text>
+<text x="403" y="299.5" text-anchor="end" class="dklab">RX2 / D16</text>
 <path d="M424,295.5 H450" class="dklead" style="stroke:var(--p1)"/>
 <text x="455" y="299.5" text-anchor="start" class="dkuse" style="fill:var(--p1)">P1-6 · CLKIN</text>
 <circle cx="415" cy="316.5" r="6.5" class="dkpin" style="fill:var(--p1)"/>
+<text x="415" y="320.0" text-anchor="middle" class="dkpn">2</text>
 <text x="403" y="320.5" text-anchor="end" class="dklab">D4</text>
 <path d="M424,316.5 H450" class="dklead" style="stroke:var(--p1)"/>
 <text x="455" y="320.5" text-anchor="start" class="dkuse" style="fill:var(--p1)">P1-2 · DRDY</text>
@@ -862,7 +888,7 @@ tr.q td { color: var(--mut); font-style: italic; }
 <circle cx="415" cy="400.5" r="6.5" class="dkpin dkoff" style=""/>
 <text x="403" y="404.5" text-anchor="end" class="dklab dkdim">3V3</text>
 </svg></div>
-      <p class="src">Pin order of the common DOIT ESP32 DevKit V1 30-pin board, with its silkscreen labels (D23 = GPIO23, RX2 = GPIO16, TX2 = GPIO17). Clones occasionally differ: check the labels printed on your board before soldering. The six P2 wires land on six adjacent left-row pins in P2 order: P2 pin 1–6 → D32, D33, D25, D26, D27, D14, so one straight 6-wire cable with a 1×6 housing at each end fits (firmware since 2026-10-27; older firmware used a different order, and the wiring must match the firmware). The P1 wires are all on the right row. The board’s GND pins are both near the USB end (left pin 14, right pin 14), so the P1 ground wire starts at the right-row GND, just below D15.</p>
+      <p class="src">Pin order of the common DOIT ESP32 DevKit V1 30-pin board, with its silkscreen labels (D23 = GPIO23, RX2 = GPIO16, TX2 = GPIO17; some clones print D16 and D17 instead of RX2 and TX2). Clones occasionally differ: check the labels printed on your board before soldering. The six P2 wires land on six adjacent left-row pins in P2 order: P2 pin 1–6 → D32, D33, D25, D26, D27, D14, so one straight 6-wire cable with a 1×6 housing at each end fits (firmware since 2026-10-27; older firmware used a different order, and the wiring must match the firmware). The P1 wires are all on the right row. The board’s GND pins are both near the USB end (left pin 14, right pin 14), so the P1 ground wire starts at the right-row GND, just below D15.</p>
     </div>
     <ul class="notes">
       <li><b>Neither header has a GND pin.</b> The ESP32 ground must still be tied to the PCB ground. The through-hole GND points are <b>MD1 pin 2</b> (the middle lead of the 3-pin 3.3 V buck module just right of J1; recommended, ~8 mm from P1) and <b>J1 pin 4</b> (plus the J1 shell tabs). Mounting holes MH1–4 are not connected. See <i>Ground wiring</i> below for how to route it.</li>
