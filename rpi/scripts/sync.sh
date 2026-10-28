@@ -5,30 +5,37 @@
 # paths are resolved relative to this script's location.
 #
 # Usage:
-#   ./sync.sh pi@<pi-ip> [--dest ~/whisker_sensor] [--port 22] [--dry-run]
+#   ./sync.sh pi@<pi-ip> [--dest ~/whisker_sensor] [--port 22] [--dry-run] [--restart]
+#
+#   --restart: afterwards `sudo systemctl restart whisker-daq` over ssh (asks for
+#   the Pi's sudo password), so the service runs the new code
 #
 # Examples:
 #   ./sync.sh pi@192.168.1.42
 #   ./sync.sh pi@raspberrypi.local --dest ~/work/whisker --port 2222
 #   ./sync.sh pi@192.168.1.42 --dry-run
+#   ./sync.sh pi@192.168.2.2 --restart
 
 set -euo pipefail
 
 if [[ $# -lt 1 ]]; then
-    echo "usage: $0 user@host [--dest PATH] [--port N] [--dry-run]" >&2
+    echo "usage: $0 user@host [--dest PATH] [--port N] [--dry-run] [--restart]" >&2
     exit 2
 fi
 
 PI_HOST="$1"; shift
+# shellcheck disable=SC2088  # ~ expands on the Pi, not here
 DEST='~/whisker_sensor'
 PORT=22
 DRY_RUN=()
+RESTART=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --dest)    DEST="$2"; shift 2 ;;
         --port)    PORT="$2"; shift 2 ;;
         --dry-run) DRY_RUN=(-n); shift ;;
+        --restart) RESTART=1; shift ;;
         *)         echo "unknown arg: $1" >&2; exit 2 ;;
     esac
 done
@@ -54,6 +61,12 @@ rsync -avz --delete "${DRY_RUN[@]}" \
     "$PI_HOST:$DEST/"
 
 echo
-echo "Done. On the Pi:"
-echo "  whisker array + IMU (BlueROV): cd $DEST && python3 -u rpi/daq_server.py --serial /dev/ttyUSB0"
-echo "  hx711 bridge:                  cd $DEST && python3 -u rpi/daq_bridge.py --port /dev/ttyACM0 --bind 0.0.0.0:5555"
+if [[ $RESTART -eq 1 && ${#DRY_RUN[@]} -eq 0 ]]; then
+    echo "Restarting whisker-daq on $PI_HOST ..."
+    ssh -t -p "$PORT" "$PI_HOST" "sudo systemctl restart whisker-daq && systemctl --no-pager --lines=5 status whisker-daq"
+else
+    echo "Done. The whisker-daq service (BlueROV) still runs the old code; restart it:"
+    echo "  ssh -t $PI_HOST sudo systemctl restart whisker-daq     (or run this with --restart)"
+    echo "  first time: ssh -t $PI_HOST sudo bash $DEST/rpi/scripts/install_service.sh"
+    echo "  hx711 bridge: cd $DEST && python3 -u rpi/daq_bridge.py --port /dev/ttyACM0 --bind 0.0.0.0:5555"
+fi

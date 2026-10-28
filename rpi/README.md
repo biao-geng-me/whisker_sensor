@@ -29,16 +29,29 @@ ArduSub (MAVLink, UDP 127.0.0.1:14670)┘                                       
    ~/whisker_venv/bin/python -c "from pymavlink import mavutil; import serial; print('ok')"
    ```
 5. **Copy the code** from the laptop: `.\rpi\scripts\sync.ps1 -PiHost pi@192.168.2.2` (pushes `rpi/` and `whisker_link/` to `~/whisker_sensor`).
+6. **Install the service** so the server starts at boot: on the Pi, `sudo bash ~/whisker_sensor/rpi/scripts/install_service.sh`. It installs [`scripts/whisker-daq.service`](scripts/whisker-daq.service) as `/etc/systemd/system/whisker-daq.service` (runs as `pi`, with the `dialout` group for the serial port, restarts 3 s after any exit, forever), writes `~/whisker_sensor.env` with the server arguments if it doesn't exist yet, enables and (re)starts it, and prints its status. It warns if a bridget bridge still uses the serial port (step 2), if a daq_server started by hand is still running, or if the venv or the code is missing. Running it again is safe (it keeps your env file); `--uninstall` stops and removes the service (env file and recordings stay).
 
-### Every session
+### Every session: it starts at boot
 
-On the Pi (inside `tmux`/`screen`, or with `nohup`, so it survives the ssh session):
+The `whisker-daq` service runs `~/whisker_venv/bin/python -u rpi/daq_server.py $DAQ_ARGS` in `~/whisker_sensor`, with `DAQ_ARGS` from `~/whisker_sensor.env`:
 
 ```bash
-cd ~/whisker_sensor && ~/whisker_venv/bin/python -u rpi/daq_server.py --serial /dev/ttyUSB0
+DAQ_ARGS=--serial /dev/ttyUSB0 --mode wide --selects 0123457
 ```
 
-Every 5 s it logs e.g. `whisker 82.4 Hz | RAW_IMU 100, ATTITUDE 50, ... | clients 1 | rec off | errs: gap 0 link-crc 0 adc-crc 0 adc-recov 0`. The `errs` are running totals: `gap` = scans lost on USB, `link-crc` = corrupted frames, `adc-crc` = ADC SPI reads that failed CRC and were re-read (data stays valid; a climbing count means marginal SPI wiring or ground), `adc-recov` = ADC halts recovered. wavi_py shows the same counters in its status line. If whisker is 0 Hz, the ESP32 isn't streaming: the server sends `B` every 2 s on its own; if that doesn't help, send `{"cmd":"esp32_reset"}` (RTS pulse = pressing EN). If the IMU entries are missing, the MAVLink endpoint (step 3) isn't set up.
+Edit that line to change the arguments (no quotes needed; don't add `--record`, recording is started from wavi_py or a command), then restart. It doesn't matter whether the ESP32 is plugged in or BlueOS's MAVLink router is up yet: the server waits for the serial port (retrying every 2 s) and for the MAVLink endpoint, and clients can connect meanwhile.
+
+```bash
+systemctl status whisker-daq            # running? last log lines
+journalctl -u whisker-daq -f            # follow the log (-b: since boot, -n 200: last 200 lines)
+sudo systemctl restart whisker-daq      # after a code sync or an env-file edit
+sudo systemctl stop whisker-daq         # e.g. to run the server by hand; `start` brings it back
+sudo systemctl disable whisker-daq      # don't start at boot any more (enable: again)
+```
+
+After a sync the service still runs the old code: restart it, or sync with `./rpi/scripts/sync.sh pi@192.168.2.2 --restart` / `.\rpi\scripts\sync.ps1 -PiHost pi@192.168.2.2 -Restart` (asks for the Pi's sudo password). To run the server by hand instead (e.g. with other arguments for a test), stop the service first, as both need TCP 5600 and the serial port: `sudo systemctl stop whisker-daq && cd ~/whisker_sensor && ~/whisker_venv/bin/python -u rpi/daq_server.py --serial /dev/ttyUSB0`.
+
+Every 5 s it logs e.g. `whisker 82.4 Hz | RAW_IMU 100, ATTITUDE 50, ... | clients 1 | rec off | errs: gap 0 link-crc 0 adc-crc 0 adc-recov 0`. The `errs` are running totals: `gap` = scans lost on USB, `link-crc` = corrupted frames, `adc-crc` = ADC SPI reads that failed CRC and were re-read (data stays valid; a climbing count means marginal SPI wiring or ground), `adc-recov` = ADC halts recovered. wavi_py shows the same counters in its status line. If whisker is 0 Hz, the ESP32 isn't streaming: the server sends `B` every 2 s on its own; if that doesn't help, press **Reset ESP32** in wavi_py (next to the scan mode; it asks first, since streaming stops for a few seconds and a running recording gets a gap) or send `{"cmd":"esp32_reset"}`. Either pulses RTS (= pressing EN); the ack says whether it worked (`ok`, or `error` with the reason), and a successful reset puts a `mark` "ESP32 reset (EN pulse) by client …" in the stream and the recording. It doesn't power-cycle the whisker PCB, so it can't clear an ADC lock-up. If the IMU entries are missing, the MAVLink endpoint (step 3) isn't set up.
 
 **ADC fault alarm.** The ADS131M04 on the whisker PCB (vehicle 5 V) can lock up so that only a PCB power cycle clears it, which on the ROV means a vehicle power cycle. The server runs the fault model in `whisker_link/esp32_fault.py` on the ESP32's frames. A **fault** is an `[halt #N] UNRECOVERED`, CLOCK config not accepted, ADC not answering, a locked-mode halt storm with no scans, no scans for 5 s while the port is open, or the serial port gone for 5 s. With firmware that sends the 1 Hz heartbeat (BEAT frame, 2026-10-23 brief 6) it also tells "ADC dead" from "ESP32 hung": beats flagging the ADC down or with no DRDY edges are an ADC fault, and nothing at all (no beat, scan or text) for 5 s is `esp32_hung` (reset the ESP32). The latest beat is in the status as `esp32.beat`. It is latched and clears only after 10 s of clean streaming. A **warning** is a recovered halt, an ADC reset, a reader-watchdog or other unexpected ESP32 reboot, an `[idf]` error, or more than 1 % of scans flagged SYNC/EMPTY. The state is in every 1 Hz status record as `esp32.fault` = `{level: ok|warn|fault, code, msg, action, detail, since (unix), count, warns, history}` (for Cockpit later). Each fault onset, clear and warning is logged (ERROR / WARNING, and the active fault again with every status log line) and published as a `mark` event with a `fault` field, so it lands in the recording and reaches the clients. A recording started during a fault begins with an "at record start" mark. Test it without hardware: `kill -USR2 <fake_esp32 pid>` locks the fake ADC up, a second USR2 is the PCB power cycle, and `kill -STOP` is a hung ESP32 (`rpi/tests/test_fault_alarm.py`).
 
@@ -60,6 +73,8 @@ python rpi/sim/fake_autopilot.py --lag-ms 50 &
 python rpi/daq_server.py --serial /tmp/wtty --rec-dir /tmp/rec
 python -m wavi_py --transport server --host 127.0.0.1
 ```
+
+The fake ESP32 is a pty, which has no RTS line: `esp32_reset` answers `ok: false` with `RTS pulse failed ...` there (the Sim transport in wavi_py does reboot on it). [`tests/test_service.py`](tests/test_service.py) checks the boot-time behaviour (server up before the ESP32 port exists and while the MAVLink port is taken, both picked up later, clean exit on SIGTERM) and the reset's ack; `DAQ_SERVER_PY="env PYTHONPATH=<site> /usr/bin/python3"` runs the server under the Pi's Python 3.9.
 
 ## Phase 1 — transparent byte pump ✅ done (multi-client)
 

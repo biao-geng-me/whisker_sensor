@@ -1,0 +1,32 @@
+# daq_server.py (whisker array + IMU) as a service on the BlueOS Pi host.
+# Install with rpi/scripts/install_service.sh (it fills in the user and home
+# directory if they are not pi and /home/pi). The server arguments live in
+# /home/pi/whisker_sensor.env (DAQ_ARGS=...), so change them there and
+# `sudo systemctl restart whisker-daq`. Logs: journalctl -u whisker-daq -f
+[Unit]
+Description=Whisker array + IMU server (rpi/daq_server.py, TCP 5600)
+# The server binds 0.0.0.0, so it doesn't wait for an address (network-online
+# could hold the boot); the ESP32 port and the MAVLink endpoint are retried.
+After=network.target
+# never give up restarting
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=pi
+# /dev/ttyUSB* are root:dialout; this adds the group even if pi isn't in it
+SupplementaryGroups=dialout
+WorkingDirectory=/home/pi/whisker_sensor
+Environment=PYTHONUNBUFFERED=1
+# default if the env file is missing; the env file overrides it
+Environment="DAQ_ARGS=--serial /dev/ttyUSB0 --mode wide --selects 0123457"
+EnvironmentFile=-/home/pi/whisker_sensor.env
+ExecStart=/home/pi/whisker_venv/bin/python -u rpi/daq_server.py $DAQ_ARGS
+Restart=always
+RestartSec=3
+# SIGTERM closes an open recording cleanly
+KillSignal=SIGTERM
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

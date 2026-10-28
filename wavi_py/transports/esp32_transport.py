@@ -204,7 +204,10 @@ class Esp32SerialTransport(Transport):
             reply["ok"] = self._raw_write(str(cmd.get("data", "")).encode())
         elif name == "esp32_reset":
             self._faults.expect_reset(now)
-            reply["ok"] = self._reset()
+            try:
+                reply["ok"] = self._reset()
+            except Exception as exc:  # noqa: BLE001  (no RTS line, port gone)
+                reply.update(ok=False, error=f"RTS pulse failed on {self._port}: {exc}")
         elif name == "mark":
             self._emit({"k": "mark", "t": now, "text": str(cmd.get("text", ""))})
         elif name in ("rec_start", "rec_stop", "status"):
