@@ -388,7 +388,7 @@ class MainWindow(QMainWindow):
             self._mode_combo.setCurrentIndex(i)
         self._mode_combo.setToolTip(
             "ESP32 scan mode, sent as S<selects>;M<mode>;B (Server, ESP32 and Sim transports).\n"
-            "The ESP32 boots in quiet 62.5 Hz, OSR 512 (core C1) with all 8 selects and\n"
+            "The ESP32 boots in wide 250 Hz, OSR 128 (core C1) with selects 0123457 and\n"
             "forgets any mode setting on reboot: the mode shown next to this is what its INFO\n"
             "reports, and if it comes back in another mode the choice is re-sent once.\n"
             "'as is' sends nothing. The legacy rate depends on the selects (~89 Hz for 7);\n"

@@ -4,13 +4,15 @@ Creates a pty, prints its path, and behaves like the firmware: boot banner
 in text, then binary SCAN frames at ~80 Hz once it receives ``B``. Any of the
 text-mode command letters stops the binary stream again.
 
-Scan modes like the firmware: ``M1;`` quiet (62.5 Hz, OSR 512, the boot
-default), ``M0;`` legacy (--rate, default 80 Hz) and ``M2;`` wide (250 Hz),
-with INFO version 4 and 1 Hz HEALTH frames in M1/M2 (``--boot-mode 0`` starts
-in legacy); ``S<digits>;`` limits the mux selects (skipped outputs read
-railed). In M1/M2, t_us advances by exactly 16000 / 4000 us per scan.
+Scan modes like the firmware: ``M2;`` wide (250 Hz, OSR 128, the boot
+default since 2026-10-28), ``M1;`` quiet (62.5 Hz, OSR 512) and ``M0;`` legacy
+(--rate, default 80 Hz), with INFO version 4 and 1 Hz HEALTH frames in M1/M2;
+``S<digits>;`` limits the mux selects (skipped outputs read railed), boot
+selects 0123457 (select 6 is dead on the board). ``--boot-mode 1
+--boot-selects ""`` is the older firmware (quiet, all 8), ``--boot-mode 0``
+starts in legacy. In M1/M2, t_us advances by exactly 16000 / 4000 us per scan.
 ``kill -USR1 <pid>`` reboots it: boot banner, the boot mode (legacy if the
-ADC is dead, as the firmware falls back), all selects, uptime and t_us from 0,
+ADC is dead, as the firmware falls back), the boot selects, uptime and t_us from 0,
 reset reason sw in the heartbeat, text mode until the next ``B`` (like a
 watchdog or a DTR reset of the real board).
 ``kill -USR2 <pid>`` toggles an ADC lock-up (``--adc-dead`` starts in one), as
@@ -90,9 +92,13 @@ def info_for(mode: int, sel_mask: int, lk: tuple | None = None) -> ef.Info:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--rate", type=float, default=80.0, help="legacy mode: scans per second")
-    ap.add_argument("--boot-mode", type=int, choices=(0, 1), default=1,
-                    help="mode after boot: 1 quiet (as the firmware), 0 legacy")
-    ap.add_argument("--live", default="W3_B,W4_B,W8_B", help="connected gauges")
+    ap.add_argument("--boot-mode", type=int, choices=(0, 1, 2), default=2,
+                    help="mode after boot: 2 wide (as the firmware), 1 quiet (firmware"
+                         " 2026-10-23..27), 0 legacy")
+    ap.add_argument("--boot-selects", default="0123457",
+                    help="mux selects after boot (as the firmware; empty = all 8, as"
+                         " firmware before 2026-10-28)")
+    ap.add_argument("--live", default="W2_B,W4_B,W7_B", help="connected gauges")
     ap.add_argument("--freq", type=float, default=0.5, help="motion frequency, Hz")
     ap.add_argument("--amp-mv", type=float, default=5.0)
     ap.add_argument("--noise-mv", type=float, default=0.2)
@@ -106,6 +112,7 @@ def main() -> None:
     args = ap.parse_args()
 
     live = {CHANNEL_NAMES.index(n.strip()) for n in args.live.split(",") if n.strip()}
+    boot_sel_mask = sum(1 << int(d) for d in set(args.boot_selects) if d in "01234567") or 0xFF
     master, slave = os.openpty()
     tty.setraw(slave)
     path = os.ttyname(slave)
@@ -139,8 +146,9 @@ def main() -> None:
             return (b"Device ID      = 0x2405  (ADS131M04)\r\n"
                     b"CLOCK readback = 0x00FF  (NOT accepted)\r\n"
                     b"DRDY edges/200ms = 0  (NOT toggling)\r\n"
-                    b"quiet mode CLOCK not accepted (0x00FF): legacy scan\r\n"
-                    b"Baseline FAILED \xe2\x80\x94 no valid scans.\r\n")
+                    + (f"{ef.MODE_NAMES[args.boot_mode or 2]} mode CLOCK not accepted"
+                       " (0x00FF): legacy scan\r\n").encode()
+                    + b"Baseline FAILED \xe2\x80\x94 no valid scans.\r\n")
         return (b"Device ID      = 0x2405  (ADS131M04)\r\n"
                 b"CLOCK readback = 0x0F02  (config ACCEPTED)\r\n"
                 b"DRDY edges/200ms = 1246  (converting)\r\n"
@@ -150,8 +158,8 @@ def main() -> None:
         b"  whisker_daq (SIMULATED)\r\n" + boot_lines())
     binary = False
     seq = 0
-    mode, sel_mask = (0 if args.adc_dead else args.boot_mode), 0xFF
-    lk = lock_params(1) if mode else None   # lock_params() of the current locked mode
+    mode, sel_mask = (0 if args.adc_dead else args.boot_mode), boot_sel_mask
+    lk = lock_params(mode) if mode else None   # lock_params() of the current locked mode
     period = lk[3] / 1e6 if lk else 1.0 / args.rate
     next_t = time.monotonic()
     grid_us = None                       # locked modes: t_us on an exact grid
@@ -212,9 +220,9 @@ def main() -> None:
             reboot.clear()
             # back in the boot mode (a dead ADC: legacy, as the firmware falls back),
             # uptime and micros() from 0, reset reason sw
-            binary, sel_mask, pending, seq = False, 0xFF, "", 0
+            binary, sel_mask, pending, seq = False, boot_sel_mask, "", 0
             mode = 0 if dead[0] else args.boot_mode
-            lk = lock_params(1) if mode else None
+            lk = lock_params(mode) if mode else None
             period, grid_us = (lk[3] / 1e6 if lk else 1.0 / args.rate), None
             boot_mono, reset_reason, n_beat_scans = time.monotonic(), 3, 0
             next_t, next_beat = boot_mono, boot_mono + 1.0

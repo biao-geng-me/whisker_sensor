@@ -12,8 +12,8 @@ Levels:
 
 ``fault`` (red, latched)
     ``adc_unrecovered``  ``[halt #N] UNRECOVERED ...`` (legacy scan), ``Boot recovery: FAILED``;
-    ``clock_rejected``   ``CLOCK readback = 0x.... (NOT accepted)`` at boot, ``quiet mode
-                         CLOCK not accepted``, ``M: CLOCK config not accepted``, an
+    ``clock_rejected``   ``CLOCK readback = 0x.... (NOT accepted)`` at boot, ``wide mode
+                         CLOCK not accepted`` (``quiet ...`` before 2026-10-28), ``M: CLOCK config not accepted``, an
                          ``[adc reset #N]`` re-init that was ``NOT accepted``;
     ``adc_no_response``  ``Device ID = 0x.... (NO RESPONSE)``; ``DRDY edges/200ms = 0``
                          and ``CLKIN: *** FAILED`` are ``adc_not_converting``;

@@ -39,6 +39,8 @@ The `whisker-daq` service runs `~/whisker_venv/bin/python -u rpi/daq_server.py $
 DAQ_ARGS=--serial /dev/ttyUSB0 --mode wide --selects 0123457
 ```
 
+The default arguments keep the ESP32 in wide mode (250 Hz, OSR 128) with selects `0123457` (12 live whiskers; select 6 is dead). Firmware from 2026-10-28 on boots that way anyway; earlier firmware boots in quiet 62.5 Hz with all 8 selects, so keep `--mode` / `--selects` in the env file while any ESP32 may run older firmware (they are re-sent before every `B`, so they also survive reboots). Without them the server leaves the ESP32 as it is and reports what its INFO says (`esp32.cfg` in the status).
+
 Edit that line to change the arguments (no quotes needed; don't add `--record`, recording is started from wavi_py or a command), then restart. It doesn't matter whether the ESP32 is plugged in or BlueOS's MAVLink router is up yet: the server waits for the serial port (retrying every 2 s) and for the MAVLink endpoint, and clients can connect meanwhile.
 
 ```bash
@@ -68,7 +70,8 @@ python -m wavi_py --transport server --host 192.168.2.2 --scale 0.2
 [`sim/fake_esp32.py`](sim/fake_esp32.py) (pty) and [`sim/fake_autopilot.py`](sim/fake_autopilot.py) (MAVLink UDP) stand in for the hardware; both put the same sine motion on a shared wall clock so alignment can be checked:
 
 ```bash
-python rpi/sim/fake_esp32.py --link /tmp/wtty &
+python rpi/sim/fake_esp32.py --link /tmp/wtty &      # boots like the firmware: wide, 0123457
+                                                      # (--boot-mode 1 --boot-selects "" = older firmware)
 python rpi/sim/fake_autopilot.py --lag-ms 50 &
 python rpi/daq_server.py --serial /tmp/wtty --rec-dir /tmp/rec
 python -m wavi_py --transport server --host 127.0.0.1

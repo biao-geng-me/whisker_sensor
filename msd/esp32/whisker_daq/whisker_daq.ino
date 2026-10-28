@@ -64,9 +64,10 @@
  *            and report frames, CRC errors, stale/overrun/edgeless reads and
  *            the read time (defaults 8 MHz, OSR 256, 2 s, 0.6-8 MHz).
  *            Host: msd/esp32/adc_diag.py spi. See spi_sweep.
- *    S<digits>;  scan only these mux selects, e.g. S0123457; ("S;" = all 8,
- *            also the boot default). Skipped outputs read as railed/open.
- *    M<0|1|2> [settle_us] [osr] [period_us] [spi_hz];   SCAN MODE (boot default M1)
+ *    S<digits>;  scan only these mux selects, e.g. S0123457; ("S;" = all 8).
+ *            Boot default S0123457 (SEL_MASK_BOOT: select 6 is dead on mux 1,
+ *            so 12 live whiskers). Skipped outputs read as railed/open.
+ *    M<0|1|2> [settle_us] [osr] [period_us] [spi_hz];   SCAN MODE (boot default M2)
  *            M0 legacy ~76 Hz scan (below). M1 quiet: locked scan, CLKIN
  *            8 MHz, OSR 512, SPI 8 MHz, 125 conversions = 16 ms, 62.5 Hz.
  *            M2 wide: OSR 128, SPI 12 MHz, 125 conversions = 4 ms, 250 Hz.
@@ -146,7 +147,7 @@ bool     g_scanReinit    = false;
 // Active mux selects (bit s = select s is scanned); 'S' sets it. Outputs of a
 // skipped select hold SKIP_CODE, i.e. read as railed ("open") in the SCAN
 // railmask, so old decoders never take them for data. INFO carries the mask.
-uint8_t  g_selMask = SEL_MASK_ALL;
+uint8_t  g_selMask = SEL_MASK_BOOT;
 // CLKIN and SPI clock currently in effect (the diagnostics change them).
 uint32_t g_clkinNow = CLKIN_HZ;
 static uint32_t g_spiNow   = SPI_HZ;
@@ -1610,7 +1611,8 @@ static void spi_sweep_cmd() {
 
 // ── Active selects ('S') ─────────────────────────────────────────────────────
 //   S<digits 0-7>;   e.g. S0123457;  scan only these selects
-//   S;               all 8 (the boot default; the mask is not kept over a reboot)
+//   S;               all 8
+// Boot default SEL_MASK_BOOT (0123457); the mask is not kept over a reboot.
 static void setSelMask(uint8_t m) {
     g_selMask = m;
     for (uint8_t sel = 0; sel < NUM_SEL; sel++) {
@@ -1769,12 +1771,14 @@ static void hostSetup() {
     while (millis() - t0 < 200) { int c = digitalRead(PIN_DRDY); if (c != last) { edges++; last = c; } }
     Serial.printf("DRDY edges/200ms = %d  (%s)\n", edges, edges > 0 ? "converting" : "NOT toggling");
 
-    // Boot default: the quiet locked scan (M1;, OSR 512, 62.5 Hz) since
-    // 2026-10-23; M0; gives the legacy scan.
-    if (const char *err = lkConfigure(1, LK_SETTLE_DEFAULT, LK_OSR[1], LK_SCAN[1], LK_SPI[1])) {
-        Serial.printf("quiet mode not available (%s): legacy scan\n", err);
+    // Boot default since 2026-10-28: the 12 live whiskers (SEL_MASK_BOOT) in the
+    // wide locked scan (M2;, OSR 128, 250 Hz); quiet 2026-10-23..27, all 8
+    // selects before. M1; gives quiet, M0; the legacy scan, S; all 8 selects.
+    setSelMask(SEL_MASK_BOOT);                // skipped outputs read as railed
+    if (const char *err = lkConfigure(2, LK_SETTLE_DEFAULT, LK_OSR[2], LK_SCAN[2], LK_SPI[2])) {
+        Serial.printf("wide mode not available (%s): legacy scan\n", err);
     } else if (!lkStart()) {
-        Serial.printf("quiet mode CLOCK not accepted (0x%04X): legacy scan\n", g_clockRb);
+        Serial.printf("wide mode CLOCK not accepted (0x%04X): legacy scan\n", g_clockRb);
         lkStop();
     } else {
         lkHealthReset();
@@ -1789,9 +1793,9 @@ static void hostSetup() {
     Serial.println("          r<sel> [n] [osr] [clkin_hz] [spi_hz];=raw burst (see header)");
     Serial.println("          D<from> <to> [clkin] [osr] [spi] [reps] [win] [dither] [dwell] [jitter];=fine settle");
     Serial.println("          p[clkin] [osr] [secs] [spi ...];=SPI speed sweep");
-    Serial.println("          S<digits>;=scan only these selects (S; = all 8)");
+    Serial.println("          S<digits>;=scan only these selects (S; = all 8, boot S0123457)");
     Serial.println("          M<0|1|2> [settle_us] [osr] [period_us] [spi];=scan mode: 0 legacy"
-                   " 76 Hz, 1 quiet 62.5 Hz (OSR 512), 2 wide 250 Hz");
+                   " 76 Hz, 1 quiet 62.5 Hz (OSR 512), 2 wide 250 Hz (boot)");
     Serial.println("          C<0|1> [tx_window_us];=who sends while streaming: C1 core 0 (boot),"
                    " C0 the reader itself; C1 <us> sends frames <us> after the scan start");
 }

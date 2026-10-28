@@ -22,7 +22,7 @@ streaming (the GUI's signal panel, or a script):
 - the scan rate (a change restarts the scan counters, as a re-flashed ESP32
   would, so the reader re-measures the rate in one step);
 - a reboot (the ``reboot`` fault): the array comes back in the firmware's
-  boot default (quiet 62.5 Hz, OSR 512, all selects; it also starts in it),
+  boot default (wide 250 Hz, OSR 128, selects 0123457; it also starts in it),
   and streams again ~2 s later, as when the ESP32 transport kicks it with ``B``;
 - an ADC lock-up (``adc_lockup``, as on the ROV: the ADC stops converting
   until its PCB is power-cycled): no scans; the legacy scan reports
@@ -67,7 +67,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from wavi_py.scan_mode import BOOT_MODE, LOCK_DEFAULTS, info_for, lock_params
+from wavi_py.scan_mode import BOOT_MODE, BOOT_SEL_MASK, LOCK_DEFAULTS, info_for, lock_params
 from wavi_py.transports.base import Transport
 from whisker_link import esp32_frame as ef
 from whisker_link import wire
@@ -137,14 +137,15 @@ class SimSignals:
         "all live, same: every gauge 2 Hz 3 mV\n"
         "all open: nothing plugged in\n"
         "noise floor: every gauge live, no sine, noise 0.05..0.5 mV (fixed per gauge)\n"
-        "noisy gauges: demo plus W3_B 3 mV, W6_A 2 mV, W12 A/B 5 mV of noise\n"
+        "noisy gauges: demo plus W2_B 3 mV, W6_A 2 mV, W12 A/B 5 mV of noise\n"
         "hum 50 Hz / hum 60 Hz: demo plus 2 mV of mains hum\n"
         "bench: every gauge live with a 0.5 mV sine at 1..16 Hz, noise 0.05..0.5 mV, "
         "1 mV of 50 Hz hum, 0.05 mV/s drift\n"
         "dome: the 12 gauges wired on the ROV (W3, W8, W10, W14 open), 12 mV sines at\n"
         "0.2..0.75 Hz with B a quarter cycle after A, so each whisker tip circles in the Dome view")
-    _DEMO = (("W1_A", 5, 1), ("W1_B", 3, 1), ("W3_B", 4, 2), ("W4_A", 2, 5),
-             ("W4_B", 2, 5), ("W8_B", 1, 12), ("W9_A", 6, 0.5))
+    # all on selects 0123457 (the boot default), so none reads open after boot
+    _DEMO = (("W1_A", 5, 1), ("W1_B", 3, 1), ("W2_B", 4, 2), ("W4_A", 2, 5),
+             ("W4_B", 2, 5), ("W7_B", 1, 12), ("W9_A", 6, 0.5))
 
     def preset(self, name: str) -> None:
         """Replace the signals with a named set (see ``PRESET_HELP``)."""
@@ -161,7 +162,7 @@ class SimSignals:
                     i = CHANNEL_NAMES.index(ch)
                     self.live[i], self.amp_mv[i], self.freq_hz[i] = True, amp, f
             if name == "noisy gauges":
-                for ch, noise in (("W3_B", 3), ("W6_A", 2), ("W12_A", 5), ("W12_B", 5)):
+                for ch, noise in (("W2_B", 3), ("W6_A", 2), ("W12_A", 5), ("W12_B", 5)):
                     i = CHANNEL_NAMES.index(ch)
                     self.live[i], self.noise_mv[i] = True, noise
             elif name in ("hum 50 Hz", "hum 60 Hz"):
@@ -288,7 +289,7 @@ class SimTransport(Transport):
         # the emulated firmware: scan mode, selects, binary streaming
         self._fw_in: collections.deque[str] = collections.deque()   # from the GUI thread
         self._fw_cmd = ""                          # an M / S command waiting for its ';'
-        self._mode, self._sel_mask, self._lk = BOOT_MODE, 0xFF, lock_params(BOOT_MODE)
+        self._mode, self._sel_mask, self._lk = BOOT_MODE, BOOT_SEL_MASK, lock_params(BOOT_MODE)
         self._rate = 1e6 / self._lk[3]
         self._boot_t = self._t0                    # the simulated ESP32's uptime starts here
         self._reset_reason = 1                     # poweron
@@ -456,7 +457,7 @@ class SimTransport(Transport):
 
     def _reboot(self, now: float) -> None:
         self.signals.pending_reboot = False
-        self._mode, self._sel_mask, self._fw_cmd = BOOT_MODE, 0xFF, ""
+        self._mode, self._sel_mask, self._fw_cmd = BOOT_MODE, BOOT_SEL_MASK, ""
         self._lk = lock_params(BOOT_MODE)
         self._seq = self._tus = 0
         self._boot_t, self._reset_reason = now, 3     # sw (esp_restart)

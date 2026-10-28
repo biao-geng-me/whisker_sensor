@@ -154,6 +154,10 @@ static const uint8_t CONN_TO_JPIN[17] =
 // output slams to a rail, and the ADC clips at a constant +/- full scale.
 #define SAT_CODE   8380000L           // 2^23 = 8388608; anything near it is clipped
 #define SEL_MASK_ALL  0xFF
+// Boot default: selects 0-5 and 7. Select 6 is skipped because mux 1 position 6
+// is dead on the board; the other 7 selects carry the 12 live whiskers
+// (W1,2,4,5,6,7,9,11,12,13,15,16). "S;" still scans all 8.
+#define SEL_MASK_BOOT 0xBF
 #define SKIP_CODE     8388607L       // +full scale (a skipped select's outputs)
 // SBAS890D 6.6: tc(SC) >= 40 ns, i.e. SCLK <= 25 MHz. Past ~8 MHz the jumper
 // wiring, not the chip, sets the limit; 'p' measures it.

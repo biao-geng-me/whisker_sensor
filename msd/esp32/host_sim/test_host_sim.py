@@ -105,7 +105,7 @@ def test_period_needs_whole_conversions(sim, tmp_path):
     _, infos, _, text = run(sim, tmp_path / "o.bin", "--end", "1.5",
                             "--cmd", "1.0:M1 200 512 8000;", "--cmd", "1.2:B")
     assert any("whole number of conversions" in t for t in text)
-    assert infos[-1].mode == 1                          # still the boot default (quiet)
+    assert infos[-1].mode == 2                          # still the boot default (wide)
 
 
 def test_stall_flags_one_scan_and_keeps_grid(sim, tmp_path):
@@ -128,14 +128,31 @@ def test_adc_reset_reinit(sim, tmp_path):
         collections.Counter({4000: len(after) - 1})
 
 
-def test_quiet_boot_default_wide_and_legacy(sim, tmp_path):
-    scans, infos, health, _ = run(sim, tmp_path / "o.bin", "--end", "3", "--cmd", "0.9:B",
-                                  "--cmd", "1.5:M2;", "--cmd", "2.2:M0;")
-    assert [i.mode for i in infos] == [1, 2, 0]           # quiet is the boot default
+def test_wide_boot_default_quiet_and_legacy(sim, tmp_path):
+    """Since 2026-10-28: wide 250 Hz with selects 0123457 (mask 0xBF) after boot,
+    no command but B; M1 / M0 / S; still switch."""
+    scans, infos, health, _ = run(sim, tmp_path / "o.bin", "--end", "3.6", "--cmd", "0.9:B",
+                                  "--cmd", "1.5:M1;", "--cmd", "2.2:S;M0;")
+    assert [i.mode for i in infos][:2] == [2, 1] and infos[-1].mode == 0
+    assert infos[0].sel_mask == 0xBF and infos[-1].sel_mask == 0xFF
+    cfg = ef.info_cfg(dict(infos[0].__dict__))
+    assert cfg["mode_name"] == "wide" and cfg["osr"] == 128 and cfg["scan_hz"] == 250.0
+    assert cfg["selects"] == "0123457" and cfg["avg_per_sel"][6] == 0
+    wide = [s for s in scans if s.dur_us == 4000]
+    assert len(wide) > 100 and {b.t_us - a.t_us for a, b in zip(wide, wide[1:])} == {4000}
+    assert all(b.seq == a.seq + 1 for a, b in zip(wide, wide[1:]))
+    for s in wide[2:]:
+        for o in range(1, 33):
+            if o in SKIPPED6:
+                assert s.railmask >> (o - 1) & 1
+            else:
+                assert abs(s.raw[o - 1] - expected(o)) < 300, (o, s.raw[o - 1] - expected(o))
+    assert health[0].mode == 2 and health[0].overrun == 0 and health[0].missed == 0
     quiet = [s for s in scans if s.dur_us == 16000]
     assert len(quiet) > 20 and {b.t_us - a.t_us for a, b in zip(quiet, quiet[1:])} == {16000}
     legacy = [s for s in scans if s.dur_us not in (4000, 16000)]
-    assert len(legacy) > 40 and len([s for s in scans if s.dur_us == 4000]) > 100
+    assert len(legacy) > 40
+    assert all(not s.railmask >> (o - 1) & 1 for s in legacy[2:] for o in SKIPPED6)  # S; = all 8
 
 
 # An overrun (a stall of 1.1-4 conversions, at phases spread over a scan): the
@@ -220,7 +237,8 @@ def test_c1_wide_board_costs(sim, tmp_path, scale, ccmd, phase):
 
 def test_c1_quiet_windowed(sim, tmp_path):
     scans, _, health, _ = run(sim, tmp_path / "o.bin", "--end", "4", "--board-costs",
-                              "--cmd", "1.0:S0123457;", "--cmd", "1.0:C1 2000;", "--cmd", "1.3:B")
+                              "--cmd", "1.0:S0123457;", "--cmd", "1.0:M1;", "--cmd", "1.0:C1 2000;",
+                              "--cmd", "1.3:B")
     _health_ok(health, 64)
     assert {b.t_us - a.t_us for a, b in zip(scans, scans[1:])} == {16000}
     assert not [s for s in scans if s.flags] and all(h.tx_late == 0 for h in health)
@@ -393,7 +411,7 @@ def test_reader_task_creation_fails(sim, tmp_path):
     """xTaskCreatePinnedToCore fails for the reader: reported, and locked modes
     still stream from the host core."""
     scans, _, health, text = run(sim, tmp_path / "o.bin", "--end", "5", "--fail-task", "lkReader",
-                                 "--cmd", "4.0:S0123457;B")
+                                 "--cmd", "4.0:S0123457;M1;B")
     assert any("reader task NOT created" in t for t in text)
     assert len([s for s in scans if s.dur_us == 16000]) > 40
 
@@ -414,10 +432,11 @@ def test_stress_resend_late_start_keeps_health(sim, tmp_path):
 
 
 def test_c1_is_boot_default(sim, tmp_path):
-    """Since 2026-10-23 r5: quiet on C1 (core 0 sends) after boot, no C command."""
+    """Since 2026-10-23 r5: C1 (core 0 sends) after boot, no C command; the boot
+    mode is wide since 2026-10-28."""
     scans, infos, health, _ = run(sim, tmp_path / "o.bin", "--end", "7", "--board-costs",
                                   "--cmd", "4.0:S0123457;B")
-    assert ef.info_cfg(dict(infos[-1].__dict__))["mode_name"] == "quiet"
+    assert ef.info_cfg(dict(infos[-1].__dict__))["mode_name"] == "wide"
     assert health and all(h.core == 1 for h in health)
     assert len(scans) > 150 and not [s for s in scans[1:] if s.flags]
 
@@ -480,8 +499,8 @@ def _beat_gaps(beats, t0=0.0, t1=1e9):
     return [b.uptime_ms - a.uptime_ms for a, b in zip(beats, beats[1:]) if t0 <= a.uptime_ms / 1e3 < t1]
 
 
-@pytest.mark.parametrize("setup,period", [("S0123457;B", 16000), ("S0123457;C0;B", 16000),
-                                          ("S0123457;M2;B", 4000)])
+@pytest.mark.parametrize("setup,period", [("S0123457;M1;B", 16000), ("S0123457;M1;C0;B", 16000),
+                                          ("S0123457;B", 4000), ("S0123457;M2;B", 4000)])
 def test_dead_adc_locked_unrecovered_backoff_heartbeat(sim, tmp_path, setup, period):
     """The ADC locks up while a locked mode streams (no DRDY, the CLOCK write
     doesn't stick), the PCB is power-cycled 12 s later. Before: '[halt] no
@@ -559,9 +578,9 @@ def test_dead_adc_with_host_kicks(sim, tmp_path):
     assert len(scans) > 60 and not [s for s in scans if s.flags]
 
 
-@pytest.mark.parametrize("cmd,hmode,mode,conv", [("S0123457;B", "B", 1, 7812),
-                                                 ("S0123457;M2;B", "B", 2, 31250),
-                                                 ("S0123457;M0;B", "B", 0, 3125), ("g", "g", 1, 7812)])
+@pytest.mark.parametrize("cmd,hmode,mode,conv", [("S0123457;B", "B", 2, 31250),   # boot: wide
+                                                 ("S0123457;M1;B", "B", 1, 7812),
+                                                 ("S0123457;M0;B", "B", 0, 3125), ("g", "g", 2, 31250)])
 def test_heartbeat_healthy(sim, tmp_path, cmd, hmode, mode, conv):
     """What the board check looks at: one beat a second in every mode (a #BEAT line
     in a text mode), DRDY edges at the conversion rate, the boot result."""

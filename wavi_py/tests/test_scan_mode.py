@@ -143,6 +143,28 @@ def test_keeper_reboot_into_the_boot_default():
     assert k.note == "ESP32 came back in quiet 62.5 Hz OSR 512 (reboot?), re-sending"
 
 
+def test_keeper_reboot_into_the_wide_boot_default():
+    """Firmware since 2026-10-28 boots in wide with 0123457; the older one in quiet
+    with all 8. The keeper goes by the INFO, so either works."""
+    clk = Clock()
+    # wide with the default selects = the new boot default: a reboot needs nothing
+    k = ModeKeeper(clk)
+    q = ScanRequest((2,))
+    assert k.set_wanted(q, connected=True) == "S0123457;M2;B"
+    assert k.on_info(cfg_of(2)) is None and k.state == "ok"
+    assert k.on_info(cfg_of(2)) is None and k.state == "ok" and "re-" not in k.note
+    # ... but an old-firmware reboot (quiet, all 8) is re-sent, naming both
+    assert k.on_info(cfg_of(1, 0xFF)) == q.command()
+    assert "came back in quiet 62.5 Hz OSR 512 selects 01234567" in k.note
+    # quiet wanted, rebooted into the new default: the mode is named, selects match
+    k = ModeKeeper(clk)
+    q = ScanRequest((1,))
+    k.set_wanted(q, connected=True)
+    k.on_info(cfg_of(1))
+    assert k.on_info(cfg_of(2)) == q.command()
+    assert k.note == "ESP32 came back in wide 250 Hz OSR 128 (reboot?), re-sending"
+
+
 def test_keeper_on_connect():
     clk = Clock()
     k = ModeKeeper(clk)
@@ -176,8 +198,8 @@ def test_sim_transport_modes():
     tr = SimTransport(sig)
     evs = _events(tr, 0.3)
     infos = [e for e in evs if e["k"] == "info"]
-    assert len(infos) == 1 and infos[0]["mode"] == 1              # INFO on connect: boot default
-    assert infos[0]["sel_mask"] == 0xFF and infos[0]["osr"] == 512
+    assert len(infos) == 1 and infos[0]["mode"] == 2              # INFO on connect: boot default
+    assert infos[0]["sel_mask"] == 0b10111111 and infos[0]["osr"] == 128
     _esp32(tr, "S0123457;M1 200 256 8000;B")
     evs = _events(tr, 1.2)
     infos = [ef.info_cfg(e) for e in evs if e["k"] == "info"]
@@ -203,13 +225,13 @@ def test_sim_transport_modes():
     evs = _events(tr, 0.5)
     tus = [e["tus"] for e in evs if e["k"] == "wsk"][-5:]
     assert {b - a for a, b in zip(tus, tus[1:])} == {12500}
-    # reboot: ~2 s without scans, then the boot default (quiet 62.5 Hz, all selects)
+    # reboot: ~2 s without scans, then the boot default (wide 250 Hz, selects 0123457)
     sig.fault("reboot")
     evs = _events(tr, 2.6)
     infos = [e for e in evs if e["k"] == "info"]
-    assert infos and infos[-1]["mode"] == 1 and infos[-1]["sel_mask"] == 0xFF
+    assert infos and infos[-1]["mode"] == 2 and infos[-1]["sel_mask"] == 0b10111111
     tus = [e["tus"] for e in evs if e["k"] == "wsk"][-5:]
-    assert {b - a for a, b in zip(tus, tus[1:])} == {16000}
+    assert {b - a for a, b in zip(tus, tus[1:])} == {4000}
     beats = [e["esp32"]["beat"] for e in evs if e["k"] == "status" and "beat" in e["esp32"]]
     assert beats[-1]["reset_name"] == "sw" and beats[-1]["uptime_ms"] < 2700
     tr.close()
@@ -220,7 +242,7 @@ def test_sim_heartbeat_and_lockup():
     tr = SimTransport(sig)
     evs = _events(tr, 2.2)
     b = [e for e in evs if e["k"] == "status"][-1]["esp32"]["beat"]
-    assert b["converting"] and b["conv_hz"] == 7812 and b["mode_name"] == "quiet"
+    assert b["converting"] and b["conv_hz"] == 31250 and b["mode_name"] == "wide"
     assert b["reset_name"] == "poweron"
     sig.fault("adc_lockup")
     evs = _events(tr, 3.5)                    # five halts 0.45 s apart, then UNRECOVERED
