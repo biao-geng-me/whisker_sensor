@@ -38,6 +38,8 @@ On the Pi (inside `tmux`/`screen`, or with `nohup`, so it survives the ssh sessi
 cd ~/whisker_sensor && ~/whisker_venv/bin/python -u rpi/daq_server.py --serial /dev/ttyUSB0
 ```
 
+Firmware from 2026-10-28 on boots in wide mode (250 Hz, OSR 128) with selects `0123457` (12 live whiskers; select 6 is dead), so no `--mode` / `--selects` is needed for that. Earlier firmware boots in quiet 62.5 Hz with all 8 selects; pass `--mode wide --selects 0123457` there (they are re-sent before every `B`, so they also survive reboots). Without them the server leaves the ESP32 as it is and reports what its INFO says (`esp32.cfg` in the status).
+
 Every 5 s it logs e.g. `whisker 82.4 Hz | RAW_IMU 100, ATTITUDE 50, ... | clients 1 | rec off | errs: gap 0 link-crc 0 adc-crc 0 adc-recov 0`. The `errs` are running totals: `gap` = scans lost on USB, `link-crc` = corrupted frames, `adc-crc` = ADC SPI reads that failed CRC and were re-read (data stays valid; a climbing count means marginal SPI wiring or ground), `adc-recov` = ADC halts recovered. wavi_py shows the same counters in its status line. If whisker is 0 Hz, the ESP32 isn't streaming: the server sends `B` every 2 s on its own; if that doesn't help, send `{"cmd":"esp32_reset"}` (RTS pulse = pressing EN). If the IMU entries are missing, the MAVLink endpoint (step 3) isn't set up.
 
 **ADC fault alarm.** The ADS131M04 on the whisker PCB (vehicle 5 V) can lock up so that only a PCB power cycle clears it, which on the ROV means a vehicle power cycle. The server runs the fault model in `whisker_link/esp32_fault.py` on the ESP32's frames. A **fault** is an `[halt #N] UNRECOVERED`, CLOCK config not accepted, ADC not answering, a locked-mode halt storm with no scans, no scans for 5 s while the port is open, or the serial port gone for 5 s. With firmware that sends the 1 Hz heartbeat (BEAT frame, 2026-10-23 brief 6) it also tells "ADC dead" from "ESP32 hung": beats flagging the ADC down or with no DRDY edges are an ADC fault, and nothing at all (no beat, scan or text) for 5 s is `esp32_hung` (reset the ESP32). The latest beat is in the status as `esp32.beat`. It is latched and clears only after 10 s of clean streaming. A **warning** is a recovered halt, an ADC reset, a reader-watchdog or other unexpected ESP32 reboot, an `[idf]` error, or more than 1 % of scans flagged SYNC/EMPTY. The state is in every 1 Hz status record as `esp32.fault` = `{level: ok|warn|fault, code, msg, action, detail, since (unix), count, warns, history}` (for Cockpit later). Each fault onset, clear and warning is logged (ERROR / WARNING, and the active fault again with every status log line) and published as a `mark` event with a `fault` field, so it lands in the recording and reaches the clients. A recording started during a fault begins with an "at record start" mark. Test it without hardware: `kill -USR2 <fake_esp32 pid>` locks the fake ADC up, a second USR2 is the PCB power cycle, and `kill -STOP` is a hung ESP32 (`rpi/tests/test_fault_alarm.py`).
@@ -55,7 +57,8 @@ python -m wavi_py --transport server --host 192.168.2.2 --scale 0.2
 [`sim/fake_esp32.py`](sim/fake_esp32.py) (pty) and [`sim/fake_autopilot.py`](sim/fake_autopilot.py) (MAVLink UDP) stand in for the hardware; both put the same sine motion on a shared wall clock so alignment can be checked:
 
 ```bash
-python rpi/sim/fake_esp32.py --link /tmp/wtty &
+python rpi/sim/fake_esp32.py --link /tmp/wtty &      # boots like the firmware: wide, 0123457
+                                                      # (--boot-mode 1 --boot-selects "" = older firmware)
 python rpi/sim/fake_autopilot.py --lag-ms 50 &
 python rpi/daq_server.py --serial /tmp/wtty --rec-dir /tmp/rec
 python -m wavi_py --transport server --host 127.0.0.1

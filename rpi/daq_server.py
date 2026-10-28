@@ -758,10 +758,12 @@ def main(argv: Optional[list[str]] = None) -> None:
                          " selects, ~89 Hz with 7), quiet (62.5 Hz, OSR 512) or wide (250 Hz),"
                          " optionally ,settle_us,osr,period_us,spi_hz (e.g. quiet,200,256 or"
                          " quiet,200,256,8000); default: leave as is (the firmware boots in"
-                         " quiet 62.5 Hz, OSR 512, all selects)")
+                         " wide 250 Hz, OSR 128, selects 0123457; before 2026-10-28 quiet"
+                         " 62.5 Hz, OSR 512, all selects)")
     ap.add_argument("--selects", type=_parse_selects, default=None,
                     help="mux selects the ESP32 scans, e.g. 0123457 (sent as S<digits>; before"
-                         " every B, since the ESP32 forgets it on reboot); default: leave as is")
+                         " every B, since the ESP32 forgets it on reboot); default: leave as is"
+                         " (the firmware boots with 0123457, before 2026-10-28 all 8)")
     ap.add_argument("--mavlink", default=DEFAULT_MAVLINK,
                     help="pymavlink URL of the BlueOS endpoint, or 'none'")
     ap.add_argument("--mav-rates", type=_parse_rates, default=dict(DEFAULT_MAV_RATES),

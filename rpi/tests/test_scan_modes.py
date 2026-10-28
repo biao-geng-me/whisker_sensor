@@ -25,9 +25,14 @@ from whisker_link.channels import OUT_OF, channels_of_selects  # noqa: E402
 FAKE = ROOT / "rpi" / "sim" / "fake_esp32.py"
 
 
+# firmware before 2026-10-28: boots in quiet 62.5 Hz with all 8 selects
+OLD_FW = ("--boot-mode", "1", "--boot-selects", "")
+
+
 @pytest.fixture
-def fake_esp32(tmp_path):
-    p = subprocess.Popen([sys.executable, "-u", str(FAKE), "--live", "W1_A,W2_B,W3_B"],
+def fake_esp32(request):
+    extra = getattr(request, "param", ())
+    p = subprocess.Popen([sys.executable, "-u", str(FAKE), "--live", "W1_A,W2_B,W3_B", *extra],
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     path = p.stdout.readline().decode().strip()
     assert path.startswith("/dev/"), path
@@ -75,7 +80,24 @@ def test_wide_mode_framing(fake_esp32):
     assert health[-1].summary()["busy_pct"] == 38.0
 
 
-def test_boot_default_is_quiet(fake_esp32):
+def test_boot_default_is_wide_12_sensors(fake_esp32):
+    fd = os.open(fake_esp32, os.O_RDWR | os.O_NOCTTY)
+    try:
+        os.write(fd, b"B")
+        evs = _read_events(fd, 1.0)
+    finally:
+        os.close(fd)
+    cfg = ef.info_cfg(dict([e for e in evs if isinstance(e, ef.Info)][0].__dict__))
+    assert cfg["mode_name"] == "wide" and cfg["osr"] == 128 and cfg["scan_hz"] == 250.0
+    assert cfg["sel_mask"] == 0xBF and cfg["selects"] == "0123457"
+    scans = [e for e in evs if isinstance(e, ef.Scan)]
+    assert {e.dur_us for e in scans} == {4000}
+    skipped = {OUT_OF[a][6] - 1 for a in range(4)}
+    assert all(s.railmask >> i & 1 for s in scans for i in skipped)
+
+
+@pytest.mark.parametrize("fake_esp32", [OLD_FW], indirect=True)
+def test_old_firmware_boots_quiet_all_selects(fake_esp32):
     fd = os.open(fake_esp32, os.O_RDWR | os.O_NOCTTY)
     try:
         os.write(fd, b"B")
@@ -84,6 +106,7 @@ def test_boot_default_is_quiet(fake_esp32):
         os.close(fd)
     cfg = ef.info_cfg(dict([e for e in evs if isinstance(e, ef.Info)][0].__dict__))
     assert cfg["mode_name"] == "quiet" and cfg["osr"] == 512 and cfg["scan_hz"] == 62.5
+    assert cfg["sel_mask"] == 0xFF
     assert {e.dur_us for e in evs if isinstance(e, ef.Scan)} == {16000}
 
 
@@ -127,6 +150,7 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
+@pytest.mark.parametrize("fake_esp32", [(), OLD_FW], indirect=True, ids=["fw", "old_fw"])
 def test_daq_server_mode_passthrough(fake_esp32, tmp_path):
     from whisker_link.wire import LineSplitter
 

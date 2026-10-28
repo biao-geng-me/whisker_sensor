@@ -22,7 +22,7 @@ streaming (the GUI's signal panel, or a script):
 - the scan rate (a change restarts the scan counters, as a re-flashed ESP32
   would, so the reader re-measures the rate in one step);
 - a reboot (the ``reboot`` fault): the array comes back in the firmware's
-  boot default (quiet 62.5 Hz, OSR 512, all selects; it also starts in it),
+  boot default (wide 250 Hz, OSR 128, selects 0123457; it also starts in it),
   and streams again ~2 s later, as when the ESP32 transport kicks it with ``B``;
 - an ADC lock-up (``adc_lockup``, as on the ROV: the ADC stops converting
   until its PCB is power-cycled): no scans; the legacy scan reports
@@ -67,7 +67,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from wavi_py.scan_mode import BOOT_MODE, LOCK_DEFAULTS, info_for, lock_params
+from wavi_py.scan_mode import BOOT_MODE, BOOT_SEL_MASK, LOCK_DEFAULTS, info_for, lock_params
 from wavi_py.transports.base import Transport
 from whisker_link import esp32_frame as ef
 from whisker_link import wire
@@ -288,7 +288,7 @@ class SimTransport(Transport):
         # the emulated firmware: scan mode, selects, binary streaming
         self._fw_in: collections.deque[str] = collections.deque()   # from the GUI thread
         self._fw_cmd = ""                          # an M / S command waiting for its ';'
-        self._mode, self._sel_mask, self._lk = BOOT_MODE, 0xFF, lock_params(BOOT_MODE)
+        self._mode, self._sel_mask, self._lk = BOOT_MODE, BOOT_SEL_MASK, lock_params(BOOT_MODE)
         self._rate = 1e6 / self._lk[3]
         self._boot_t = self._t0                    # the simulated ESP32's uptime starts here
         self._reset_reason = 1                     # poweron
@@ -456,7 +456,7 @@ class SimTransport(Transport):
 
     def _reboot(self, now: float) -> None:
         self.signals.pending_reboot = False
-        self._mode, self._sel_mask, self._fw_cmd = BOOT_MODE, 0xFF, ""
+        self._mode, self._sel_mask, self._fw_cmd = BOOT_MODE, BOOT_SEL_MASK, ""
         self._lk = lock_params(BOOT_MODE)
         self._seq = self._tus = 0
         self._boot_t, self._reset_reason = now, 3     # sw (esp_restart)

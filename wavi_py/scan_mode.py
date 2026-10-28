@@ -1,8 +1,11 @@
 """ESP32 scan modes (``whisker_daq.ino`` command ``M``) for the GUI's Scan mode
 dropdown, ``--mode`` and the Sim transport.
 
-The firmware (since 9e57703) boots in quiet 62.5 Hz, OSR 512, core C1, with
-all 8 selects, and forgets any M / S setting on reboot. A ``ScanRequest`` is what the user picked: the M arguments plus the mux selects,
+The firmware boots in wide 250 Hz, OSR 128, core C1, with selects 0123457
+(since 2026-10-28; from 9e57703 to then: quiet 62.5 Hz, OSR 512, all 8 selects),
+and forgets any M / S setting on reboot. Nothing here assumes either boot state:
+what the ESP32 is in comes from its INFO frames, so both firmwares work.
+A ``ScanRequest`` is what the user picked: the M arguments plus the mux selects,
 sent as ``S<selects>;M<args>;B`` (the ``esp32`` command of the server and ESP32
 transports). ``ModeKeeper`` checks the INFO frames that come back:
 
@@ -14,8 +17,8 @@ transports). ``ModeKeeper`` checks the INFO frames that come back:
   open with DTR auto-reset, a watchdog) and came back in its boot default: the
   request is re-sent once, and the note says what it came back in. If that
   doesn't stick either, it is reported and not sent again until the user picks
-  a mode. A request equal to the boot default (quiet 62.5 Hz, OSR 512, all
-  selects) survives a reboot unchanged.
+  a mode. A request equal to the boot default (wide 250 Hz with 0123457 on
+  the current firmware) survives a reboot unchanged.
 
 Qt-free, so it can be tested headless.
 """
@@ -34,7 +37,10 @@ MODE_IDS = {"legacy": 0, "quiet": 1, "wide": 2}
 LOCK_DEFAULTS = {1: (512, 8_000_000, 16_000), 2: (128, 11_428_571, 4_000)}
 SETTLE_DEFAULT_US = 200
 DEFAULT_SELECTS = "0123457"          # select 6 is dead on the current board
-BOOT_MODE = 1                        # the firmware's boot default: quiet 62.5 Hz, OSR 512
+# The firmware's boot default (since 2026-10-28; the Sim transport emulates it):
+# wide 250 Hz, OSR 128, selects 0123457 (SEL_MASK_BOOT; select 6 is dead).
+BOOT_MODE = 2
+BOOT_SEL_MASK = 0b10111111
 LEGACY_MS_PER_SELECT = 1.6           # legacy scan time per select (r7: 11.2 ms for 7 selects)
 LOCKED_CLKIN_HZ = 8_000_000
 _OSR_CODE = {128: 0, 256: 1, 512: 2, 1024: 3, 2048: 4, 4096: 5, 8192: 6, 16384: 7}
@@ -243,7 +249,7 @@ class ModeKeeper:
         if not self._reapplied:
             self._reapplied = True
             back = describe_cfg(cfg)
-            if cfg.get("sel_mask") != self.want.sel_mask:   # e.g. the boot default's all 8
+            if cfg.get("sel_mask") != self.want.sel_mask:   # e.g. the older firmware's all 8
                 back += f" selects {cfg.get('selects', '?')}"
             self._reapply_note = (f"; re-applied {time.strftime('%H:%M:%S')} after the ESP32 "
                                   f"came back in {back}")

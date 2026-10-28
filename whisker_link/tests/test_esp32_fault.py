@@ -52,6 +52,7 @@ def test_classify():
     assert classify("CLOCK readback = 0x00FF  (NOT accepted)")[:2] == ("fault", "clock_rejected")
     assert classify("CLOCK readback = 0x0F02  (config ACCEPTED)") is None
     assert classify("quiet mode CLOCK not accepted (0x00FF): legacy scan")[1] == "clock_rejected"
+    assert classify("wide mode CLOCK not accepted (0x00FF): legacy scan")[1] == "clock_rejected"
     assert classify("M: CLOCK config not accepted (readback 0x00FF); back to legacy")[1] \
         == "clock_rejected"
     assert classify("#BURSTERR CLOCK config not accepted") is None
