@@ -18,8 +18,10 @@ PY=${ESPTOOL_PY:-$HOME/esptool_venv/bin/python}
 
 [[ -f "$BIN" ]] || { echo "firmware image not found: $BIN" >&2; exit 1; }
 if pgrep -f "daq_server.py" >/dev/null; then
-    echo "daq_server.py is running and holds $PORT — stop it first (Ctrl-C / pkill -f daq_server.py)" >&2
+    echo "daq_server.py is running and holds $PORT — stop it first: sudo systemctl stop whisker-daq" >&2
+    echo "(or Ctrl-C a server started by hand; pkill does not help with the service, it restarts it)" >&2
     exit 1
 fi
 "$PY" -m esptool --chip esp32 --port "$PORT" --baud 460800 write_flash 0x0 "$BIN"
 echo "Flashed. The ESP32 has been reset and is running the new firmware."
+systemctl is-enabled --quiet whisker-daq 2>/dev/null && echo "Start the server again: sudo systemctl start whisker-daq"
