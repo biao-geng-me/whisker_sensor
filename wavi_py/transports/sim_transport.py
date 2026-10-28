@@ -137,14 +137,15 @@ class SimSignals:
         "all live, same: every gauge 2 Hz 3 mV\n"
         "all open: nothing plugged in\n"
         "noise floor: every gauge live, no sine, noise 0.05..0.5 mV (fixed per gauge)\n"
-        "noisy gauges: demo plus W3_B 3 mV, W6_A 2 mV, W12 A/B 5 mV of noise\n"
+        "noisy gauges: demo plus W2_B 3 mV, W6_A 2 mV, W12 A/B 5 mV of noise\n"
         "hum 50 Hz / hum 60 Hz: demo plus 2 mV of mains hum\n"
         "bench: every gauge live with a 0.5 mV sine at 1..16 Hz, noise 0.05..0.5 mV, "
         "1 mV of 50 Hz hum, 0.05 mV/s drift\n"
         "dome: the 12 gauges wired on the ROV (W3, W8, W10, W14 open), 12 mV sines at\n"
         "0.2..0.75 Hz with B a quarter cycle after A, so each whisker tip circles in the Dome view")
-    _DEMO = (("W1_A", 5, 1), ("W1_B", 3, 1), ("W3_B", 4, 2), ("W4_A", 2, 5),
-             ("W4_B", 2, 5), ("W8_B", 1, 12), ("W9_A", 6, 0.5))
+    # all on selects 0123457 (the boot default), so none reads open after boot
+    _DEMO = (("W1_A", 5, 1), ("W1_B", 3, 1), ("W2_B", 4, 2), ("W4_A", 2, 5),
+             ("W4_B", 2, 5), ("W7_B", 1, 12), ("W9_A", 6, 0.5))
 
     def preset(self, name: str) -> None:
         """Replace the signals with a named set (see ``PRESET_HELP``)."""
@@ -161,7 +162,7 @@ class SimSignals:
                     i = CHANNEL_NAMES.index(ch)
                     self.live[i], self.amp_mv[i], self.freq_hz[i] = True, amp, f
             if name == "noisy gauges":
-                for ch, noise in (("W3_B", 3), ("W6_A", 2), ("W12_A", 5), ("W12_B", 5)):
+                for ch, noise in (("W2_B", 3), ("W6_A", 2), ("W12_A", 5), ("W12_B", 5)):
                     i = CHANNEL_NAMES.index(ch)
                     self.live[i], self.noise_mv[i] = True, noise
             elif name in ("hum 50 Hz", "hum 60 Hz"):
