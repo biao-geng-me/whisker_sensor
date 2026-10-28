@@ -325,21 +325,29 @@ class Esp32Source:
             except Exception:  # noqa: BLE001
                 return False
 
-    def reset(self) -> bool:
+    def reset(self) -> Optional[str]:
         """Pulse EN through the USB-UART RTS line (the classic auto-reset
-        circuit) — the remote equivalent of pressing the EN button."""
+        circuit) — the remote equivalent of pressing the EN button.
+        Returns None on success, else why not (no port; a pty has no RTS)."""
         with self._wlock:
             if self._ser is None:
-                return False
-            self._ser.dtr = False
-            self._ser.rts = True
-            time.sleep(0.1)
-            self._ser.rts = False
+                return f"serial port {self.port} is not open"
+            try:
+                self._ser.dtr = False
+                self._ser.rts = True
+                time.sleep(0.1)
+            except Exception as exc:  # noqa: BLE001
+                return f"RTS pulse failed on {self.port}: {exc}"
+            finally:
+                try:
+                    self._ser.rts = False
+                except Exception:  # noqa: BLE001
+                    pass
         with self._fault_lock:
             self.faults.expect_reset()
         self._unwrap = ef.TimeUnwrapper()
         self.last_seq = None
-        return True
+        return None
 
     def fault_status(self) -> dict:
         with self._fault_lock:
@@ -365,17 +373,24 @@ class Esp32Source:
 
     def _run(self) -> None:
         last_kick = 0.0
+        last_err, last_err_log = "", 0.0
         while not self._stop.is_set():
             if self._ser is None:
                 try:
                     ser = self._open()
                 except Exception as exc:  # noqa: BLE001
-                    log.warning("serial %s: %s (retrying)", self.port, exc)
+                    # At boot the ESP32 may not be plugged in for hours: log a
+                    # new error at once, the same one once a minute.
+                    now = time.monotonic()
+                    if str(exc) != last_err or now - last_err_log > 60.0:
+                        log.warning("serial %s: %s (retrying every 2 s)", self.port, exc)
+                        last_err, last_err_log = str(exc), now
                     self._publish_faults(time.monotonic())
                     self._stop.wait(2.0)
                     continue
                 with self._wlock:
                     self._ser = ser
+                last_err = ""
                 with self._fault_lock:
                     self.faults.link(True)
                 log.info("opened %s @ %d", self.port, self.baud)
@@ -463,11 +478,25 @@ class MavSource:
         os.environ.setdefault("MAVLINK20", "1")
         from pymavlink import mavutil
         self._mavutil = mavutil
-        self._conn = mavutil.mavlink_connection(
-            self.url, source_system=self.sysid, source_component=self.compid,
-            dialect="ardupilotmega", autoreconnect=True)
-        log.info("MAVLink listening on %s", self.url)
         self._thread.start()
+
+    def _connect(self) -> bool:
+        """Open the endpoint; on failure (e.g. the port is taken) retry every 5 s
+        instead of exiting, so a service started at boot doesn't crash-loop."""
+        last_err = ""
+        while not self._stop.is_set():
+            try:
+                self._conn = self._mavutil.mavlink_connection(
+                    self.url, source_system=self.sysid, source_component=self.compid,
+                    dialect="ardupilotmega", autoreconnect=True)
+                log.info("MAVLink listening on %s", self.url)
+                return True
+            except Exception as exc:  # noqa: BLE001
+                if str(exc) != last_err:
+                    log.error("MAVLink %s: %s (retrying every 5 s)", self.url, exc)
+                    last_err = str(exc)
+                self._stop.wait(5.0)
+        return False
 
     def stop(self) -> None:
         self._stop.set()
@@ -492,6 +521,8 @@ class MavSource:
                                       mavlink.MAV_AUTOPILOT_INVALID, 0, 0, 0)
 
     def _run(self) -> None:
+        if not self._connect():
+            return
         last_hb = last_req = 0.0
         while not self._stop.is_set():
             now = time.monotonic()
@@ -563,6 +594,14 @@ class Server:
         name = cmd.get("cmd")
         t = time.monotonic()
         reply: dict = {"k": "ack", "t": t, "cmd": name, "ok": True}
+        try:
+            self._dispatch(name, cmd, client, t, reply)
+        except Exception as exc:  # noqa: BLE001  (a bad command must not drop the client)
+            log.exception("command %r from %s failed", name, client.addr)
+            reply.update(ok=False, error=f"{type(exc).__name__}: {exc}")
+        self.hub.send_to(client, reply)
+
+    def _dispatch(self, name, cmd: dict, client: _Client, t: float, reply: dict) -> None:
         if name == "rec_start":
             reply["path"] = self._rec_start(str(cmd.get("tag", "")))
         elif name == "rec_stop":
@@ -573,12 +612,20 @@ class Server:
         elif name == "esp32":
             reply["ok"] = bool(self.esp32 and self.esp32.write(str(cmd.get("data", "")).encode()))
         elif name == "esp32_reset":
-            reply["ok"] = bool(self.esp32 and self.esp32.reset())
+            err = self.esp32.reset() if self.esp32 else "no ESP32 (--serial none)"
+            reply["ok"] = err is None
+            if err:
+                reply["error"] = err
+                log.warning("ESP32 reset from %s failed: %s", client.addr, err)
+            else:
+                # the stream has a gap from here: say why, in the recording too
+                log.warning("ESP32 reset (EN pulse) by client %s", client.addr[0])
+                self.hub.publish({"k": "mark", "t": t,
+                                  "text": f"ESP32 reset (EN pulse) by client {client.addr[0]}"})
         elif name == "status":
             reply.update(self._status(1.0, {}))
         else:
             reply.update(ok=False, error=f"unknown command {name!r}")
-        self.hub.send_to(client, reply)
 
     def _rec_start(self, tag: str) -> str:
         path = self.hub.rec_start(tag)
@@ -776,8 +823,10 @@ def main(argv: Optional[list[str]] = None) -> None:
     ap.add_argument("--log-level", default="INFO")
     args = ap.parse_args(argv)
 
+    # under systemd the journal stamps each line already
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO),
-                        format="%(asctime)s %(levelname)s %(message)s")
+                        format=("%(levelname)s %(message)s" if os.environ.get("JOURNAL_STREAM")
+                                else "%(asctime)s %(levelname)s %(message)s"))
     server = Server(args)
     signal.signal(signal.SIGINT, lambda *_: server.stop())
     signal.signal(signal.SIGTERM, lambda *_: server.stop())

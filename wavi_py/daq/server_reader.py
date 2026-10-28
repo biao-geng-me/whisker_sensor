@@ -82,6 +82,8 @@ class ServerReader:
         self._n_txt = 0
         self._fault_marks: collections.deque = collections.deque(maxlen=64)   # (n, mark)
         self._n_fault_marks = 0
+        self._n_acks = 0
+        self._acks: dict = {}                     # cmd -> (n, the latest ack for it)
 
     # ----- lifecycle (same surface as Reader)
 
@@ -213,7 +215,9 @@ class ServerReader:
             self._fault_marks.append((self._n_fault_marks, ev))
             self._bus.set_metadata(fault_marks=list(self._fault_marks))
         elif k == "ack":
-            self._bus.set_metadata(server_ack=ev)
+            self._n_acks += 1
+            self._acks[str(ev.get("cmd"))] = (self._n_acks, ev)
+            self._bus.set_metadata(server_ack=ev, server_acks=dict(self._acks))
             if not ev.get("ok", True):
                 print(f"[ServerReader] command failed: {ev}")
 

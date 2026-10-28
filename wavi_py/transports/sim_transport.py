@@ -571,6 +571,9 @@ class SimTransport(Transport):
         reply = {"k": "ack", "t": now, "cmd": name, "ok": True}
         if name == "esp32":
             self._fw_in.append(str(cmd.get("data", "")))    # read by the reader thread
+        elif name == "esp32_reset":
+            self._faults.expect_reset(now)
+            self.signals.pending_reboot = True              # rebooted by the reader thread
         elif name == "mark":
             self._emit({"k": "mark", "t": now, "text": str(cmd.get("text", ""))})
         elif name not in ("rec_start", "rec_stop", "status"):

@@ -66,6 +66,7 @@ from wavi_py.views.spectral_base import FFT_WINDOWS_S
 from whisker_link.channels import SAT_CODE
 from whisker_link.esp32_frame import MV_PER_CODE, info_cfg
 
+RESET_ACK_TIMEOUT_S = 3.0     # esp32_reset's ack (the RTS pulse takes 0.1 s)
 REBOOT_NOTE_S = 30.0         # an ESP32 reboot (with its reset reason) stays in the status line
 
 
@@ -168,6 +169,8 @@ class MainWindow(QMainWindow):
         self._pending_switches: list[tuple[int, float]] = []    # (sample index, fs)
         self._legacy_fs: dict[int, float] = {}                  # measured, per select mask
         self._last_status_rec: dict = {}
+        self._reset_sent_at: Optional[float] = None    # esp32_reset sent, ack pending
+        self._reset_ack_seen = 0
 
         # ESP32 / ADC faults (whisker_link/esp32_fault.py, run by the transport or
         # daq_server): the current state from the status record, the events for
@@ -407,6 +410,14 @@ class MainWindow(QMainWindow):
         h.addWidget(QLabel("Selects:"))
         h.addWidget(self._selects_edit)
         h.addWidget(self._mode_label, stretch=1)
+        self._esp32_reset_btn = QPushButton("Reset ESP32")
+        self._esp32_reset_btn.setToolTip(
+            "Reboot the ESP32 (RTS pulse = pressing EN), through daq_server (Server) or the\n"
+            "serial port (ESP32). Streaming stops for a few seconds; a recording gets a gap.\n"
+            "Doesn't power-cycle the whisker PCB, so it won't clear an ADC lock-up.")
+        self._esp32_reset_btn.clicked.connect(self._on_esp32_reset_clicked)
+        self._esp32_reset_btn.setEnabled(False)
+        h.addWidget(self._esp32_reset_btn)
         self._show_mode_note()
         return h
 
@@ -431,6 +442,38 @@ class MainWindow(QMainWindow):
         if data and self._client is not None:
             print(f"[MainWindow] to the ESP32: {data}")
             self._client.send_command({"cmd": "esp32", "data": data})
+
+    def _on_esp32_reset_clicked(self) -> None:
+        """Ask, then send esp32_reset; _tick_esp32_reset shows the ack."""
+        if (self._client is None or not self._client.is_running
+                or not self._client.is_event_stream):
+            return
+        text = "Reset the ESP32 (EN pulse)?\n\nStreaming stops for a few seconds while it reboots."
+        if self._is_recording:
+            text += "\nThe recording keeps running and gets a gap."
+        if QMessageBox.question(self, "Reset ESP32", text) != QMessageBox.StandardButton.Yes:
+            return
+        acks = self._client.bus.get_metadata().get("server_acks") or {}
+        self._reset_ack_seen = acks.get("esp32_reset", (0, None))[0]
+        if not self._client.send_command({"cmd": "esp32_reset"}):
+            self._path_label.setText("ESP32 reset: could not send the command.")
+            return
+        self._reset_sent_at = time.monotonic()
+        self._path_label.setText("ESP32 reset sent, waiting for the reply...")
+
+    def _tick_esp32_reset(self, meta: dict) -> None:
+        if self._reset_sent_at is None:
+            return
+        n, ack = (meta.get("server_acks") or {}).get("esp32_reset", (0, None))
+        if n > self._reset_ack_seen and ack is not None:
+            self._reset_sent_at = None
+            msg = ("ESP32 reset: EN pulsed, it is rebooting (streaming resumes in a few s)."
+                   if ack.get("ok") else f"ESP32 reset failed: {ack.get('error', 'no reason given')}")
+            print(f"[MainWindow] {msg}")
+            self._path_label.setText(msg)
+        elif time.monotonic() - self._reset_sent_at > RESET_ACK_TIMEOUT_S:
+            self._reset_sent_at = None
+            self._path_label.setText("ESP32 reset: no reply (is the server up to date?).")
 
     def _show_mode_note(self) -> None:
         """The keeper's note (or the reported mode) next to the dropdown and in the
@@ -720,6 +763,10 @@ class MainWindow(QMainWindow):
     def _set_stream_buttons_enabled(self, on: bool) -> None:
         self._pause_btn.setEnabled(on)
         self._reset_btn.setEnabled(on)
+        self._esp32_reset_btn.setEnabled(
+            on and self._client is not None and self._client.is_event_stream)
+        if not on:
+            self._reset_sent_at = None
         for v in self._stream_views:
             v.set_stream_controls_enabled(on)
 
@@ -952,6 +999,7 @@ class MainWindow(QMainWindow):
         rows, seq = self._client.imu_bus.read_since(self._imu_last_seq, block=False)
         meta = self._client.bus.get_metadata()
         self._tick_esp32_mode(meta)
+        self._tick_esp32_reset(meta)
         self._tick_faults(meta)
         self._maybe_apply_measured_rate(meta.get("fs_measured"))
         st = meta.get("server_status") or {}

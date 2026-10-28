@@ -19,16 +19,22 @@
 .PARAMETER Port
     Optional SSH port (default 22).
 
+.PARAMETER Restart
+    Afterwards run `sudo systemctl restart whisker-daq` over ssh (asks for the
+    Pi's sudo password), so the service runs the new code.
+
 .EXAMPLE
     .\sync.ps1 -PiHost pi@192.168.1.42
     .\sync.ps1 -PiHost pi@raspberrypi.local -Dest '~/work/whisker' -Port 2222
+    .\sync.ps1 -PiHost pi@192.168.2.2 -Restart
 #>
 
 param(
     [Parameter(Mandatory = $true)]
     [string]$PiHost,
     [string]$Dest = '~/whisker_sensor',
-    [int]$Port = 22
+    [int]$Port = 22,
+    [switch]$Restart
 )
 
 $ErrorActionPreference = 'Stop'
@@ -66,6 +72,13 @@ if ($PyFiles.Count -eq 0) {
     if ($LASTEXITCODE -ne 0) { throw "scp hx711_array/*.py failed (exit $LASTEXITCODE)" }
 }
 
-Write-Host "Done. On the Pi:"
-Write-Host "  whisker array + IMU (BlueROV): cd $Dest && python3 -u rpi/daq_server.py --serial /dev/ttyUSB0"
-Write-Host "  hx711 bridge:                  cd $Dest && python3 -u rpi/daq_bridge.py --port /dev/ttyACM0 --bind 0.0.0.0:5555"
+if ($Restart) {
+    Write-Host "Restarting whisker-daq on $PiHost ..."
+    & ssh -t -p $Port $PiHost "sudo systemctl restart whisker-daq && systemctl --no-pager --lines=5 status whisker-daq"
+    if ($LASTEXITCODE -ne 0) { throw "restart failed (exit $LASTEXITCODE)" }
+} else {
+    Write-Host "Done. The whisker-daq service (BlueROV) still runs the old code; restart it:"
+    Write-Host "  ssh -t $PiHost sudo systemctl restart whisker-daq     (or run this with -Restart)"
+    Write-Host "  first time: ssh -t $PiHost sudo bash $Dest/rpi/scripts/install_service.sh"
+    Write-Host "  hx711 bridge: cd $Dest && python3 -u rpi/daq_bridge.py --port /dev/ttyACM0 --bind 0.0.0.0:5555"
+}
