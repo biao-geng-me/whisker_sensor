@@ -41,6 +41,8 @@ right drag zooms. A view cube (top right, click a face) and keys 1-6 snap to
 front / back / top / bottom / starboard / port, 0 to the default view; the
 triad (bottom left) and the green UP arrow show the ROV frame (the scene is
 rov-cad's collar frame: +z forward along the tube axis, +y up, -x starboard).
+The projection is orthographic unless Perspective is ticked (fov 60 deg); the
+two share the zoom, so a switch keeps the dome's size on screen.
 
 The status bar shows the measured frame rate (paints per second) and the mean
 per-frame times: pose (bus read + pose model + tube geometry), upload
@@ -381,8 +383,15 @@ class _GLView(gl.GLViewWidget):
 
     # ----- camera (GLViewWidget's own state is not used)
     def viewMatrix(self):  # noqa: N802 — pyqtgraph naming
-        self.opts["distance"] = self.cam.distance          # the projection's clip planes
+        self.opts["distance"] = self.cam.distance
         return QMatrix4x4(*self.cam.view_matrix().ravel().tolist())
+
+    def projectionMatrix(self, region, viewport):  # noqa: N802 — pyqtgraph naming
+        """Perspective or orthographic (``cam.perspective``); ``region`` is a
+        sub-rectangle of ``viewport`` (x, y, w, h, device px) when picking."""
+        x0, y0, w, h = viewport
+        sub = (region[0] - x0, region[1] - y0, region[2], region[3])
+        return QMatrix4x4(*self.cam.projection_matrix(w, h, sub).ravel().tolist())
 
     def cameraPosition(self):  # noqa: N802 — pyqtgraph naming
         return pg.Vector(*self.cam.position())
@@ -403,11 +412,7 @@ class _GLView(gl.GLViewWidget):
 
     def project(self, p) -> Optional[tuple[float, float]]:
         """Widget pixel (x, y) of the world point ``p``; None behind the camera."""
-        v = self.cam.view_matrix() @ np.r_[np.asarray(p, float), 1.0]
-        if v[2] > -1e-6:
-            return None
-        f = 0.5 * self.width() / math.tan(math.radians(self.opts["fov"]) / 2)  # fov: horizontal
-        return 0.5 * self.width() + f * v[0] / -v[2], 0.5 * self.height() - f * v[1] / -v[2]
+        return self.cam.project(p, self.width(), self.height())
 
     def mousePressEvent(self, ev):  # noqa: N802 — Qt naming
         self._mouse = ev.position()
@@ -506,6 +511,7 @@ class DomeView(ViewWindow):
         self._paused = False
         self._gain = 3.0
         self._tubes = True
+        self._perspective = False
         self._show_grid = True
         self._show_neutral = True
         self._show_arrows = True
@@ -523,6 +529,7 @@ class DomeView(ViewWindow):
         self.trail = TrailBuffer(len(self.layout_), TRAIL_MAX_S, TRAIL_RATE_HZ)
 
         self._glw = _GLView()
+        self._glw.cam.perspective = self._perspective
         self._glw.setBackgroundColor((245, 245, 248))
         self.setCentralWidget(self._glw)
         self._add_dome(asset_dir / "dome_mesh.npz")
@@ -599,6 +606,7 @@ class DomeView(ViewWindow):
                                         color=_DOME_COLOR, glOptions="opaque")
         self._glw.addItem(self._dome_item)
         self._dome_center = V.mean(axis=0)
+        self._dome_reach = float(np.linalg.norm(V - self.layout_.center, axis=1).max())
 
     def reset_camera(self) -> None:
         """The default 3/4 view (key 0): centred, the whole shell in view."""
@@ -620,9 +628,20 @@ class DomeView(ViewWindow):
         h = 0.06 * R
         seg = [a, b, b, b - h * UP + 0.6 * h * FORWARD, b, b - h * UP - 0.6 * h * FORWARD]
         self._up_item.setData(pos=np.array(seg, np.float32))
+        self._update_bounds()
         self._marks["UP"] = (self._marks["UP"][0], b + 0.04 * R * UP)
         self._marks["FWD"] = (self._marks["FWD"][0], c + 1.06 * R * FORWARD)
         self._place_marks()
+
+    def _update_bounds(self) -> None:
+        """The sphere round everything drawn (the orthographic clip planes):
+        dome, full-length whiskers bent any way, shell with its cylinder, UP mark."""
+        lay = self.layout_
+        whiskers = (np.linalg.norm(lay.root - lay.center, axis=1) + lay.length).max()
+        off = float(np.linalg.norm(self.shell.center - lay.center))
+        shell = math.hypot(self.shell.radius, off + self.shell.cyl_len)
+        self._glw.cam.set_bounds(lay.center, max(self._dome_reach, whiskers, shell,
+                                                 off + 1.5 * self.shell.radius))
 
     def _place_marks(self) -> None:
         for lab, at in self._marks.values():
@@ -659,6 +678,11 @@ class DomeView(ViewWindow):
         self._tubes_box.setToolTip("Shaded tubes, or lines (cheaper)")
         self._tubes_box.toggled.connect(self.set_tubes)
         tb.addWidget(self._tubes_box)
+        self._persp_box = QCheckBox("Perspective")
+        self._persp_box.setChecked(self._perspective)
+        self._persp_box.setToolTip("Perspective projection (fov 60 deg); off: orthographic")
+        self._persp_box.toggled.connect(self.set_perspective)
+        tb.addWidget(self._persp_box)
         tb.addSeparator()
         tb.addWidget(QLabel(" fps "))
         self._fps_box = QSpinBox()
@@ -862,6 +886,12 @@ class DomeView(ViewWindow):
         self._tube_item.setVisible(self._tubes)
         self._line_item.setVisible(not self._tubes)
         self._render_pose()
+
+    def set_perspective(self, on: bool) -> None:
+        """Perspective or orthographic; the camera's turn, centre and zoom stay."""
+        self._perspective = bool(on)
+        self._glw.cam.perspective = self._perspective
+        self._glw.moved()
 
     # ----- frame
     def showEvent(self, event) -> None:  # noqa: N802 — Qt naming

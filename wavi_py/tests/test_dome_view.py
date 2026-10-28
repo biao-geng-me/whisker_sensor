@@ -163,8 +163,32 @@ def test_dome_view_camera_cube_marks_arrows(app):
         g = glw.cam.view_matrix() @ np.r_[up_at, 1]
         assert xy is not None and g[2] < 0
         assert abs(up_lab.x() + up_lab.width() / 2 - xy[0]) <= 1
-        assert glw.project(glw.cam.position() + glw.cam.rot[2]) is None   # behind
         assert glw.project(glw.cam.center) == pytest.approx((400, 300))
+        # orthographic by default; Perspective switches, keeping the camera
+        assert not v._persp_box.isChecked() and not cam.perspective
+        glw.cam.tumble(30, 10)
+        glw.moved()
+        behind = glw.cam.position() + glw.cam.rot[2]
+        assert glw.project(behind) is not None
+        pose = cam.rot.copy(), cam.center.copy(), cam.distance
+        for persp in (True, False, True):
+            v._persp_box.setChecked(persp)
+            assert cam.perspective == persp
+            assert np.allclose(cam.rot, pose[0]) and np.allclose(cam.center, pose[1])
+            assert cam.distance == pose[2]
+            vp = (0, 0, 800, 600)
+            pm = np.array(glw.projectionMatrix(vp, vp).data()).reshape(4, 4).T
+            assert np.allclose(pm, cam.projection_matrix(800, 600), rtol=1e-5, atol=1e-6)
+            xy = glw.project(up_at)                   # the label follows the projection
+            assert abs(up_lab.x() + up_lab.width() / 2 - xy[0]) <= 1
+        assert glw.project(behind) is None
+        v._persp_box.setChecked(False)
+        # the orthographic clip planes hold the dome, the shell and the whiskers
+        near, far = cam.clip_planes()
+        pts = np.r_[v._dome_item.opts["meshdata"].vertexes(), v._grid_item.pos,
+                    v.layout_.root + v.layout_.length[:, None] * v.layout_.axis]
+        depth = -(cam.view_matrix() @ np.c_[pts, np.ones(len(pts))].T)[2]
+        assert near < depth.min() and depth.max() < far
 
         # neutral dots on the shell, arrows from them to the tips
         base = np.full((40, NCH), 250.0)

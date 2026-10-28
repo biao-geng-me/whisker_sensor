@@ -8,6 +8,13 @@ the VIEW's x and y axes (rotations composed on the left), so it tumbles freely
 in every direction with no gimbal lock and no pole; the up vector is whatever
 the drags made it.
 
+Projection: perspective (``fov_deg`` horizontal, as pyqtgraph's) or
+orthographic. Both share the one zoom state, ``distance``: the orthographic
+view's half-width is the perspective view's half-width at the look-at point,
+so the scene keeps its size on screen across a switch and ``mm_per_px`` (pan)
+holds in both. The orthographic near / far planes are put round the scene's
+bounding sphere (``set_bounds``), so nothing in it clips at any zoom or turn.
+
 Scene frame (the dome assets', i.e. rov-cad's collar frame) in ROV terms:
 +z = forward (the tube axis; the dome is the ROV's nose), +y = up (the ROV's
 underside is -y), so +x = port and -x = starboard (right-handed).
@@ -71,6 +78,8 @@ class TrackballCamera:
         self.fov_deg = float(fov_deg)
         self.deg_per_px = float(deg_per_px)
         self.rot = look_rotation(HOME_DIR, UP)
+        self.perspective = True
+        self.bounds: tuple[np.ndarray, float] | None = None     # scene sphere (centre, radius)
         self._anim: Slerp | None = None
 
     # ----- state
@@ -117,8 +126,65 @@ class TrackballCamera:
         self.distance = float(np.clip(self.distance * factor, 1.0, 1e6))
 
     def mm_per_px(self, width_px: float) -> float:
-        """Size of a pixel at the look-at point."""
-        return self.distance * 2 * math.tan(math.radians(self.fov_deg) / 2) / max(width_px, 1)
+        """Size of a pixel at the look-at point (anywhere, in the orthographic view)."""
+        return 2 * self.half_width() / max(width_px, 1)
+
+    def half_width(self) -> float:
+        """Half the view's width at the look-at point, mm (the orthographic extent)."""
+        return self.distance * math.tan(math.radians(self.fov_deg) / 2)
+
+    # ----- projection
+    def set_bounds(self, center, radius: float) -> None:
+        """The sphere holding everything drawn: the orthographic clip planes enclose it."""
+        self.bounds = (np.asarray(center, float).copy(), float(radius))
+
+    def clip_planes(self) -> tuple[float, float]:
+        """(near, far) eye distances. Perspective: pyqtgraph's (distance x 1e-3,
+        x 1e3). Orthographic: the bounding sphere's depth +- its radius (near
+        may be negative: there is no eye point to stay in front of)."""
+        if self.perspective:
+            return self.distance * 1e-3, self.distance * 1e3
+        if self.bounds is None:
+            c, r = self.center, 1e3 * self.distance
+        else:
+            c, r = self.bounds
+        d = -(self.view_matrix() @ np.r_[c, 1.0])[2]
+        r = 1.05 * r + 1.0
+        return d - r, d + r
+
+    def projection_matrix(self, width_px: float, height_px: float, region=None) -> np.ndarray:
+        """4x4 eye -> clip for a ``width_px`` x ``height_px`` viewport. ``region``
+        (x, y, w, h) px restricts it to that part of the viewport (pyqtgraph's
+        picking), as ``GLViewWidget.projectionMatrix(region, viewport)`` does."""
+        w, h = max(float(width_px), 1.0), max(float(height_px), 1.0)
+        x0, y0, rw, rh = region if region is not None else (0.0, 0.0, w, h)
+        near, far = self.clip_planes()
+        r = (near if self.perspective else self.distance) * math.tan(math.radians(self.fov_deg) / 2)
+        t = r * h / w
+        lft, rgt = r * (x0 * 2 / w - 1), r * ((x0 + rw) * 2 / w - 1)
+        bot, top = t * (y0 * 2 / h - 1), t * ((y0 + rh) * 2 / h - 1)
+        m = np.zeros((4, 4))
+        if self.perspective:                                    # glFrustum
+            m[0, 0], m[0, 2] = 2 * near / (rgt - lft), (rgt + lft) / (rgt - lft)
+            m[1, 1], m[1, 2] = 2 * near / (top - bot), (top + bot) / (top - bot)
+            m[2, 2], m[2, 3] = -(far + near) / (far - near), -2 * far * near / (far - near)
+            m[3, 2] = -1.0
+        else:                                                   # glOrtho
+            m[0, 0], m[0, 3] = 2 / (rgt - lft), -(rgt + lft) / (rgt - lft)
+            m[1, 1], m[1, 3] = 2 / (top - bot), -(top + bot) / (top - bot)
+            m[2, 2], m[2, 3] = -2 / (far - near), -(far + near) / (far - near)
+            m[3, 3] = 1.0
+        return m
+
+    def project(self, p, width_px: float, height_px: float) -> tuple[float, float] | None:
+        """Pixel (x right, y down) of the world point ``p`` in a ``width_px`` x
+        ``height_px`` view; None behind the camera (perspective only)."""
+        e = self.view_matrix() @ np.r_[np.asarray(p, float), 1.0]
+        if self.perspective and e[2] > -1e-6:
+            return None
+        c = self.projection_matrix(width_px, height_px) @ e
+        x, y = c[0] / c[3], c[1] / c[3]
+        return 0.5 * width_px * (1 + x), 0.5 * height_px * (1 - y)
 
     # ----- snaps
     def snap(self, to_camera, up, animate_s: float = 0.0, now: float = 0.0) -> None:
