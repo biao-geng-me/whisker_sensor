@@ -22,6 +22,7 @@ from wavi_py.config import (
 )
 from wavi_py.scan_mode import DEFAULT_SELECTS, parse_mode, parse_selects
 from whisker_link.channels import NUM_WHISKER
+from whisker_link.dome_map import DEFAULT_MAP, DomeMap
 from whisker_link.wire import DEFAULT_PORT as SERVER_PORT
 
 
@@ -71,6 +72,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--selects", type=_arg(parse_selects), default=DEFAULT_SELECTS,
                    help=f"mux selects sent with the scan mode (default {DEFAULT_SELECTS}; "
                         "'' = all 8)")
+    p.add_argument("--dome-map", type=_arg(DomeMap.load), default=None, metavar="JSON",
+                   help="whisker positions, sensors and calibration (whisker_link/dome_map.py): "
+                        "plots show e.g. 'LFU (W7)', the Dome view uses its holes; the ROV dome "
+                        f"is {DEFAULT_MAP.relative_to(DEFAULT_MAP.parents[3])}; "
+                        "default none (W1 .. W16; also the Map button)")
     a = p.parse_args(argv)
     server = a.transport == "server"
     array = a.transport in ("server", "esp32", "sim")
@@ -113,6 +119,7 @@ def main(argv: list[str] | None = None) -> int:
         scale=args.scale,
         scan_mode=args.mode,
         selects=args.selects,
+        dome_map=args.dome_map,
     )
     win.show()
     return app.exec()

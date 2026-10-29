@@ -266,7 +266,7 @@ class LineView(WhiskerPlotsView):
         if sensor is None:
             return f"t = {self._t[i]:.3f} s"
         a, b = (self._sig[i, 2 * sensor:2 * sensor + 2] - self._v0[2 * sensor:2 * sensor + 2]) * self._scale
-        return f"t = {self._t[i]:.3f} s   W{sensor + 1}   A = {a:+.4g}   B = {b:+.4g}   (minus V0)"
+        return f"t = {self._t[i]:.3f} s   {self._names[sensor]}   A = {a:+.4g}   B = {b:+.4g}   (minus V0)"
 
     # ------------------------------------------------------------------
     # absolute-value labels

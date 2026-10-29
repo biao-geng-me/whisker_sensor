@@ -203,7 +203,7 @@ class SpectrumView(WhiskerPlotsView):
         v = self._values(slice(2 * sensor, 2 * sensor + 2))[i]
         unit = "dB" if self._act_db.isChecked() else self._units
         a, b = (f"{x:.4g}" if np.isfinite(x) else "–" for x in v)
-        return f"f = {self._f[i]:.2f} Hz   W{sensor + 1}   A = {a}   B = {b}   {unit}"
+        return f"f = {self._f[i]:.2f} Hz   {self._names[sensor]}   A = {a}   B = {b}   {unit}"
 
     # ------------------------------------------------------------------
     # peak labels

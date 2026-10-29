@@ -15,7 +15,11 @@ tare, smoothing, calibration, shape) and draws the latest smoothed pose. The
 timer stops while the window is hidden or minimised, and frames are skipped
 while paused.
 
-Mapping, calibration and bend model are PLACEHOLDERS (see dome_pose).
+Mapping, calibration and bend model are PLACEHOLDERS (see dome_pose), unless
+a dome map is given (``whisker_link.dome_map``, ``set_dome_map``): then the
+holes are the map's positions (its coordinates, labelled e.g. "LFU (W7)" on the
+view) and each sensor's calibration comes from the map's calibration file
+(the placeholder gain where there is none).
 
 Scribe shell (second toolbar row): an imaginary sphere + cylinder concentric
 with the dome (``dome_pose.Shell``) drawn as one grid line item (latitude
@@ -107,9 +111,10 @@ from wavi_py.views.base import ViewWindow               # noqa: E402
 from wavi_py.views.dome_camera import (FORWARD, SNAP_KEYS, SNAP_VIEWS, STARBOARD, UP,  # noqa: E402
                                        TrackballCamera, look_rotation)
 from wavi_py.views.whisker_plots import _ElidedLabel    # noqa: E402
-from whisker_link.dome_pose import (DomeLayout, DomePose, Shell, TrailBuffer,  # noqa: E402
-                                    arrow_segments, centre_pivots, neutral_tips, nice_grid_step,
-                                    tip_path)
+from whisker_link.dome_map import DomeMap                 # noqa: E402
+from whisker_link.dome_pose import (PLACEHOLDER_HOLE_OF, DomeLayout, DomePose, Shell,  # noqa: E402
+                                    TrailBuffer, arrow_segments, centre_pivots, neutral_tips,
+                                    nice_grid_step, tip_path)
 
 ASSET_DIR = Path(__file__).resolve().parents[1] / "assets" / "dome"
 TUBE_SIDES = 8
@@ -501,7 +506,8 @@ class FrameStats:
 
 
 class DomeView(ViewWindow):
-    def __init__(self, fs: float = 62.5, target_fps: float = 60.0, asset_dir: Path = ASSET_DIR):
+    def __init__(self, fs: float = 62.5, target_fps: float = 60.0, asset_dir: Path = ASSET_DIR,
+                 dome_map: Optional[DomeMap] = None):
         super().__init__()
         self.setWindowTitle("Wavi - Dome")
         self.resize(900, 700)
@@ -520,13 +526,12 @@ class DomeView(ViewWindow):
         self._grid_bend_deg = 0.0              # 0: auto
         self._shell_radius = 0.0               # 0: auto (rest tips' reach)
 
-        self.layout_ = DomeLayout.load(asset_dir / "whiskers.json")
-        self.pose = DomePose(self.layout_)
-        n_pts = N_ROOT + N_SHAFT + 1
-        self._tube_faces = tube_faces(len(self.layout_), n_pts, TUBE_SIDES)
+        self._asset_layout = DomeLayout.load(asset_dir / "whiskers.json")
+        self.dome_map = dome_map
+        self._show_labels = dome_map is not None
+        self._hole_labels: list[QLabel] = []
+        self._make_pose()
         self._lut = _CMAP.getLookupTable(0.0, 1.0, 256, alpha=True) / 255.0
-        self.shell = Shell.around(self.layout_, self._shell_radius)
-        self.trail = TrailBuffer(len(self.layout_), TRAIL_MAX_S, TRAIL_RATE_HZ)
 
         self._glw = _GLView()
         self._glw.cam.perspective = self._perspective
@@ -575,6 +580,7 @@ class DomeView(ViewWindow):
             lab.adjustSize()
             self._marks[text] = (lab, np.zeros(3))
         self._glw.camera_moved.connect(self._place_marks)
+        self._make_hole_labels()
         self._update_marks()
         self._glw.cube.clicked.connect(self.snap_view)
         self.reset_camera()
@@ -594,6 +600,57 @@ class DomeView(ViewWindow):
         self._update_grid()
         self._update_neutral()
         self._render_pose()
+
+    # ----- holes: the asset's (placeholder mapping) or a dome map's positions
+    def _make_pose(self) -> None:
+        """Layout, pose model and everything sized by the hole count, from ``dome_map``."""
+        m = self.dome_map
+        if m is None:
+            self.layout_ = self._asset_layout
+            self.pose = DomePose(self.layout_)
+        else:
+            a = self._asset_layout
+            self.layout_ = m.layout(a.center, a.dome_radius)
+            self.pose = DomePose(self.layout_, m.hole_of(), m.calibration())
+        self._tube_faces = tube_faces(len(self.layout_), N_ROOT + N_SHAFT + 1, TUBE_SIDES)
+        self.shell = Shell.around(self.layout_, self._shell_radius)
+        self.trail = TrailBuffer(len(self.layout_), TRAIL_MAX_S, TRAIL_RATE_HZ)
+
+    def hole_texts(self) -> list[str]:
+        """The label of each hole: the map's "LFU (W7)", or the placeholder's whisker."""
+        if self.dome_map is not None:
+            return list(self.layout_.labels)
+        w_of = {h: w for w, h in PLACEHOLDER_HOLE_OF.items()}
+        return [f"W{w_of[h]}?" if h in w_of else "" for h in range(len(self.layout_))]
+
+    def _make_hole_labels(self) -> None:
+        for lab in self._hole_labels:
+            lab.deleteLater()
+        self._hole_labels = []
+        for text in self.hole_texts():
+            lab = QLabel(text, self._glw)
+            lab.setStyleSheet("color: #303040; font-size: 11px;"
+                              " background: rgba(255, 255, 255, 150);")
+            lab.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            lab.adjustSize()
+            self._hole_labels.append(lab)
+
+    def set_dome_map(self, dome_map: Optional[DomeMap]) -> None:
+        """Use this map's positions and calibration (None: the placeholder
+        mapping on the asset's holes); tares again."""
+        drift = self.pose.tare.drift_tau_s
+        self.dome_map = dome_map
+        self._make_pose()
+        self.pose.tare.drift_tau_s = drift
+        self._labels_box.setChecked(dome_map is not None)
+        self._make_hole_labels()
+        self._shell_changed()
+        self._update_neutral()
+        self._render_pose()
+
+    def set_labels_visible(self, on: bool) -> None:
+        self._show_labels = bool(on)
+        self._place_marks()
 
     # ----- scene
     def _add_dome(self, path: Path) -> None:
@@ -644,7 +701,19 @@ class DomeView(ViewWindow):
                                                  off + 1.5 * self.shell.radius))
 
     def _place_marks(self) -> None:
-        for lab, at in self._marks.values():
+        marks = list(self._marks.values())
+        neutral = getattr(self, "_neutral", None)
+        if neutral is not None and len(neutral) == len(self._hole_labels):
+            # just outside each neutral tip, away from the dome
+            out = neutral - self.layout_.center
+            out /= np.maximum(np.linalg.norm(out, axis=1, keepdims=True), 1e-9)
+            at = neutral + 0.08 * self.shell.radius * out
+            for lab, p in zip(self._hole_labels, at):
+                if self._show_labels:
+                    marks.append((lab, p))
+                else:
+                    lab.setVisible(False)
+        for lab, at in marks:
             xy = self._glw.project(at)
             lab.setVisible(xy is not None)
             if xy is not None:
@@ -739,6 +808,12 @@ class DomeView(ViewWindow):
         self._arrow_box.setToolTip("An arrow from each neutral dot to the current tip")
         self._arrow_box.toggled.connect(self.set_arrows_visible)
         tb.addWidget(self._arrow_box)
+        self._labels_box = QCheckBox("Labels")
+        self._labels_box.setChecked(self._show_labels)
+        self._labels_box.setToolTip("Each whisker's position and channel (from the dome map;"
+                                    " without one, the placeholder hole's whisker, marked ?)")
+        self._labels_box.toggled.connect(self.set_labels_visible)
+        tb.addWidget(self._labels_box)
         tb.addWidget(QLabel(" Pivot "))
         self._pivot_box = QComboBox()
         self._pivot_box.addItems(["centre", "root"])
@@ -833,6 +908,7 @@ class DomeView(ViewWindow):
     def _update_neutral(self) -> None:
         self._neutral = neutral_tips(self.layout_, self.shell if self._centre_pivot else None)
         self._neutral_item.setData(pos=self._neutral.astype(np.float32))
+        self._place_marks()
 
     def set_trail_s(self, secs: float) -> None:
         self._trail_s = float(secs)

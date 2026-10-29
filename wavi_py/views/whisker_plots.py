@@ -336,6 +336,7 @@ class WhiskerPlotsView(ViewWindow):
 
         self._nsensor = int(nsensor)
         self._nch = int(nch)
+        self._names = [f"W{s + 1}" for s in range(self._nsensor)]   # see set_whisker_names
         self._gain = 1.0                           # stacked layout: trace height
         self._link_auto = True                     # Link Y: auto-range the shared Y
         self._single: int | None = None            # the maximized sensor, if any
@@ -351,7 +352,7 @@ class WhiskerPlotsView(ViewWindow):
         self._stacked.setBackground("w")
         self._stacked.setLabel("bottom", x_label, units=x_units)
         self._stacked.setLabel("left", "Whisker")
-        self._stacked.getAxis("left").setTicks([[(s, f"W{s + 1}") for s in range(self._nsensor)]])
+        self._stacked.getAxis("left").setTicks([list(enumerate(self._names))])
         _show_grid(self._stacked.getPlotItem())
         _add_gauge_legend(self._stacked.getPlotItem())
         self._stacked_curves: list[pg.PlotDataItem] = []
@@ -381,7 +382,7 @@ class WhiskerPlotsView(ViewWindow):
         self._tiles: list[pg.PlotItem] = []
         self._grid_curves: list[pg.PlotDataItem] = []
         for s in range(self._nsensor):
-            p = self._grid.addPlot(row=s // ncol, col=s % ncol, title=f"W{s + 1}", viewBox=_ViewBox(),
+            p = self._grid.addPlot(row=s // ncol, col=s % ncol, title=self._names[s], viewBox=_ViewBox(),
                                    # all four: the hidden top / right ones follow every range change too
                                    axisItems={o: _SharedAxis(o) for o in ("bottom", "left", "top", "right")})
             p.hideAxis("top")                       # shown when passed in
@@ -639,13 +640,26 @@ class WhiskerPlotsView(ViewWindow):
     def _maximize(self, sensor: int) -> None:
         x = self._visible_x_range()
         self._single = sensor
-        self._single_plot.setTitle(f"W{sensor + 1}")
-        self.setWindowTitle(f"{self.TITLE} - W{sensor + 1}")
+        self._single_plot.setTitle(self._names[sensor])
+        self.setWindowTitle(f"{self.TITLE} - {self._names[sensor]}")
         self._act_all.setEnabled(True)
         self._pages.setCurrentIndex(SINGLE)
         self._init_y(self._single_plot.getPlotItem())
         self._show_x(x)
         self._render(labels=True)
+
+    def set_whisker_names(self, names: list[str]) -> None:
+        """Whisker names for the axis, tile and window titles (default W1 .., or a
+        dome map's "LFU (W7)"); one per sensor, extra ones ignored."""
+        self._names = [str(n) for n in names[:self._nsensor]] + \
+            [f"W{s + 1}" for s in range(len(names), self._nsensor)]
+        self._stacked.getAxis("left").setTicks([list(enumerate(self._names))])
+        for p, name in zip(self._tiles, self._names):
+            p.setTitle(name)
+        if self._single is not None:
+            self._single_plot.setTitle(self._names[self._single])
+            self.setWindowTitle(f"{self.TITLE} - {self._names[self._single]}")
+        self._request_render()
 
     def _restore(self) -> None:
         if self._single is None:

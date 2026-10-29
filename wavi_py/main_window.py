@@ -26,16 +26,19 @@ from PyQt6.QtGui import QGuiApplication, QRegularExpressionValidator
 from PyQt6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
+    QFileDialog,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QProgressBar,
     QPushButton,
     QSizePolicy,
     QSpinBox,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -63,7 +66,8 @@ from wavi_py.views.base import alarm_label, show_alarm
 from wavi_py.views.fault_log import FaultLogView
 from wavi_py.views.sim_panel import SimPanel
 from wavi_py.views.spectral_base import FFT_WINDOWS_S
-from whisker_link.channels import SAT_CODE
+from whisker_link.channels import NUM_WHISKER, SAT_CODE
+from whisker_link.dome_map import DEFAULT_MAP, DomeMap, DomeMapError
 from whisker_link.esp32_frame import MV_PER_CODE, info_cfg
 
 RESET_ACK_TIMEOUT_S = 3.0     # esp32_reset's ack (the RTS pulse takes 0.1 s)
@@ -122,6 +126,7 @@ class MainWindow(QMainWindow):
         outpath: Optional[Path] = None,
         scan_mode: Optional[tuple[int, ...]] = None,
         selects: str = DEFAULT_SELECTS,
+        dome_map: Optional[DomeMap] = None,
     ):
         super().__init__()
         self.setWindowTitle("Wavi (Python)")
@@ -213,6 +218,9 @@ class MainWindow(QMainWindow):
         self._imu_view = ImuView(self._t_buffer_s)
         # the Dome view needs PyOpenGL and a GL context: built on first use
         self._dome_view = None
+        # whisker positions / sensors / calibration (None: W1 .. W16, placeholder dome holes)
+        self._dome_map: Optional[DomeMap] = None
+        self.set_dome_map(dome_map)
         for v, btn in ((self._line_view, self._toggle_line), (self._spectrum_view, self._toggle_spectrum),
                        (self._fft_view, self._toggle_fft),
                        (self._spec_view, self._toggle_spec), (self._imu_view, self._toggle_imu)):
@@ -536,8 +544,18 @@ class MainWindow(QMainWindow):
                                      " calibration; needs PyOpenGL)")
         self._toggle_dome.toggled.connect(self._toggle_dome_view)
 
+        self._map_btn = QToolButton()
+        self._map_btn.setText("Map")
+        self._map_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        menu = QMenu(self._map_btn)
+        menu.addAction("Load dome map...", self._choose_dome_map)
+        menu.addAction("ROV dome (default map)", lambda: self._load_dome_map(DEFAULT_MAP))
+        menu.addAction("None (W1 .. W16)", lambda: self.set_dome_map(None))
+        self._map_btn.setMenu(menu)
+
         h.addWidget(self._toggle_imu)
         h.addWidget(self._toggle_dome)
+        h.addWidget(self._map_btn)
         h.addStretch(1)
         h.addWidget(self._pause_btn)
         h.addWidget(self._reset_btn)
@@ -743,7 +761,7 @@ class MainWindow(QMainWindow):
                 if QGuiApplication.platformName() in ("offscreen", "minimal"):
                     raise RuntimeError(f"no OpenGL on the Qt platform '{QGuiApplication.platformName()}'")
                 from wavi_py.views.dome_view import DomeView
-                self._dome_view = DomeView(self._fs)
+                self._dome_view = DomeView(self._fs, dome_map=self._dome_map)
             except Exception as exc:  # noqa: BLE001 — no PyOpenGL / GL context
                 QMessageBox.warning(self, "Dome view", f"Cannot open the Dome view: {exc}\n"
                                     "(pip install PyOpenGL)")
@@ -755,6 +773,39 @@ class MainWindow(QMainWindow):
                 self._dome_view.set_bus(self._client.bus, self._fs)
         if self._dome_view is not None:
             self._toggle_window(self._dome_view, show)
+
+    # ----- dome map: whisker position labels, the Dome view's holes and calibration
+    def set_dome_map(self, dome_map: Optional[DomeMap]) -> None:
+        self._dome_map = dome_map
+        names = dome_map.whisker_names(NUM_WHISKER) if dome_map is not None else \
+            [f"W{w + 1}" for w in range(NUM_WHISKER)]
+        for v in (self._line_view, self._spectrum_view, self._fft_view, self._spec_view):
+            v.set_whisker_names(names)
+        if self._dome_view is not None:
+            self._dome_view.set_dome_map(dome_map)
+        if dome_map is None:
+            tip = "Dome map: none (channels W1 .. W16, placeholder dome holes)"
+        else:
+            tip = f"Dome map: {dome_map.path or ''}\n{dome_map.summary()}"
+            if dome_map.uncalibrated():
+                tip += f"\nplaceholder gain: {', '.join(dome_map.uncalibrated())}"
+        self._map_btn.setToolTip(tip + "\n(whisker positions, sensors and calibration)")
+        name = dome_map.path.stem if dome_map is not None and dome_map.path else "set"
+        self._map_btn.setText("Map" if dome_map is None else f"Map: {name}")
+
+    def _load_dome_map(self, path) -> None:
+        try:
+            self.set_dome_map(DomeMap.load(path))
+        except DomeMapError as exc:
+            QMessageBox.warning(self, "Dome map", str(exc))
+
+    def _choose_dome_map(self) -> None:
+        start = self._dome_map.path if self._dome_map is not None and self._dome_map.path \
+            else DEFAULT_MAP
+        path, _ = QFileDialog.getOpenFileName(self, "Dome map", str(start.parent),
+                                              "Dome map (*.json);;All files (*)")
+        if path:
+            self._load_dome_map(path)
 
     def _side_views(self) -> tuple:
         """The views besides the stream views that show the status line and alarm."""

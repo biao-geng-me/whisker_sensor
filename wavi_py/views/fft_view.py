@@ -40,7 +40,6 @@ import pyqtgraph as pg
 from wavi_py.views.render_sched import PlotWidget
 from wavi_py.views.spectral_base import SpectralWindow, to_db
 from wavi_py.views.whisker_plots import auto_width as _auto_width
-from whisker_link.channels import CHANNEL_NAMES
 
 _MODES = ("Peak bars", "Box over frequency", "Box over time")
 _A_RGB, _B_RGB = (220, 40, 40), (40, 80, 220)
@@ -57,8 +56,8 @@ _KEYS_HELP = """\
 Mouse over the heatmap: channel, frequency and amplitude in the status bar."""
 
 
-def _whisker_ticks(nch: int, offset: float) -> list[list[tuple[float, str]]]:
-    return [[(2 * w + offset, f"W{w + 1}") for w in range(nch // 2)]]
+def _whisker_ticks(names: list[str], offset: float) -> list[list[tuple[float, str]]]:
+    return [[(2 * w + offset, name) for w, name in enumerate(names)]]
 
 
 def _frame(plot: pg.PlotItem) -> None:
@@ -74,6 +73,7 @@ class FftView(SpectralWindow):
 
     def __init__(self, nch: int, nfreq: int, t_fft_s: float):
         self._nch = int(nch)
+        self._names = [f"W{w + 1}" for w in range(self._nch // 2)]   # see set_whisker_names
         self._nfreq = int(nfreq)
         self._fft: np.ndarray | None = None        # (nfreq, nch) amplitude
         self._fs = 0.0
@@ -93,7 +93,7 @@ class FftView(SpectralWindow):
         self._heat.setBackground("w")
         hp = self._heat.getPlotItem()
         hp.setLabel("left", "Frequency", units="Hz")
-        hp.getAxis("bottom").setTicks(_whisker_ticks(self._nch, 1.0))
+        hp.getAxis("bottom").setTicks(_whisker_ticks(self._names, 1.0))
         hp.setMouseEnabled(x=False, y=False)
         hp.hideButtons()
         _frame(hp)
@@ -141,7 +141,7 @@ class FftView(SpectralWindow):
         self._low = PlotWidget()
         self._low.setBackground("w")
         lp = self._low.getPlotItem()
-        lp.getAxis("bottom").setTicks(_whisker_ticks(self._nch, 0.5))
+        lp.getAxis("bottom").setTicks(_whisker_ticks(self._names, 0.5))
         lp.showGrid(y=True, alpha=0.2)
         lp.setMouseEnabled(x=False, y=True)
         _frame(lp)
@@ -289,6 +289,13 @@ class FftView(SpectralWindow):
             lp.disableAutoRange(axis="y")
             lp.setYRange(*want, padding=0)
 
+    def set_whisker_names(self, names: list[str]) -> None:
+        """Whisker names under the columns (default W1 .., or a dome map's "LFU (W7)")."""
+        n = self._nch // 2
+        self._names = [str(x) for x in names[:n]] + [f"W{w + 1}" for w in range(len(names), n)]
+        self._heat.getPlotItem().getAxis("bottom").setTicks(_whisker_ticks(self._names, 1.0))
+        self._low.getPlotItem().getAxis("bottom").setTicks(_whisker_ticks(self._names, 0.5))
+
     def _align_plots(self, *_args) -> None:
         """Channel c's column in the heatmap (x c..c+1) and its bar (x c) at the same
         screen x: the same left axis width, and a lower right margin as wide as the
@@ -370,5 +377,5 @@ class FftView(SpectralWindow):
             return
         v = self._values(self._fft[i:i + 1, c])[0]
         val = "–" if not np.isfinite(v) else f"{v:.4g} {self._unit()}"
-        self.statusBar().showMessage(f"{CHANNEL_NAMES[c] if self._nch == len(CHANNEL_NAMES) else c}"
+        self.statusBar().showMessage(f"{self._names[c // 2]} {'AB'[c % 2]}"
                                      f"   f = {f[i]:.2f} Hz   {val}")

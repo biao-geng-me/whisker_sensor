@@ -48,6 +48,7 @@ class SpectrogramView(SpectralWindow):
     def __init__(self, nch: int, nfreq: int, fs: float, hop: int, t_spec_s: float,
                  t_fft_s: float = 1.0):
         self._nch = int(nch)
+        self._names = [n.replace("_", " ") for n in CHANNEL_NAMES[:self._nch]]   # per gauge
         self._nfreq = int(nfreq)
         self._fs = float(fs)
         self._col_dt = hop / fs
@@ -77,9 +78,18 @@ class SpectrogramView(SpectralWindow):
         self._plot.scene().sigMouseMoved.connect(self._on_mouse)
         self._label_axis()
 
+    def set_whisker_names(self, names: list[str]) -> None:
+        """Whisker names (default W1 .., or a dome map's "LFU (W7)"); each gauge is
+        shown as "<name> A" / "<name> B"."""
+        self._names = [f"{names[c // 2]} {'AB'[c % 2]}" if c // 2 < len(names)
+                       else CHANNEL_NAMES[c].replace("_", " ") for c in range(self._nch)]
+        for c, name in enumerate(self._names):
+            self._chan.setItemText(c + 1, name)
+        self._label_axis()
+
     def _extra_toolbar(self) -> None:
         self._chan = QComboBox()
-        self._chan.addItems(["All stacked", *[n.replace("_", " ") for n in CHANNEL_NAMES[:self._nch]]])
+        self._chan.addItems(["All stacked", *self._names])
         self._chan.setToolTip("All channels stacked, or one gauge with its frequency axis in Hz [ [ ] ]")
         self._chan.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._chan.currentIndexChanged.connect(lambda _i: (self._label_axis(), self._redraw()))
@@ -167,10 +177,10 @@ class SpectrogramView(SpectralWindow):
         left = p.getAxis("left")
         if self._channel() is None:
             p.setLabel("left", "Channel (each band: 0 Hz at the bottom)")
-            left.setTicks([[(c + 0.5, CHANNEL_NAMES[c].replace("_", " ")) for c in range(self._nch)]])
+            left.setTicks([[(c + 0.5, self._names[c]) for c in range(self._nch)]])
         else:
             left.setTicks(None)
-            p.setLabel("left", f"{CHANNEL_NAMES[self._channel()].replace('_', ' ')}  frequency",
+            p.setLabel("left", f"{self._names[self._channel()]}  frequency",
                        units="Hz")
 
     # ----- view
@@ -208,4 +218,4 @@ class SpectrogramView(SpectralWindow):
         val = v[j, row]
         text = "–" if not np.isfinite(val) else f"{val:.4g} {self._unit()}"
         self.statusBar().showMessage(f"t = {t0 + (j + 1) * self._col_dt:.2f} s   "
-                                     f"{CHANNEL_NAMES[ch].replace('_', ' ')}   f = {f:.2f} Hz   {text}")
+                                     f"{self._names[ch]}   f = {f:.2f} Hz   {text}")

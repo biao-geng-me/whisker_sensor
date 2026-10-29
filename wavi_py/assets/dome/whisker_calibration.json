@@ -1,0 +1,5 @@
+{
+  "format": "wavi-whisker-calibration/1",
+  "description": "Per-sensor calibration keyed by sensor_id (the dome map's positions name the sensor mounted there). deg_per_mv: (dA, dB) mV after tare -> (theta_e1, theta_e2) deg, [[a, b], [c, d]] or [gA, gB]; optional date, source, note. Sensors with no entry use the placeholder gain. Example entry: \"S07\": {\"deg_per_mv\": [1.0, 1.0], \"date\": \"2026-11-02\", \"source\": \"gantry sweep run 12\"}",
+  "sensors": {}
+}

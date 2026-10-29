@@ -243,3 +243,38 @@ def test_dome_view_cylinder_grows_under_a_tip(app):
         assert v.shell.cyl_len == L0
     finally:
         v.close()
+
+
+def test_dome_view_with_a_dome_map(app):
+    """A dome map: its positions are the holes (labelled), the frame path
+    works, a W7 bend lands on LFU; None goes back to the placeholder holes."""
+    from wavi_py.views import dome_view as dvm
+    from whisker_link.dome_map import DEFAULT_MAP, DomeMap
+
+    m = DomeMap.load(DEFAULT_MAP)
+    v = dvm.DomeView(fs=250.0, dome_map=m)
+    try:
+        assert v._labels_box.isChecked()
+        assert v.hole_texts() == [p.display for p in m.positions]
+        lfu = next(i for i, p in enumerate(m.positions) if p.key == "LFU")
+        assert v._hole_labels[lfu].text() == "LFU (W7)"
+        assert v.pose.hole_of[7] == lfu
+        assert np.allclose(v.layout_.root[lfu], m.positions[lfu].root)
+        _frame_path(v, dvm)
+        v.pose.request_tare()
+        base = np.full((40, NCH), 250.0)
+        v.pose.feed(base, 250.0)
+        bend = base[:5].copy()
+        bend[:, CHANNEL_NAMES.index("W7_A")] += 5.0
+        v.pose.feed(bend, 250.0)
+        th = v.pose.angles()
+        assert abs(th[lfu, 0]) > 0 and np.nanmax(np.abs(np.delete(th[:, 0], lfu))) == 0
+        v.set_labels_visible(False)
+        assert not any(lab.isVisible() for lab in v._hole_labels)
+        v.set_dome_map(None)
+        assert v.dome_map is None and not v._labels_box.isChecked()
+        assert len(v.layout_) == 12 and v.hole_texts()[0] == "W1?"
+        v._render_pose()
+    finally:
+        v.set_bus(None)
+        v.close()

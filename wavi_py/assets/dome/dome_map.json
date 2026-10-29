@@ -1,0 +1,29 @@
+{
+  "format": "wavi-dome-map/1",
+  "description": "BlueROV whisker dome as wired on 2026-10-29. Position = side L/R (port/starboard, the ROV's own left/right) + F/B (front = the column nearer the dome's pole, back = the column at the equator) + U/M/L (upper/middle/lower). channel W<n> = both gauges W<n>_A, W<n>_B of the stream. Format: whisker_link/dome_map.py.",
+  "frame": "collar frame of whiskers.json: mm, +z forward (tube axis), +y up, +x port",
+  "coordinates": "PLACEHOLDER: root / axis copied from the CAD holes (rov-cad, whiskers.json), not measured on the built dome",
+  "calibration_file": "whisker_calibration.json",
+  "whisker_length_mm": 130.0,
+  "unused_channels": {
+    "W3": "mux 1 select 6 dead (W3_B)",
+    "W8": "mux 1 select 6 dead (W8_B)",
+    "W10": "W10_A is on select 6, skipped by selects 0123457",
+    "W14": "W14_A is on select 6, skipped by selects 0123457"
+  },
+  "positions": {
+    "LBL": {"channel": "W1", "sensor_id": null, "label": "LBL", "root": [47.62, -29.46, 116.46], "axis": [0.8504, -0.5262, 0.0], "note": "CAD hole 7 (asset side R)"},
+    "LBM": {"channel": "W2", "sensor_id": null, "label": "LBM", "root": [55.99, 0.0, 116.02], "axis": [1.0, 0.0, 0.0], "note": "CAD hole 9 (asset side R)"},
+    "LBU": {"channel": "W4", "sensor_id": null, "label": "LBU", "root": [47.62, 29.46, 116.46], "axis": [0.8504, 0.5262, 0.0], "note": "CAD hole 11 (asset side R)"},
+    "LFL": {"channel": "W5", "sensor_id": null, "label": "LFL", "root": [39.95, -29.44, 144.94], "axis": [0.7135, -0.5257, 0.4633], "note": "CAD hole 6 (asset side R)"},
+    "LFM": {"channel": "W6", "sensor_id": null, "label": "LFM", "root": [46.96, 0.0, 149.5], "axis": [0.8387, 0.0, 0.5446], "note": "CAD hole 8 (asset side R)"},
+    "LFU": {"channel": "W7", "sensor_id": null, "label": "LFU", "root": [39.95, 29.44, 144.94], "axis": [0.7135, 0.5257, 0.4633], "note": "CAD hole 10 (asset side R)"},
+    "RFL": {"channel": "W9", "sensor_id": null, "label": "RFL", "root": [-39.95, -29.44, 144.94], "axis": [-0.7135, -0.5257, 0.4633], "note": "CAD hole 1 (asset side L)"},
+    "RFM": {"channel": "W11", "sensor_id": null, "label": "RFM", "root": [-46.96, 0.0, 149.5], "axis": [-0.8387, 0.0, 0.5446], "note": "CAD hole 3 (asset side L)"},
+    "RFU": {"channel": "W12", "sensor_id": null, "label": "RFU", "root": [-39.95, 29.44, 144.94], "axis": [-0.7135, 0.5257, 0.4633], "note": "CAD hole 5 (asset side L)"},
+    "RBL": {"channel": "W13", "sensor_id": null, "label": "RBL", "root": [-47.62, -29.46, 116.46], "axis": [-0.8504, -0.5262, 0.0], "note": "CAD hole 0 (asset side L)"},
+    "RBM": {"channel": "W15", "sensor_id": null, "label": "RBM", "root": [-55.99, 0.0, 116.02], "axis": [-1.0, 0.0, 0.0], "note": "CAD hole 2 (asset side L)"},
+    "RBU": {"channel": "W16", "sensor_id": null, "label": "RBU", "root": [-47.62, 29.46, 116.46], "axis": [-0.8504, 0.5262, 0.0], "note": "CAD hole 4 (asset side L)"}
+
+  }
+}
