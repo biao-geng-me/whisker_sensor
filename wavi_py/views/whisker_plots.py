@@ -648,9 +648,10 @@ class WhiskerPlotsView(ViewWindow):
         self._show_x(x)
         self._render(labels=True)
 
-    def set_whisker_names(self, names: list[str]) -> None:
+    def set_whisker_names(self, names: list[str], gauge_names: list[str] | None = None) -> None:
         """Whisker names for the axis, tile and window titles (default W1 .., or a
-        dome map's "LFU (W7)"); one per sensor, extra ones ignored."""
+        dome map's "LFU (W7)"); one per sensor, extra ones ignored. These views
+        draw a whisker slot's two gauges together, so ``gauge_names`` is unused."""
         self._names = [str(n) for n in names[:self._nsensor]] + \
             [f"W{s + 1}" for s in range(len(names), self._nsensor)]
         self._stacked.getAxis("left").setTicks([list(enumerate(self._names))])

@@ -39,7 +39,9 @@ def test_main_window_names_follow_the_map(app, tmp_path, monkeypatch):
         assert lv._tiles[0].titleLabel.text == "LBL (W1)"
         assert mw._spectrum_view._names[15] == "RBU (W16)"
         assert _ticks(fv._heat.getPlotItem().getAxis("bottom"))[6] == "LFU (W7)"
-        assert sv._chan.itemText(14) == "LFU (W7) B"
+        assert sv._chan.itemText(14) == "LFU lift (-W7_B)"
+        assert sv._chan.itemText(17) == "RFL drag (W9_A)"
+        assert fv._gauge_names[12] == "LFU drag (W7_A)"
         assert mw._map_btn.text() == "Map: dome_map"
         assert "12 positions, 0 calibrated" in mw._map_btn.toolTip()
         lv._maximize(6)
@@ -47,9 +49,10 @@ def test_main_window_names_follow_the_map(app, tmp_path, monkeypatch):
         mw.set_dome_map(None)
         assert _ticks(lv._stacked.getAxis("left"))[6] == "W7"
         assert sv._chan.itemText(14) == "W7 B" and mw._map_btn.text() == "Map"
+        assert fv._gauge_names[12] == "W7 A"
         # a bad file: a warning, the map unchanged
         bad = tmp_path / "bad.json"
-        bad.write_text('{"format": "wavi-dome-map/1", "positions": {}}')
+        bad.write_text('{"format": "wavi-dome-map/2", "positions": {}}')
         shown = []
         monkeypatch.setattr(QMessageBox, "warning", lambda *a: shown.append(a[2]))
         mw._load_dome_map(bad)
@@ -63,7 +66,8 @@ def test_main_window_names_follow_the_map(app, tmp_path, monkeypatch):
 def test_cli_dome_map(capsys):
     a = _parse_args(["--transport", "sim", "--dome-map", str(DEFAULT_MAP)])
     assert [p.key for p in a.dome_map.positions][:3] == ["LBL", "LBM", "LBU"]
-    assert _parse_args([]).dome_map is None
+    assert _parse_args([]).dome_map.path == DEFAULT_MAP          # the ROV dome by default
+    assert _parse_args(["--dome-map", "none"]).dome_map is None
     with pytest.raises(SystemExit):
         _parse_args(["--dome-map", "/nonexistent/map.json"])
     assert "cannot read" in capsys.readouterr().err

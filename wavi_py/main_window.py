@@ -777,10 +777,12 @@ class MainWindow(QMainWindow):
     # ----- dome map: whisker position labels, the Dome view's holes and calibration
     def set_dome_map(self, dome_map: Optional[DomeMap]) -> None:
         self._dome_map = dome_map
-        names = dome_map.whisker_names(NUM_WHISKER) if dome_map is not None else \
-            [f"W{w + 1}" for w in range(NUM_WHISKER)]
+        if dome_map is not None:
+            names, gauges = dome_map.whisker_names(NUM_WHISKER), dome_map.gauge_names(2 * NUM_WHISKER)
+        else:
+            names, gauges = [f"W{w + 1}" for w in range(NUM_WHISKER)], None
         for v in (self._line_view, self._spectrum_view, self._fft_view, self._spec_view):
-            v.set_whisker_names(names)
+            v.set_whisker_names(names, gauges)
         if self._dome_view is not None:
             self._dome_view.set_dome_map(dome_map)
         if dome_map is None:

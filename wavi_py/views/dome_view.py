@@ -18,8 +18,9 @@ while paused.
 Mapping, calibration and bend model are PLACEHOLDERS (see dome_pose), unless
 a dome map is given (``whisker_link.dome_map``, ``set_dome_map``): then the
 holes are the map's positions (its coordinates, labelled e.g. "LFU (W7)" on the
-view) and each sensor's calibration comes from the map's calibration file
-(the placeholder gain where there is none).
+view), each hole reads the map's drag and lift gauges with their polarity, and
+each sensor's calibration comes from the map's calibration file (the
+placeholder gain where there is none).
 
 Scribe shell (second toolbar row): an imaginary sphere + cylinder concentric
 with the dome (``dome_pose.Shell``) drawn as one grid line item (latitude
@@ -611,7 +612,8 @@ class DomeView(ViewWindow):
         else:
             a = self._asset_layout
             self.layout_ = m.layout(a.center, a.dome_radius)
-            self.pose = DomePose(self.layout_, m.hole_of(), m.calibration())
+            self.pose = DomePose(self.layout_, calibration=m.calibration(),
+                                 hole_channels=m.hole_channels())
         self._tube_faces = tube_faces(len(self.layout_), N_ROOT + N_SHAFT + 1, TUBE_SIDES)
         self.shell = Shell.around(self.layout_, self._shell_radius)
         self.trail = TrailBuffer(len(self.layout_), TRAIL_MAX_S, TRAIL_RATE_HZ)

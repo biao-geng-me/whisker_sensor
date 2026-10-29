@@ -258,8 +258,10 @@ def test_dome_view_with_a_dome_map(app):
         assert v.hole_texts() == [p.display for p in m.positions]
         lfu = next(i for i, p in enumerate(m.positions) if p.key == "LFU")
         assert v._hole_labels[lfu].text() == "LFU (W7)"
-        assert v.pose.hole_of[7] == lfu
+        assert v.pose.ch[list(v.pose.holes).index(lfu)].tolist() == [
+            CHANNEL_NAMES.index("W7_A"), CHANNEL_NAMES.index("W7_B")]
         assert np.allclose(v.layout_.root[lfu], m.positions[lfu].root)
+        v.pose.hole_of = {1: 0}                 # _frame_path bends W1_A: LBL, hole 0
         _frame_path(v, dvm)
         v.pose.request_tare()
         base = np.full((40, NCH), 250.0)

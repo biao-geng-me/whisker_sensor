@@ -1,52 +1,71 @@
-"""Dome map: which whisker channel sits where on the dome, and which sensor.
+"""Dome map: which gauge channels sit where on the dome, and which sensor.
 
 A dome map is a JSON file keyed by the physical POSITION on the dome (e.g.
-``LFU``: left, front, upper). Each position names the DAQ whisker channel
-wired to it (``W1`` .. ``W16``: both gauges, ``W<n>_A`` and ``W<n>_B`` of the
-stream), the physical sensor mounted there (``sensor_id``, optional), a
+``LFM``: left = port, front = the hole column nearer the dome's pole, middle).
+Each position names, per bend axis, the DAQ gauge channel that carries it and
+its polarity, the physical sensor mounted there (``sensor_id``, optional), a
 free-form display ``label`` and the hole's geometry in the dome asset's
 collar frame (``wavi_py/assets/dome/whiskers.json``: mm, +z forward along the
 tube axis, +y up, +x port):
 
     {
-      "format": "wavi-dome-map/1",
+      "format": "wavi-dome-map/2",
       "calibration_file": "whisker_calibration.json",   # optional, relative
       "whisker_length_mm": 130.0,                       # default per position
-      "unused_channels": {"W3": "why"},                 # optional, informative
+      "unused_gauges": {"W3_B": "why"},                 # optional bookkeeping
       "positions": {
-        "LFU": {"channel": "W7", "sensor_id": "S07", "label": "LFU",
+        "LFM": {"daq": {"drag": "W6_A",
+                        "lift": {"ch": "W6_B", "polarity": -1}},
+                "sensor_id": "S07", "label": "LFM",
                 "root": [x, y, z], "axis": [x, y, z],
                 "e1": [x, y, z], "length_mm": 130.0, "note": "..."}
       }
     }
 
-``root`` is where the whisker leaves the dome, ``axis`` its outward rest
-direction; ``e1`` (optional) is the bending frame's first axis, gauge A's bend
-direction (default: +z projected normal to the axis, i.e. meridional, as in the
-asset). ``sensor_id``, ``label``, ``e1``, ``length_mm`` and ``note`` may be
-left out.
+``daq`` has the two axes, ``drag`` (front-back bend) and ``lift`` (up-down
+bend). Each is a gauge channel as the stream names it (``W1_A`` .. ``W16_B``;
+``W1A`` is accepted and normalised), a bare string meaning polarity +1, or
+``{"ch": ..., "polarity": 1 | -1}``. The two axes may come from different
+whiskers' slots. A dead gauge: ``{"ch": null, "reason": "..."}`` (the reason is
+required); that axis then reads as zero bend. At least one axis must have a
+channel.
+
+Geometry: ``root`` is where the whisker leaves the dome, ``axis`` its outward
+rest direction, ``e1`` (optional) the drag direction (default: +z projected
+normal to the axis, i.e. meridional, toward the front, as in the asset).
 
 Calibration belongs to the sensor, not the position, so it lives in a
-separate file keyed by ``sensor_id`` and follows the sensor when it is moved:
+separate file keyed by ``sensor_id`` and follows the sensor when it moves:
 
     {
-      "format": "wavi-whisker-calibration/1",
+      "format": "wavi-whisker-calibration/2",
       "sensors": {
         "S07": {"deg_per_mv": [[a, b], [c, d]], "date": "2026-11-02",
                 "source": "...", "note": "..."}
       }
     }
 
-``deg_per_mv`` is the existing ``dome_pose.Calibration`` model, (dA, dB) mV
-after tare -> (theta_e1, theta_e2) deg, as a 2x2 matrix or [gA, gB] for a
-diagonal one; it assumes the sensor is mounted with gauge A toward e1. A
-position with no sensor_id, or a sensor with no entry, falls back to the
-placeholder gain ``dome_pose.DEG_PER_MV``.
+``deg_per_mv`` is in the sensor's own axes: (drag, lift) mV, after tare and
+polarity, -> (drag, lift) deg, as a 2x2 matrix or [g_drag, g_lift] for a
+diagonal one. A position with no sensor_id, or a sensor with no entry, uses
+the placeholder gain ``dome_pose.DEG_PER_MV``.
+
+The order, per position (``DomeMap.calibration`` folds steps 3-5 into the one
+2x2 matrix per hole that ``dome_pose.Calibration`` applies):
+
+    1. raw mV of the drag and lift gauge channels (``hole_channels``)
+    2. tare (``dome_pose.Tare``) and smoothing -> delta mV
+    3. polarity: delta * (p_drag, p_lift)
+    4. per-sensor 2x2 ``deg_per_mv`` -> (drag, lift) deg; drag + = tip
+       toward the front (e1), lift + = tip up (toward +y)
+    5. dome frame: theta_e1 = drag, theta_e2 = s * lift, where s = +-1 makes
+       the hole's e2 = axis x e1 point up (``lift_sign``: e2 points down on
+       the port side, up on starboard)
 
 ``load`` validates everything and raises ``DomeMapError`` naming the file
-and the entry: duplicate keys (positions, sensors, fields), unknown fields,
-channels that are not ``W1`` .. ``W16``, a channel used twice or both used
-and listed unused, a sensor_id used twice, bad vectors.
+and the entry: duplicate keys, unknown fields, gauge names that are not
+``W1_A`` .. ``W16_B``, a gauge used twice or both used and listed unused, a
+sensor_id used twice, a polarity other than +-1, bad vectors.
 """
 
 from __future__ import annotations
@@ -60,22 +79,24 @@ from typing import Optional
 
 import numpy as np
 
-from whisker_link.channels import NUM_WHISKER
+from whisker_link.channels import CHANNEL_NAMES, NUM_WHISKER
 from whisker_link.dome_pose import DEG_PER_MV, Calibration, DomeLayout
 
-MAP_FORMAT = "wavi-dome-map/1"
-CAL_FORMAT = "wavi-whisker-calibration/1"
+MAP_FORMAT = "wavi-dome-map/2"
+CAL_FORMAT = "wavi-whisker-calibration/2"
 DEFAULT_LENGTH_MM = 130.0
+AXES = ("drag", "lift")
 
 # the map shipped with wavi_py (the ROV dome as wired on 2026-10-29)
 DEFAULT_MAP = Path(__file__).resolve().parents[1] / "wavi_py" / "assets" / "dome" / "dome_map.json"
 
-_MAP_KEYS = {"format", "description", "frame", "coordinates", "calibration_file",
-             "whisker_length_mm", "unused_channels", "positions"}
-_POS_KEYS = {"channel", "sensor_id", "label", "root", "axis", "e1", "length_mm", "note"}
+_MAP_KEYS = {"format", "description", "frame", "coordinates", "polarity_note",
+             "calibration_file", "whisker_length_mm", "unused_gauges", "positions"}
+_POS_KEYS = {"daq", "sensor_id", "label", "root", "axis", "e1", "length_mm", "note"}
+_AXIS_KEYS = {"ch", "polarity", "reason"}
 _CAL_KEYS = {"format", "description", "sensors"}
 _SENSOR_KEYS = {"deg_per_mv", "date", "source", "note"}
-_CHANNEL_RE = re.compile(r"W(\d+)")
+_GAUGE_RE = re.compile(r"W(\d+)_?([AB])")
 
 
 class DomeMapError(ValueError):
@@ -84,31 +105,55 @@ class DomeMapError(ValueError):
 
 
 @dataclass(frozen=True)
+class Gauge:
+    """One bend axis of a position: its channel (index into CHANNEL_NAMES,
+    None for a dead gauge) and polarity."""
+    ch: Optional[int]
+    polarity: int = 1
+    reason: str = ""
+
+    @property
+    def name(self) -> str:
+        return CHANNEL_NAMES[self.ch] if self.ch is not None else "none"
+
+
+@dataclass(frozen=True)
 class Position:
-    key: str                     # the position, e.g. "LFU"
-    whisker: int                 # DAQ whisker channel 1..16 (gauges W<n>_A, W<n>_B)
+    key: str                     # the position, e.g. "LFM"
+    daq: dict                    # "drag" / "lift" -> Gauge
     label: str
     sensor_id: Optional[str]
     root: np.ndarray             # (3,) mm
     axis: np.ndarray             # (3,) unit, outward
-    e1: np.ndarray               # (3,) unit, normal to axis: gauge A's bend direction
+    e1: np.ndarray               # (3,) unit, normal to axis: drag + direction
     length: float                # mm
     note: str = ""
 
     @property
-    def channel(self) -> str:
-        return f"W{self.whisker}"
+    def slots(self) -> str:
+        """``W6`` when both axes are one whisker's gauges, else the gauges."""
+        chans = [g.ch for g in self.daq.values() if g.ch is not None]
+        whiskers = {c // 2 for c in chans}
+        if len(whiskers) == 1:
+            return f"W{whiskers.pop() + 1}"
+        return "/".join(CHANNEL_NAMES[c] for c in chans)
 
     @property
     def display(self) -> str:
-        """``LFU (W7)``: the label with the channel, for plot axes and titles."""
-        return f"{self.label} ({self.channel})"
+        """``LFM (W6)``: the label with its channel(s), for the Dome view and
+        per-whisker plots."""
+        return f"{self.label} ({self.slots})"
+
+    def gauge_display(self, axis: str) -> str:
+        """``LFM drag (W6_A)``, with ``-`` for a flipped polarity."""
+        g = self.daq[axis]
+        return f"{self.label} {axis} ({'-' if g.polarity < 0 else ''}{g.name})"
 
 
 @dataclass(frozen=True)
 class SensorCal:
     sensor_id: str
-    deg_per_mv: np.ndarray       # (2, 2): (dA, dB) mV -> (theta_e1, theta_e2) deg
+    deg_per_mv: np.ndarray       # (2, 2): (drag, lift) mV after polarity -> (drag, lift) deg
     date: str = ""
     source: str = ""
     note: str = ""
@@ -118,7 +163,7 @@ class SensorCal:
 class DomeMap:
     positions: list                               # [Position], file order = hole order
     sensors: dict = field(default_factory=dict)   # sensor_id -> SensorCal
-    unused: dict = field(default_factory=dict)    # whisker number -> reason
+    unused: dict = field(default_factory=dict)    # channel index -> reason
     path: Optional[Path] = None
     calibration_path: Optional[Path] = None
 
@@ -152,16 +197,19 @@ class DomeMap:
         length0 = _positive(doc.get("whisker_length_mm", DEFAULT_LENGTH_MM), err,
                             "whisker_length_mm")
         unused = {}
-        uc = doc.get("unused_channels", {})
-        if not isinstance(uc, dict):
-            raise err("unused_channels must be an object {\"W3\": \"reason\"}")
-        for ch, why in uc.items():
-            unused[_whisker(ch, err, f"unused_channels {ch!r}")] = str(why)
+        ug = doc.get("unused_gauges", {})
+        if not isinstance(ug, dict):
+            raise err("unused_gauges must be an object {\"W3_B\": \"reason\"}")
+        for ch, why in ug.items():
+            c = _gauge(ch, err, f"unused_gauges {ch!r}")
+            if c in unused:
+                raise err(f"unused_gauges: {CHANNEL_NAMES[c]} is listed twice")
+            unused[c] = str(why)
         pos_doc = doc.get("positions")
         if not isinstance(pos_doc, dict) or not pos_doc:
             raise err("positions must be a non-empty object keyed by position")
         positions = []
-        by_whisker: dict = {}
+        by_gauge: dict = {}
         by_sensor: dict = {}
         for key, p in pos_doc.items():
             what = f"position {key!r}"
@@ -170,15 +218,18 @@ class DomeMap:
             if not isinstance(p, dict):
                 raise err(f"{what} must be an object")
             _no_unknown(p, _POS_KEYS, err, what)
-            for k in ("channel", "root", "axis"):
+            for k in ("daq", "root", "axis"):
                 if k not in p:
                     raise err(f"{what} has no {k!r}")
-            w = _whisker(p["channel"], err, what)
-            if w in by_whisker:
-                raise err(f"{what}: channel W{w} is also position {by_whisker[w]!r}")
-            if w in unused:
-                raise err(f"{what}: channel W{w} is also listed in unused_channels")
-            by_whisker[w] = key
+            daq = _daq(p["daq"], err, what)
+            for ax, g in daq.items():
+                if g.ch is None:
+                    continue
+                if g.ch in by_gauge:
+                    raise err(f"{what} {ax}: gauge {g.name} is also {by_gauge[g.ch]}")
+                if g.ch in unused:
+                    raise err(f"{what} {ax}: gauge {g.name} is also listed in unused_gauges")
+                by_gauge[g.ch] = f"{key} {ax}"
             sid = p.get("sensor_id")
             if sid is not None:
                 if not isinstance(sid, str) or not sid.strip():
@@ -200,20 +251,36 @@ class DomeMap:
                 raise err(f"{what}: e1 is parallel to the axis")
             e1 = e1 / np.linalg.norm(e1)
             length = _positive(p.get("length_mm", length0), err, f"{what} length_mm")
-            positions.append(Position(key, w, label.strip(), sid, root, axis, e1, length,
+            positions.append(Position(key, daq, label.strip(), sid, root, axis, e1, length,
                                       str(p.get("note", ""))))
         return cls(positions, dict(sensors or {}), unused)
 
     # ----- queries
-    def by_whisker(self) -> dict:
-        """whisker number -> Position"""
-        return {p.whisker: p for p in self.positions}
+    def gauge_owner(self) -> dict:
+        """channel index -> (Position, axis)"""
+        return {g.ch: (p, ax) for p in self.positions for ax, g in p.daq.items()
+                if g.ch is not None}
+
+    def gauge_names(self, nch: int = 2 * NUM_WHISKER) -> list:
+        """Display names of the gauge channels: ``LFM drag (W6_A)`` where
+        mapped, ``W3 A`` where not."""
+        own = self.gauge_owner()
+        return [own[c][0].gauge_display(own[c][1]) if c in own else CHANNEL_NAMES[c].replace("_", " ")
+                for c in range(nch)]
 
     def whisker_names(self, n: int = NUM_WHISKER) -> list:
-        """Display names of whisker channels 1..n: ``LFU (W7)`` where mapped,
-        ``W3`` where not."""
-        bw = self.by_whisker()
-        return [bw[w].display if w in bw else f"W{w}" for w in range(1, n + 1)]
+        """Display names of whisker slots 1..n (a slot = gauges W<n>_A, W<n>_B):
+        ``LFM (W6)``, ``LFM/LBM (W2)`` when its gauges serve two positions,
+        ``W3`` when neither is mapped."""
+        own = self.gauge_owner()
+        out = []
+        for w in range(n):
+            labels = []
+            for c in (2 * w, 2 * w + 1):
+                if c in own and own[c][0].label not in labels:
+                    labels.append(own[c][0].label)
+            out.append(f"{'/'.join(labels)} (W{w + 1})" if labels else f"W{w + 1}")
+        return out
 
     def sensor_cal(self, pos: Position) -> Optional[SensorCal]:
         return self.sensors.get(pos.sensor_id) if pos.sensor_id else None
@@ -234,17 +301,26 @@ class DomeMap:
                           None if center is None else np.asarray(center, dtype=np.float64),
                           float(radius))
 
-    def hole_of(self) -> dict:
-        """whisker number -> hole index of ``layout()``"""
-        return {p.whisker: i for i, p in enumerate(self.positions)}
+    def hole_channels(self) -> np.ndarray:
+        """(H, 2) gauge channel of each hole's (drag, lift); -1 = none."""
+        return np.array([[-1 if p.daq[ax].ch is None else p.daq[ax].ch for ax in AXES]
+                         for p in self.positions], dtype=np.intp)
+
+    @staticmethod
+    def lift_sign(pos: Position) -> int:
+        """+1 if the hole's e2 = axis x e1 points up (+y), -1 if down (step 5)."""
+        return -1 if np.cross(pos.axis, pos.e1)[1] < 0 else 1
 
     def calibration(self, deg_per_mv: float = DEG_PER_MV) -> Calibration:
-        """Per hole: the sensor's calibration, or the placeholder diagonal gain."""
-        m = np.tile(np.eye(2) * deg_per_mv, (len(self.positions), 1, 1))
+        """Per hole, steps 3-5 of the module docstring as one matrix:
+        diag(1, lift_sign) @ sensor deg_per_mv (or the placeholder gain) @
+        diag(polarities), in rad / mV."""
+        m = np.zeros((len(self.positions), 2, 2))
         for i, p in enumerate(self.positions):
             cal = self.sensor_cal(p)
-            if cal is not None:
-                m[i] = cal.deg_per_mv
+            sensor = cal.deg_per_mv if cal is not None else np.eye(2) * deg_per_mv
+            pol = np.diag([p.daq[ax].polarity for ax in AXES])
+            m[i] = np.diag([1, self.lift_sign(p)]) @ sensor @ pol
         return Calibration(np.radians(m))
 
     def summary(self) -> str:
@@ -314,14 +390,47 @@ def _no_unknown(d: dict, allowed: set, err, what: str) -> None:
                   f"(allowed: {', '.join(sorted(allowed))})")
 
 
-def _whisker(ch, err, what: str) -> int:
-    m = _CHANNEL_RE.fullmatch(ch.strip()) if isinstance(ch, str) else None
+def _gauge(ch, err, what: str) -> int:
+    """``W6_A`` / ``W6A`` -> channel index."""
+    m = _GAUGE_RE.fullmatch(ch.strip()) if isinstance(ch, str) else None
     if m is None or not 1 <= int(m.group(1)) <= NUM_WHISKER:
         hint = ""
-        if isinstance(ch, str) and re.fullmatch(r"W\d+_[AB]", ch.strip()):
-            hint = "; a position takes both gauges, so name the whisker, e.g. 'W7'"
-        raise err(f"{what}: channel {ch!r} is not W1 .. W{NUM_WHISKER}{hint}")
-    return int(m.group(1))
+        if isinstance(ch, str) and re.fullmatch(r"W\d+", ch.strip()):
+            hint = "; name one gauge, e.g. 'W7_A'"
+        raise err(f"{what}: {ch!r} is not a gauge channel W1_A .. W{NUM_WHISKER}_B{hint}")
+    return CHANNEL_NAMES.index(f"W{int(m.group(1))}_{m.group(2)}")
+
+
+def _daq(d, err, what: str) -> dict:
+    if not isinstance(d, dict):
+        raise err(f"{what}: daq must be an object {{\"drag\": \"W1_A\", \"lift\": \"W1_B\"}}")
+    _no_unknown(d, set(AXES), err, f"{what} daq")
+    out = {}
+    for ax in AXES:
+        w = f"{what} {ax}"
+        if ax not in d:
+            raise err(f"{w}: missing (a dead gauge: {{\"ch\": null, \"reason\": \"...\"}})")
+        a = d[ax]
+        if isinstance(a, str):
+            a = {"ch": a}
+        if not isinstance(a, dict):
+            raise err(f"{w}: a gauge name or {{\"ch\": ..., \"polarity\": 1 | -1}}")
+        _no_unknown(a, _AXIS_KEYS, err, w)
+        if "ch" not in a:
+            raise err(f"{w}: no 'ch'")
+        pol = a.get("polarity", 1)
+        if isinstance(pol, bool) or pol not in (1, -1):
+            raise err(f"{w}: polarity must be 1 or -1 (got {pol!r})")
+        reason = str(a.get("reason", ""))
+        if a["ch"] is None:
+            if not reason.strip():
+                raise err(f"{w}: no channel needs a 'reason' (e.g. dead gauge)")
+            out[ax] = Gauge(None, int(pol), reason)
+        else:
+            out[ax] = Gauge(_gauge(a["ch"], err, w), int(pol), reason)
+    if all(g.ch is None for g in out.values()):
+        raise err(f"{what}: both axes have no channel")
+    return out
 
 
 def _number(x, err, what: str) -> float:
@@ -351,7 +460,7 @@ def _unit(v: np.ndarray, err, what: str) -> np.ndarray:
 
 
 def _cal_matrix(x, err, what: str) -> np.ndarray:
-    bad = f"{what}: deg_per_mv must be [gA, gB] or [[a, b], [c, d]]"
+    bad = f"{what}: deg_per_mv must be [g_drag, g_lift] or [[a, b], [c, d]]"
     if not isinstance(x, list) or len(x) != 2:
         raise err(bad)
     if all(isinstance(r, list) for r in x):

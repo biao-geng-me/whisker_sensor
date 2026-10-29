@@ -74,6 +74,7 @@ class FftView(SpectralWindow):
     def __init__(self, nch: int, nfreq: int, t_fft_s: float):
         self._nch = int(nch)
         self._names = [f"W{w + 1}" for w in range(self._nch // 2)]   # see set_whisker_names
+        self._gauge_names = [f"W{c // 2 + 1} {'AB'[c % 2]}" for c in range(self._nch)]
         self._nfreq = int(nfreq)
         self._fft: np.ndarray | None = None        # (nfreq, nch) amplitude
         self._fs = 0.0
@@ -289,10 +290,14 @@ class FftView(SpectralWindow):
             lp.disableAutoRange(axis="y")
             lp.setYRange(*want, padding=0)
 
-    def set_whisker_names(self, names: list[str]) -> None:
-        """Whisker names under the columns (default W1 .., or a dome map's "LFU (W7)")."""
+    def set_whisker_names(self, names: list[str], gauge_names: list[str] | None = None) -> None:
+        """Whisker names under the columns (default W1 .., or a dome map's "LFU (W7)");
+        ``gauge_names`` per channel for the status line (default "W7 A")."""
         n = self._nch // 2
         self._names = [str(x) for x in names[:n]] + [f"W{w + 1}" for w in range(len(names), n)]
+        gauge_names = list(gauge_names or [])[:self._nch]
+        self._gauge_names = gauge_names + [f"W{c // 2 + 1} {'AB'[c % 2]}"
+                                           for c in range(len(gauge_names), self._nch)]
         self._heat.getPlotItem().getAxis("bottom").setTicks(_whisker_ticks(self._names, 1.0))
         self._low.getPlotItem().getAxis("bottom").setTicks(_whisker_ticks(self._names, 0.5))
 
@@ -377,5 +382,5 @@ class FftView(SpectralWindow):
             return
         v = self._values(self._fft[i:i + 1, c])[0]
         val = "–" if not np.isfinite(v) else f"{v:.4g} {self._unit()}"
-        self.statusBar().showMessage(f"{self._names[c // 2]} {'AB'[c % 2]}"
+        self.statusBar().showMessage(f"{self._gauge_names[c]}"
                                      f"   f = {f[i]:.2f} Hz   {val}")

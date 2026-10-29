@@ -72,12 +72,20 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--selects", type=_arg(parse_selects), default=DEFAULT_SELECTS,
                    help=f"mux selects sent with the scan mode (default {DEFAULT_SELECTS}; "
                         "'' = all 8)")
-    p.add_argument("--dome-map", type=_arg(DomeMap.load), default=None, metavar="JSON",
-                   help="whisker positions, sensors and calibration (whisker_link/dome_map.py): "
-                        "plots show e.g. 'LFU (W7)', the Dome view uses its holes; the ROV dome "
-                        f"is {DEFAULT_MAP.relative_to(DEFAULT_MAP.parents[3])}; "
-                        "default none (W1 .. W16; also the Map button)")
+    p.add_argument("--dome-map", default=str(DEFAULT_MAP), metavar="JSON|none",
+                   help="whisker positions, gauges, sensors and calibration "
+                        "(whisker_link/dome_map.py): plots show e.g. 'LFU (W7)', the Dome view "
+                        "uses its holes; default the ROV dome, "
+                        f"{DEFAULT_MAP.relative_to(DEFAULT_MAP.parents[3])}; 'none' = plain "
+                        "W1 .. W16 and the placeholder dome holes (also the Map button)")
     a = p.parse_args(argv)
+    if a.dome_map.strip().lower() == "none":
+        a.dome_map = None
+    else:
+        try:
+            a.dome_map = DomeMap.load(a.dome_map)
+        except ValueError as exc:
+            p.error(f"--dome-map: {exc}")
     server = a.transport == "server"
     array = a.transport in ("server", "esp32", "sim")
     if a.port is None:

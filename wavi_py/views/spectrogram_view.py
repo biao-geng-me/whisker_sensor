@@ -78,11 +78,12 @@ class SpectrogramView(SpectralWindow):
         self._plot.scene().sigMouseMoved.connect(self._on_mouse)
         self._label_axis()
 
-    def set_whisker_names(self, names: list[str]) -> None:
-        """Whisker names (default W1 .., or a dome map's "LFU (W7)"); each gauge is
-        shown as "<name> A" / "<name> B"."""
-        self._names = [f"{names[c // 2]} {'AB'[c % 2]}" if c // 2 < len(names)
-                       else CHANNEL_NAMES[c].replace("_", " ") for c in range(self._nch)]
+    def set_whisker_names(self, names: list[str], gauge_names: list[str] | None = None) -> None:
+        """This view is per gauge: ``gauge_names`` per channel (a dome map's
+        "LFM drag (W6_A)"; default "W6 A"); ``names`` (per whisker) is unused."""
+        gauge_names = list(gauge_names or [])[:self._nch]
+        self._names = gauge_names + [CHANNEL_NAMES[c].replace("_", " ")
+                                     for c in range(len(gauge_names), self._nch)]
         for c, name in enumerate(self._names):
             self._chan.setItemText(c + 1, name)
         self._label_axis()

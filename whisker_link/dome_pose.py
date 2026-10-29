@@ -551,17 +551,29 @@ class TrailBuffer:
 class DomePose:
     """mV blocks in, latest smoothed bend angles / polylines out.
 
-    ``hole_of`` maps whisker number -> hole; whiskers not in it are ignored,
-    holes nobody maps to stay straight and report NaN angles."""
+    ``hole_of`` maps whisker number -> hole (gauges A, B of the whisker in
+    the hole's (e1, e2) order); whiskers not in it are ignored, holes nobody
+    maps to stay straight and report NaN angles. ``hole_channels`` (H, 2)
+    instead names the two gauge channels of every hole directly (any slots,
+    e.g. a dome map's drag and lift gauges); -1 = no gauge on that axis, which
+    reads as zero bend there; a hole with -1 on both is unmapped."""
 
     def __init__(self, layout: DomeLayout, hole_of: Optional[dict] = None,
                  calibration: Optional[Calibration] = None, smooth_tau_s: float = 0.03,
-                 tare_n: int = 32, drift_tau_s: float = 0.0):
+                 tare_n: int = 32, drift_tau_s: float = 0.0,
+                 hole_channels: Optional[np.ndarray] = None):
         self.layout = layout
-        self.hole_of = dict(PLACEHOLDER_HOLE_OF if hole_of is None else hole_of)
-        self.whiskers = tuple(sorted(self.hole_of))
-        self.holes = np.array([self.hole_of[w] for w in self.whiskers], dtype=np.intp)
-        self.ch = channels_of(self.whiskers)                            # (W, 2)
+        if hole_channels is not None:
+            hc = np.asarray(hole_channels, dtype=np.intp).reshape(len(layout), 2)
+            self.hole_of = {}
+            self.whiskers = ()
+            self.holes = np.flatnonzero((hc >= 0).any(axis=1))
+            self.ch = hc[self.holes]
+        else:
+            self.hole_of = dict(PLACEHOLDER_HOLE_OF if hole_of is None else hole_of)
+            self.whiskers = tuple(sorted(self.hole_of))
+            self.holes = np.array([self.hole_of[w] for w in self.whiskers], dtype=np.intp)
+            self.ch = channels_of(self.whiskers)                        # (W, 2)
         self.calibration = calibration or Calibration.nominal(len(layout))
         self.tare = Tare(NCH, tare_n, drift_tau_s)
         self.smoother = Smoother(NCH, smooth_tau_s)
@@ -578,7 +590,7 @@ class DomePose:
     def delta_ab(self) -> np.ndarray:
         """(H, 2) smoothed mV deltas per hole; NaN where unmapped / railed / taring."""
         out = np.full((len(self.layout), 2), np.nan)
-        out[self.holes] = self.smoother.value[self.ch]
+        out[self.holes] = np.where(self.ch >= 0, self.smoother.value[np.maximum(self.ch, 0)], 0.0)
         return out
 
     def angles(self) -> np.ndarray:
