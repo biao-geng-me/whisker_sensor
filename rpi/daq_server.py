@@ -31,11 +31,19 @@ serial port, and warnings (recovered halts, ADC resets, watchdog reboots,
 the log, and as ``mark`` events (fault onset, clear, each warning) in the
 recording and to the clients. A recording started during a fault gets a mark
 with the fault's state first.
+
+Self-healing: a port that is open but delivers nothing for ``REOPEN_S`` is
+closed and reopened (a stale handle after a USB glitch); serial writes time
+out instead of blocking. If the ESP32 or MAVLink thread stops looping (or
+dies) for ``--stall-exit`` seconds, the server dumps every thread's stack to
+the log and exits, so systemd restarts it. ``kill -USR1 <pid>`` dumps the
+stacks without exiting.
 """
 
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import logging
 import os
 import queue
@@ -252,9 +260,13 @@ class Hub:
         with self._lock:
             return self.recorder.start(tag, self.hello())
 
-    def rec_stop(self) -> Optional[str]:
-        with self._lock:
+    def rec_stop(self, timeout: float = -1) -> Optional[str]:
+        if not self._lock.acquire(timeout=timeout):
+            return None
+        try:
             return self.recorder.stop()
+        finally:
+            self._lock.release()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -279,6 +291,9 @@ class RateCounter:
 class Esp32Source:
     """Reads binary frames from the ESP32; reopens the port if it goes away."""
 
+    REOPEN_S = 10.0           # port open but nothing decoded this long: close and reopen it
+    WRITE_TIMEOUT_S = 1.0     # a write that can't go out fails instead of blocking the reader
+
     def __init__(self, port: str, baud: int, hub: Hub, rates: RateCounter,
                  selects: Optional[str] = None, mode: Optional[str] = None):
         self.port, self.baud = port, baud
@@ -292,6 +307,11 @@ class Esp32Source:
         self._ser = None
         self._wlock = threading.Lock()
         self._stop = threading.Event()
+        self.loop_mono = time.monotonic()      # reader thread alive (the stall watchdog)
+        self.last_event_mono = 0.0             # last decoded frame or text line
+        self._opened_mono = 0.0
+        self._last_wfail_log = 0.0
+        self.n_reopens = 0
         self.last_scan_mono = 0.0
         self.last_seq: Optional[int] = None
         self.n_scans = 0
@@ -322,7 +342,11 @@ class Esp32Source:
             try:
                 self._ser.write(data)
                 return True
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001  (incl. the write timeout)
+                now = time.monotonic()
+                if now - self._last_wfail_log > 60.0:
+                    log.warning("serial write to %s failed: %s", self.port, exc)
+                    self._last_wfail_log = now
                 return False
 
     def reset(self) -> Optional[str]:
@@ -365,6 +389,7 @@ class Esp32Source:
         import serial  # pyserial
         ser = serial.Serial()
         ser.port, ser.baudrate, ser.timeout = self.port, self.baud, 0.2
+        ser.write_timeout = self.WRITE_TIMEOUT_S
         # Don't toggle EN/IO0 on open: deassert both before opening.
         ser.dtr = False
         ser.rts = False
@@ -375,6 +400,7 @@ class Esp32Source:
         last_kick = 0.0
         last_err, last_err_log = "", 0.0
         while not self._stop.is_set():
+            self.loop_mono = time.monotonic()
             if self._ser is None:
                 try:
                     ser = self._open()
@@ -390,6 +416,7 @@ class Esp32Source:
                     continue
                 with self._wlock:
                     self._ser = ser
+                self._opened_mono = time.monotonic()
                 last_err = ""
                 with self._fault_lock:
                     self.faults.link(True)
@@ -412,7 +439,24 @@ class Esp32Source:
             now = time.monotonic()
             if data:
                 for ev in self.decoder.feed(data):
+                    self.last_event_mono = now
                     self._handle(ev, now)
+            quiet = now - max(self.last_event_mono, self._opened_mono)
+            if quiet > self.REOPEN_S:
+                # Open, but nothing decodes: a handle left stale by a USB glitch looks
+                # like this. Reopening is cheap and doesn't reset the ESP32.
+                self.n_reopens += 1
+                log.warning("nothing from %s for %.0f s (%d junk bytes so far): reopening the port",
+                            self.port, quiet, self.decoder.n_junk)
+                self.hub.publish({"k": "txt", "t": now, "src": "server",
+                                  "msg": f"no data for {quiet:.0f} s: reopening {self.port}"})
+                with self._wlock:
+                    try:
+                        self._ser.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    self._ser = None
+                continue
             # Not streaming (boot banner / text mode / ESP32 rebooted)? Ask again.
             if now - self.last_scan_mono > 2.0 and now - last_kick > 2.0:
                 self.write(self.kick)
@@ -472,6 +516,7 @@ class MavSource:
         self._conn = None
         self.target: Optional[tuple[int, int]] = None
         self.n_msgs = 0
+        self.loop_mono = time.monotonic()      # thread alive (the stall watchdog)
         self._thread = threading.Thread(target=self._run, name="mavlink", daemon=True)
 
     def start(self) -> None:
@@ -485,6 +530,7 @@ class MavSource:
         instead of exiting, so a service started at boot doesn't crash-loop."""
         last_err = ""
         while not self._stop.is_set():
+            self.loop_mono = time.monotonic()
             try:
                 self._conn = self._mavutil.mavlink_connection(
                     self.url, source_system=self.sysid, source_component=self.compid,
@@ -526,6 +572,7 @@ class MavSource:
         last_hb = last_req = 0.0
         while not self._stop.is_set():
             now = time.monotonic()
+            self.loop_mono = now
             if now - last_hb > 1.0:
                 try:
                     self._heartbeat()
@@ -661,7 +708,8 @@ class Server:
             dec = self.esp32.decoder
             st["esp32"] = {"scans": self.esp32.n_scans, "seq_gaps": self.esp32.n_seq_gaps,
                            "crc_fail": dec.n_crc_fail, "skipped": dec.n_skipped,
-                           "junk": dec.n_junk, "adc_recov": self.esp32.n_adc_recov, "adc_crc": self.esp32.n_adc_crc,
+                           "junk": dec.n_junk, "reopens": self.esp32.n_reopens,
+                           "adc_recov": self.esp32.n_adc_recov, "adc_crc": self.esp32.n_adc_crc,
                            "adc_stale": self.esp32.n_adc_stale,
                            "adc_reinit": self.esp32.n_adc_reinit,
                            "adc_sync": self.esp32.n_adc_sync, "adc_empty": self.esp32.n_adc_empty,
@@ -681,11 +729,39 @@ class Server:
             st["mav"] = {"msgs": self.mav.n_msgs, "target": self.mav.target}
         return st
 
+    def _stalled(self, now: float) -> list[str]:
+        """Source threads that died or haven't looped for ``--stall-exit`` s."""
+        limit = getattr(self.args, "stall_exit", 0)
+        out = []
+        for src in (self.esp32, self.mav):
+            if not limit or src is None or not src._thread.ident or self._stop.is_set():
+                continue                       # off, not configured, not started, stopping
+            if not src._thread.is_alive():
+                out.append(f"{src._thread.name} thread died")
+            elif now - src.loop_mono > limit:
+                out.append(f"{src._thread.name} thread stuck for {now - src.loop_mono:.0f} s")
+        return out
+
+    def _die_stalled(self, why: list[str]) -> None:
+        """Nothing in-process can unstick a blocked thread: log where it is and exit
+        (non-zero, so systemd's Restart=always brings up a fresh server)."""
+        log.critical("%s: dumping thread stacks and exiting for a restart", "; ".join(why))
+        sys.stderr.flush()
+        faulthandler.dump_traceback(all_threads=True)
+        path = self.hub.rec_stop(timeout=2.0)
+        if path:
+            log.critical("recording closed: %s", path)
+        logging.shutdown()
+        os._exit(3)
+
     def _status_loop(self) -> None:
         last = time.monotonic()
         n = 0
         while not self._stop.wait(1.0):
             now = time.monotonic()
+            stalled = self._stalled(now)
+            if stalled:
+                self._die_stalled(stalled)
             st = self._status(now - last, self.rates.snapshot_and_reset())
             last = now
             self.hub.publish(st)
@@ -696,10 +772,11 @@ class Server:
                 e = st.get("esp32", {})
                 h = e.get("health")
                 log.info("whisker %s Hz | %s | clients %d | rec %s | errs: gap %d link-crc %d "
-                         "adc-crc %d adc-stale %d adc-recov %d adc-reinit %d adc-sync %d%s",
+                         "junk %d reopen %d adc-crc %d adc-stale %d adc-recov %d adc-reinit %d adc-sync %d%s",
                          hz.get("wsk", 0), imu or "no MAVLink", st["clients"],
                          os.path.basename(st["rec"]["path"]) if st["rec"]["on"] else "off",
-                         e.get("seq_gaps", 0), e.get("crc_fail", 0),
+                         e.get("seq_gaps", 0), e.get("crc_fail", 0), e.get("junk", 0),
+                         e.get("reopens", 0),
                          e.get("adc_crc", 0), e.get("adc_stale", 0), e.get("adc_recov", 0),
                          e.get("adc_reinit", 0), e.get("adc_sync", 0),
                          f" | {e.get('cfg', {}).get('mode_name', '?')}: busy {h['busy_pct']}%"
@@ -822,6 +899,9 @@ def main(argv: Optional[list[str]] = None) -> None:
     ap.add_argument("--record", action="store_true", help="start recording immediately")
     ap.add_argument("--tag", default="", help="tag for the --record file name")
     ap.add_argument("--log-every", type=int, default=5, help="status log period, s")
+    ap.add_argument("--stall-exit", type=float, default=20.0,
+                    help="exit (for systemd to restart) when the ESP32 or MAVLink thread is"
+                         " stuck this long or died, s; 0 = never")
     ap.add_argument("--log-level", default="INFO")
     args = ap.parse_args(argv)
 
@@ -829,6 +909,9 @@ def main(argv: Optional[list[str]] = None) -> None:
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO),
                         format=("%(levelname)s %(message)s" if os.environ.get("JOURNAL_STREAM")
                                 else "%(asctime)s %(levelname)s %(message)s"))
+    # stacks of every thread to the log (stderr): on a crash, and on `kill -USR1 <pid>`
+    faulthandler.enable()
+    faulthandler.register(signal.SIGUSR1, all_threads=True)
     server = Server(args)
     signal.signal(signal.SIGINT, lambda *_: server.stop())
     signal.signal(signal.SIGTERM, lambda *_: server.stop())

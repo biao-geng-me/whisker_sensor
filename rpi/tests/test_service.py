@@ -205,3 +205,96 @@ def test_esp32_reset_failure_releases_rts():
     assert ser.lines[-1] == ("rts", False)
     assert [a["ok"] for a in sent] == [False, False] and not published
     assert "Inappropriate ioctl" in sent[0]["error"] and "not open" in sent[1]["error"]
+
+
+def test_silent_port_is_reopened(tmp_path, caplog):
+    """An open port that delivers nothing (a hung ESP32, or a handle left stale
+    by a USB glitch) is closed and reopened after REOPEN_S; streaming resumes."""
+    import logging
+    import daq_server as ds
+    esp = subprocess.Popen([sys.executable, "-u", str(FAKE_ESP32)],
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    pty = esp.stdout.readline().decode().strip()
+    src = ds.Esp32Source(pty, 921600, ds.Hub(str(tmp_path)), ds.RateCounter())
+    src.REOPEN_S = 1.5
+    caplog.set_level(logging.WARNING, logger="daq_server")
+    src.start()
+    try:
+        def wait(pred, secs):
+            t_end = time.monotonic() + secs
+            while not pred():
+                assert time.monotonic() < t_end, "timed out"
+                time.sleep(0.05)
+        wait(lambda: src.n_scans > 10, 8)
+        esp.send_signal(signal.SIGSTOP)                  # hung: nothing more comes
+        wait(lambda: src.n_reopens >= 1, 5)
+        assert src.loop_mono > time.monotonic() - 1      # the reader kept looping
+        esp.send_signal(signal.SIGCONT)
+        n = src.n_scans
+        wait(lambda: src.n_scans > n + 10, 8)
+    finally:
+        src.stop()
+        esp.kill()
+        esp.wait()
+    assert "reopening the port" in caplog.text
+
+
+def test_stall_watchdog_spots_stuck_and_dead_threads():
+    import threading
+    srv, _, _ = _server_with_fake_serial(_FakeSerial())
+    srv.args.stall_exit = 5.0
+    hold = threading.Event()
+    try:
+        now = time.monotonic()
+        assert srv._stalled(now) == []                  # not started yet
+        srv.esp32._thread = threading.Thread(target=hold.wait, name="esp32", daemon=True)
+        srv.esp32._thread.start()
+        srv.esp32.loop_mono = now - 1
+        assert srv._stalled(now) == []
+        srv.esp32.loop_mono = now - 12
+        assert srv._stalled(now) == ["esp32 thread stuck for 12 s"]
+        srv.args.stall_exit = 0                         # --stall-exit 0: off
+        assert srv._stalled(now) == []
+        srv.args.stall_exit = 5.0
+        hold.set()
+        srv.esp32._thread.join()
+        assert srv._stalled(now) == ["esp32 thread died"]
+    finally:
+        hold.set()
+        srv._ls.close()
+
+
+def test_die_stalled_closes_the_recording_and_exits_nonzero(tmp_path, monkeypatch, capfd):
+    import daq_server as ds
+    srv, _, _ = _server_with_fake_serial(_FakeSerial())
+    srv.hub = ds.Hub(str(tmp_path))
+    path = srv.hub.rec_start("t")
+    codes = []
+
+    def fake_exit(code):
+        codes.append(code)
+        raise SystemExit(code)
+    monkeypatch.setattr(ds.os, "_exit", fake_exit)
+    try:
+        with pytest.raises(SystemExit):
+            srv._die_stalled(["esp32 thread stuck for 21 s"])
+    finally:
+        srv._ls.close()
+    assert codes == [3] and not srv.hub.recorder.active and Path(path).stat().st_size > 0
+    assert "test_die_stalled" in capfd.readouterr().err    # the stacks went to stderr
+
+
+def test_sigusr1_dumps_stacks_and_keeps_running(tmp_path):
+    tcp = _free_port()
+    srv = subprocess.Popen([*SERVER_PY, "-u", str(SERVER), "--serial", "none", "--mavlink", "none",
+                            "--bind", f"127.0.0.1:{tcp}", "--rec-dir", str(tmp_path)],
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    try:
+        Conn(tcp).s.close()                             # up
+        srv.send_signal(signal.SIGUSR1)
+        time.sleep(0.5)
+        assert srv.poll() is None
+    finally:
+        out = _stop(srv)
+    assert srv.returncode == 0, out
+    assert "Thread 0x" in out and "_status_loop" in out, out
