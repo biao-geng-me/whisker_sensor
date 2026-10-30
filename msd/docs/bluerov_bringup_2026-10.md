@@ -32,7 +32,7 @@ Source: `/shared/rc/whiskers/MSD_P25937/P25937_Whisker_Final.zip` (Altium). The 
 - **Amplifier gain is 10.** Every INA351ABS (SOT-23-8: GS 1, IN− 2, IN+ 3, V− 4, REF 5, OUT 6, V+ 7, SHDN 8) has GS tied to GND. The "gain ~141" in the inherited firmware was wrong.
 - **Quarter bridge at 3.3 V:** the gauge runs from 3V3 to StrainPOS, with 352 Ω from StrainPOS to GND. The reference half is 123 Ω + 123 Ω (≈ 1.65 V). Tension lowers the reading. Strain ≈ −60.6 µε per mV at the ADC (GF 2, V_ex 3.3 V), after subtracting the resting offset.
 - **Supply:** 5 V enters through the USB-A jack and a TPSM84203 buck module makes 3.3 V. The bridges draw ≈ 18 mA per channel, ≈ 0.6 A in total.
-- **Open — REF offset:** the schematic ties every INA351 REF to a 100 k/100 k divider (≈ 1.65 V, net `AMP_REF_3V3`) while all ADC AINxN are at GND. That would put every connected channel at ≈ 1.65 V, past the ±1.2 V full scale, so railed. The live board does not do this (W4_B rests at +26 mV), so the built board probably differs, e.g. REF reworked to ≈ 0 V. If REF is at 0 V, the single-supply INA output cannot go below ≈ 0 V, **negative bridge outputs clip**, and only one bending direction is measured. Measure with a meter against GND: INA351 pin 5 (or C4), W4_B's amp output (pin 6) at rest, and whether R7/R8 are fitted.
+- **Resolved — REF offset:** the schematic ties every INA351 REF to a 100 k/100 k divider (≈ 1.65 V, net `AMP_REF_3V3`) while all ADC AINxN are at GND, which would rail every channel. Fix on the board: R8 replaced with 10 k (R7 measured ≈ 46 k), REF now 0.29 V, so negative bridge outputs no longer clip at 0 V. The measured REF does not match the divider calculation (an extra ~8–13 k load is unexplained); that discrepancy is parked.
 
 ## Phase-1 study design (discussed)
 
@@ -45,7 +45,7 @@ Source: `/shared/rc/whiskers/MSD_P25937/P25937_Whisker_Final.zip` (Altium). The 
 
 ## Next steps
 
-1. Meter the REF/AINxN question above; decide on a fix if negative outputs clip.
-2. Firm up the PCB–ESP32 ground; recheck `adc-crc` and the 7.5 Hz dip.
+1. ~~Meter the REF/AINxN question above~~ — done: R8 replaced, REF 0.29 V.
+2. ~~Firm up the PCB–ESP32 ground~~ — done: one GND wire bundled with P1 (adc_crc 0 on the ROV, 2026-10-28).
 3. Tap test with a connected whisker for time alignment.
-4. Optional tooling: gzip recordings on the fly, a Mark button in wavi_py (the server already has a `mark` command), and a systemd service for daq_server on the Pi.
+4. Optional tooling: gzip recordings on the fly, a Mark button in wavi_py (the server already has a `mark` command). The daq_server systemd service (`whisker-daq`) is done.
