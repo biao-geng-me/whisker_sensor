@@ -473,6 +473,76 @@ def arrow_segments(path: np.ndarray, normal: np.ndarray, head_mm: float = 8.0,
     return np.concatenate([shaft, head], axis=1)
 
 
+# ---------------------------------------------------------------------------
+# plane map: every whisker at once, as a pilot inside the ROV sees the arrays
+# ---------------------------------------------------------------------------
+@dataclass
+class PlaneMap:
+    """The holes laid out flat, seen from inside the ROV looking forward: the
+    port array on the left, starboard on the right, each side as seen from
+    inside facing it, so its front column is toward the centre line and its
+    back column lateral. ``xy`` (H, 2) mm: x = the distance aft of the
+    foremost root (z), offset by ``gap`` from the centre line, toward the
+    hole's side; y = the root's height (+y up). ``fwd`` (H,) is the screen x
+    direction of forward on each side (+1 port, -1 starboard). ``segments``
+    (N, 2, 2) are the grid lines joining neighbouring roots within each side,
+    up / down a column and across a row."""
+
+    xy: np.ndarray
+    fwd: np.ndarray
+    segments: np.ndarray
+    spacing: float
+    gap: float
+
+    @classmethod
+    def of(cls, layout: DomeLayout, cluster_mm: float = 10.0) -> "PlaneMap":
+        root = layout.root
+        port = root[:, 0] - layout.center[0] >= 0              # +x = port
+        aft = root[:, 2].max() - root[:, 2]
+        cols = _clusters(root[:, 2], cluster_mm)
+        rows = _clusters(root[:, 1], cluster_mm)
+        # root spacing: the steps between neighbouring columns (z) and rows (y)
+        sp = np.concatenate([np.diff(np.sort([v[g].mean() for g in c]))
+                             for v, c in ((root[:, 2], cols), (root[:, 1], rows))])
+        spacing = float(np.median(sp)) if len(sp) else 30.0
+        gap = 0.6 * spacing
+        side = np.where(port, -1.0, 1.0)                        # screen x sign of each side
+        xy = np.c_[side * (gap + aft), root[:, 1]]
+        segs = []
+        for s in (True, False):
+            for groups, key in ((cols, 1), (rows, 0)):
+                for g in groups:
+                    ids = [i for i in g if port[i] == s]
+                    ids.sort(key=lambda i: xy[i, key])
+                    segs += [(xy[a], xy[b]) for a, b in zip(ids[:-1], ids[1:])]
+        return cls(xy, -side, np.array(segs).reshape(-1, 2, 2), spacing, gap)
+
+    @staticmethod
+    def lift_up(layout: DomeLayout) -> np.ndarray:
+        """(H,) +1 where the hole's e2 points up (theta_y + = tip up), else -1."""
+        return np.where(layout.e2[:, 1] < 0, -1.0, 1.0)
+
+    def tips(self, layout: DomeLayout, theta: np.ndarray, radius: float) -> np.ndarray:
+        """(..., H, 2) tip points for bends ``theta`` (..., H, 2) rad (drag,
+        e2): the root moved ``radius * angle`` mm, drag toward the side's
+        forward, lift up; NaN theta reads as no bend."""
+        th = np.nan_to_num(np.asarray(theta, dtype=np.float64))
+        d = np.stack([th[..., 0] * self.fwd, th[..., 1] * self.lift_up(layout)], axis=-1)
+        return self.xy + radius * d
+
+
+def _clusters(v: np.ndarray, gap: float) -> list[list[int]]:
+    """Indices of ``v`` grouped where sorted neighbours are less than ``gap`` apart."""
+    order = np.argsort(v)
+    out = [[int(order[0])]] if len(v) else []
+    for a, b in zip(order[:-1], order[1:]):
+        if v[b] - v[a] < gap:
+            out[-1].append(int(b))
+        else:
+            out.append([int(b)])
+    return out
+
+
 def nice_grid_step(gain: float, target_deg: float = 12.0) -> float:
     """Auto grid spacing in degrees of BEND: a 1-2-5 value whose drawn
     spacing (times the display gain) is nearest ``target_deg``."""

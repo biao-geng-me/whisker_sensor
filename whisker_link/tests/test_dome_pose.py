@@ -294,3 +294,26 @@ def test_shell_cover_grows_the_cylinder_in_steps():
     assert sh.cyl_len == pytest.approx(60.0)
     assert sh.cover(np.array([[0, 40.0, -1e6]])) and sh.cyl_len == pytest.approx(400.0)
     assert sh.uncover() and sh.cyl_len == 40.0 and not sh.uncover()
+
+
+def test_plane_map_layout_and_tips():
+    from whisker_link.dome_pose import PlaneMap
+
+    lay = dp.DomeLayout.load(ASSET)
+    pm = PlaneMap.of(lay)
+    port = lay.root[:, 0] > 0
+    assert (pm.xy[port, 0] < 0).all() and (pm.xy[~port, 0] > 0).all()
+    assert np.allclose(pm.fwd, np.where(port, 1.0, -1.0))
+    assert len(pm.segments) == 14 and 20 < pm.spacing < 40
+    # the front column (larger z) is nearer the centre line
+    front = lay.root[:, 2] > lay.root[:, 2].mean()
+    assert np.abs(pm.xy[front, 0]).max() < np.abs(pm.xy[~front, 0]).min()
+    th = np.zeros((len(lay), 2))
+    th[:, 0] = 0.1
+    tips = pm.tips(lay, th, 50.0)
+    assert np.allclose(tips[:, 0] - pm.xy[:, 0], 5.0 * pm.fwd)
+    th[:] = [0.0, 0.1]
+    up = pm.tips(lay, th, 50.0)[:, 1] - pm.xy[:, 1]
+    assert np.allclose(up, 5.0 * PlaneMap.lift_up(lay))
+    th[0] = np.nan
+    assert np.allclose(pm.tips(lay, th, 50.0)[0], pm.xy[0])

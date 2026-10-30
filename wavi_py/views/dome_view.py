@@ -37,7 +37,19 @@ Grid and Surface toggle separately. The cylinder grows downward (in R/4
 steps) when a tip goes below its end, so the trails stay on the drawn shell.
 Neutral puts a dot at each whisker's zero-bend tip (on the shell in centre
 mode, the rest tip in root mode) and Arrows draws an arrow from it to the
-current tip, along the tip's way (an arc on the shell).
+current tip, along the tip's way (an arc on the shell). Marks at "roots" moves
+the dots, arrows, trails, grid and surface onto the dome's own surface
+(``dome_shell``, lifted MARK_LIFT_MM): the bend mapped about the dome centre
+as in centre mode, but at the dome's radius. Whiskers: tube, line or off.
+
+Show "plane map": every whisker at once, flat (``dome_pose.PlaneMap``), as a
+pilot inside the ROV sees the arrays: port on the left, starboard on the
+right, each side as seen from inside facing it (its front column toward the
+centre line). The roots are joined by grid lines; each whisker has its
+neutral dot, the arrow to its tip (drag toward the side's front, lift up,
+at the dome's radius per radian, as Marks "roots") and its trail; rings round
+each root mark the grid step. A second GL view (``_GLView(flat=True)``,
+head-on orthographic, pan and zoom only).
 
 Camera (``dome_camera.TrackballCamera``, replacing GLViewWidget's azimuth /
 elevation orbit, which stops at the poles): left drag tumbles freely in every
@@ -72,7 +84,7 @@ from PyQt6.QtCore import QPointF, QRectF, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (QAction, QColor, QFont, QGuiApplication, QKeySequence, QMatrix4x4,
                          QOffscreenSurface, QOpenGLContext, QPainter, QPen, QPolygonF, QTransform)
 from PyQt6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QLabel, QMenu, QSpinBox,
-                             QToolBar, QToolButton, QWidget)
+                             QStackedWidget, QToolBar, QToolButton, QWidget)
 
 
 def _match_pyopengl_platform() -> None:
@@ -113,8 +125,9 @@ from wavi_py.views.dome_camera import (FORWARD, SNAP_KEYS, SNAP_VIEWS, STARBOARD
                                        TrackballCamera, look_rotation)
 from wavi_py.views.whisker_plots import _ElidedLabel    # noqa: E402
 from whisker_link.dome_map import DomeMap                 # noqa: E402
-from whisker_link.dome_pose import (PLACEHOLDER_HOLE_OF, DomeLayout, DomePose, Shell,  # noqa: E402
-                                    TrailBuffer, arrow_segments, centre_pivots, neutral_tips,
+from whisker_link.dome_pose import (PLACEHOLDER_HOLE_OF, DomeLayout, DomePose,  # noqa: E402
+                                    PlaneMap, Shell, TrailBuffer, arrow_segments,
+                                    centre_pivot_tips, centre_pivots, neutral_tips,
                                     nice_grid_step, tip_path)
 
 ASSET_DIR = Path(__file__).resolve().parents[1] / "assets" / "dome"
@@ -133,12 +146,26 @@ _ARROW_COLOR = (0.85, 0.25, 0.08, 1.0)
 _NEUTRAL_COLOR = (0.1, 0.1, 0.12, 0.9)
 _UP_COLOR = (0.1, 0.6, 0.2, 1.0)
 SNAP_ANIM_S = 0.25
+WHISKER_MODES = ("off", "line", "tube")
+MARK_LIFT_MM = 1.5                     # marks on the dome: this far above its surface
+_CENTRE_LINE_COLOR = (0.35, 0.35, 0.45, 0.6)
+_PLANE_GRID_COLOR = (0.30, 0.32, 0.40, 1.0)
 # corner widgets: label, colour per ROV axis
 _AXES = (("Up", UP, QColor(30, 150, 50)), ("Fwd", FORWARD, QColor(40, 90, 220)),
          ("Stbd", STARBOARD, QColor(210, 50, 40)))
 _FACE_LABEL = {"front": "FRONT", "back": "BACK", "top": "TOP", "bottom": "BOTTOM",
                "starboard": "STBD", "port": "PORT"}
 _CMAP = pg.colormap.get("viridis")    # bend magnitude: purple straight .. yellow full
+
+
+def _flat_gl() -> dict:
+    """GL options of the plane map's items: blended, no depth test, so they
+    stack in depth-value order (all of them lie in z = 0)."""
+    from OpenGL import GL
+    opts = dict(gl.GLGraphicsItem.GLOptions["translucent"])
+    opts[GL.GL_DEPTH_TEST] = False
+    return opts
+
 
 # A headlight: lit from the camera, two-sided (the CAD mesh's winding is not
 # consistent everywhere). pyqtgraph's own "shaded" lights from behind-below,
@@ -371,12 +398,15 @@ class AxisTriad(QWidget):
 
 class _GLView(gl.GLViewWidget):
     """GLViewWidget with a trackball camera (free tumble), the view cube and the
-    axis triad, and timed paints."""
+    axis triad, and timed paints. ``flat``: a fixed head-on orthographic view
+    of the z = 0 plane (the plane map) that only pans and zooms; no cube, no
+    triad."""
 
     camera_moved = pyqtSignal()
 
-    def __init__(self, *a, **kw):
+    def __init__(self, *a, flat: bool = False, **kw):
         super().__init__(*a, **kw)
+        self.flat = flat
         self.paint_s = self.paint_cpu_s = 0.0
         self.paints = 0
         self.finish = os.environ.get("WAVI_DOME_FINISH", "") not in ("", "0")
@@ -386,6 +416,11 @@ class _GLView(gl.GLViewWidget):
         self.triad = AxisTriad(self)
         self.camera_moved.connect(self.cube.update)
         self.camera_moved.connect(self.triad.update)
+        if flat:
+            self.cube.hide()
+            self.triad.hide()
+            self.cam.perspective = False
+            self.cam.snap([0.0, 0.0, 1.0], UP)
 
     # ----- camera (GLViewWidget's own state is not used)
     def viewMatrix(self):  # noqa: N802 — pyqtgraph naming
@@ -404,6 +439,8 @@ class _GLView(gl.GLViewWidget):
 
     def orbit(self, azim, elev):
         """pyqtgraph's arrow keys: azimuth / elevation steps, here a tumble."""
+        if self.flat:
+            return
         k = self.cam.deg_per_px
         self.cam.tumble(-azim / k, elev / k)
         self.moved()
@@ -431,7 +468,7 @@ class _GLView(gl.GLViewWidget):
         self._mouse = pos
         btn, mod = ev.buttons(), ev.modifiers()
         if btn == Qt.MouseButton.LeftButton:
-            if mod & Qt.KeyboardModifier.ControlModifier:
+            if self.flat or mod & Qt.KeyboardModifier.ControlModifier:
                 self.cam.pan(dx, dy, self.width())
             elif mod & Qt.KeyboardModifier.ShiftModifier:
                 self.cam.roll(-dx * self.cam.deg_per_px)
@@ -517,7 +554,9 @@ class DomeView(ViewWindow):
         self._cursor = 0
         self._paused = False
         self._gain = 3.0
-        self._tubes = True
+        self._whisker = "tube"                 # WHISKER_MODES
+        self._marks_on_dome = False            # neutral / arrows / trails / grid at the roots
+        self._plane = False                    # the plane map instead of the 3D dome
         self._perspective = False
         self._show_grid = True
         self._show_neutral = True
@@ -537,7 +576,12 @@ class DomeView(ViewWindow):
         self._glw = _GLView()
         self._glw.cam.perspective = self._perspective
         self._glw.setBackgroundColor((245, 245, 248))
-        self.setCentralWidget(self._glw)
+        self._plw = _GLView(flat=True)
+        self._plw.setBackgroundColor((245, 245, 248))
+        self._stack = QStackedWidget()
+        self._stack.addWidget(self._glw)
+        self._stack.addWidget(self._plw)
+        self.setCentralWidget(self._stack)
         self._add_dome(asset_dir / "dome_mesh.npz")
         self._tube_item = gl.GLMeshItem(meshdata=_MeshData(), smooth=True, shader=_HEADLIGHT,
                                         glOptions="opaque")
@@ -581,6 +625,7 @@ class DomeView(ViewWindow):
             lab.adjustSize()
             self._marks[text] = (lab, np.zeros(3))
         self._glw.camera_moved.connect(self._place_marks)
+        self._make_plane_items()
         self._make_hole_labels()
         self._update_marks()
         self._glw.cube.clicked.connect(self.snap_view)
@@ -600,6 +645,7 @@ class DomeView(ViewWindow):
         self.set_target_fps(target_fps)
         self._update_grid()
         self._update_neutral()
+        self._update_plane()
         self._render_pose()
 
     # ----- holes: the asset's (placeholder mapping) or a dome map's positions
@@ -616,7 +662,29 @@ class DomeView(ViewWindow):
                                  hole_channels=m.hole_channels())
         self._tube_faces = tube_faces(len(self.layout_), N_ROOT + N_SHAFT + 1, TUBE_SIDES)
         self.shell = Shell.around(self.layout_, self._shell_radius)
+        self.dome_shell = self._make_dome_shell()
         self.trail = TrailBuffer(len(self.layout_), TRAIL_MAX_S, TRAIL_RATE_HZ)
+        self.plane = PlaneMap.of(self.layout_)
+        self.plane_trail = TrailBuffer(len(self.layout_), TRAIL_MAX_S, TRAIL_RATE_HZ)
+
+    def _make_dome_shell(self) -> Shell:
+        """The shell the marks scribe on in Marks "dome": the dome's surface
+        (its hemisphere + cylinder), lifted ``MARK_LIFT_MM`` off it."""
+        lay = self.layout_
+        r = lay.dome_radius or float(np.mean(np.linalg.norm(lay.root - centre_pivots(lay),
+                                                            axis=1)))
+        return Shell(lay.center, r + MARK_LIFT_MM)
+
+    def mark_shell(self) -> Optional[Shell]:
+        """Where the neutral dots, arrows and trails go: the dome (Marks "dome"),
+        the scribe shell (centre pivot), or None: the physical tips (root pivot)."""
+        if self._marks_on_dome:
+            return self.dome_shell
+        return self.shell if self._centre_pivot else None
+
+    def grid_shell(self) -> Shell:
+        """The shell the grid and the surface are drawn on."""
+        return self.dome_shell if self._marks_on_dome else self.shell
 
     def hole_texts(self) -> list[str]:
         """The label of each hole: the map's "LFU (W7)", or the placeholder's whisker."""
@@ -626,16 +694,18 @@ class DomeView(ViewWindow):
         return [f"W{w_of[h]}?" if h in w_of else "" for h in range(len(self.layout_))]
 
     def _make_hole_labels(self) -> None:
-        for lab in self._hole_labels:
+        """Each hole's label, once on the 3D view and once on the plane map."""
+        for lab in self._hole_labels + getattr(self, "_plane_labels", []):
             lab.deleteLater()
-        self._hole_labels = []
+        self._hole_labels, self._plane_labels = [], []
         for text in self.hole_texts():
-            lab = QLabel(text, self._glw)
-            lab.setStyleSheet("color: #303040; font-size: 11px;"
-                              " background: rgba(255, 255, 255, 150);")
-            lab.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-            lab.adjustSize()
-            self._hole_labels.append(lab)
+            for parent, labs in ((self._glw, self._hole_labels), (self._plw, self._plane_labels)):
+                lab = QLabel(text, parent)
+                lab.setStyleSheet("color: #303040; font-size: 11px;"
+                                  " background: rgba(255, 255, 255, 150);")
+                lab.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+                lab.adjustSize()
+                labs.append(lab)
 
     def set_dome_map(self, dome_map: Optional[DomeMap]) -> None:
         """Use this map's positions and calibration (None: the placeholder
@@ -648,11 +718,13 @@ class DomeView(ViewWindow):
         self._make_hole_labels()
         self._shell_changed()
         self._update_neutral()
+        self._update_plane()
         self._render_pose()
 
     def set_labels_visible(self, on: bool) -> None:
         self._show_labels = bool(on)
         self._place_marks()
+        self._place_plane_marks()
 
     # ----- scene
     def _add_dome(self, path: Path) -> None:
@@ -668,15 +740,24 @@ class DomeView(ViewWindow):
         self._dome_reach = float(np.linalg.norm(V - self.layout_.center, axis=1).max())
 
     def reset_camera(self) -> None:
-        """The default 3/4 view (key 0): centred, the whole shell in view."""
+        """The default 3/4 view (key 0): centred, the whole shell in view (the
+        dome, with the marks at the roots and no whiskers); in the plane map,
+        the whole map."""
+        if self._plane:
+            self.reset_plane_camera()
+            return
         cam = self._glw.cam
-        cam.center = self.layout_.center - [0.0, 0.0, 0.2 * self.shell.radius]
-        cam.distance = 4.4 * self.shell.radius
+        dome = self._marks_on_dome and self._whisker == "off"
+        R = 1.6 * self.dome_shell.radius if dome else self.shell.radius
+        cam.center = self.layout_.center - [0.0, 0.0, 0.2 * R]
+        cam.distance = 4.4 * R
         cam.snap_to("home")
         self._glw.moved()
 
     def snap_view(self, name: str) -> None:
         """Turn (animated) to one of the ``dome_camera.SNAP_VIEWS``, or "home"."""
+        if self._plane:
+            return
         self._glw.cam.snap_to(name, animate_s=SNAP_ANIM_S, now=time.monotonic())
         self._glw.moved()
 
@@ -709,9 +790,10 @@ class DomeView(ViewWindow):
             # just outside each neutral tip, away from the dome
             out = neutral - self.layout_.center
             out /= np.maximum(np.linalg.norm(out, axis=1, keepdims=True), 1e-9)
-            at = neutral + 0.08 * self.shell.radius * out
-            for lab, p in zip(self._hole_labels, at):
-                if self._show_labels:
+            at = neutral + max(0.08 * self.grid_shell().radius, 6.0) * out
+            facing = self._glw.cam.to_view(out)[:, 2] > -0.15      # not on the far side
+            for lab, p, f in zip(self._hole_labels, at, facing):
+                if self._show_labels and f:
                     marks.append((lab, p))
                 else:
                     lab.setVisible(False)
@@ -735,6 +817,17 @@ class DomeView(ViewWindow):
                                                        60.0 if on else 0.0))
         tb.addWidget(self._drift)
         tb.addSeparator()
+        tb.addWidget(QLabel(" Show "))
+        self._scene_box = QComboBox()
+        self._scene_box.addItems(["dome 3D", "plane map"])
+        self._scene_box.setToolTip(
+            "dome 3D: the whiskers on the dome.\nplane map: every whisker at once, flat, as a"
+            " pilot inside the ROV sees them: port array left, starboard right, each side's"
+            " front column toward the centre line; the roots joined by grid lines, and per"
+            " whisker its neutral dot, the arrow to its tip and the trail (drag = toward the"
+            " side's front, lift = up). Pan with a left drag, zoom with the wheel, 0 resets.")
+        self._scene_box.currentIndexChanged.connect(lambda i: self.set_plane(i == 1))
+        tb.addWidget(self._scene_box)
         tb.addWidget(QLabel(" Gain "))
         self._gain_box = QDoubleSpinBox()
         self._gain_box.setRange(0.1, 1000.0)       # high: still-whisker noise is ~0.03 deg
@@ -744,11 +837,14 @@ class DomeView(ViewWindow):
         self._gain_box.setToolTip("Display exaggeration of the bend angles")
         self._gain_box.valueChanged.connect(self._set_gain)
         tb.addWidget(self._gain_box)
-        self._tubes_box = QCheckBox("Tubes")
-        self._tubes_box.setChecked(True)
-        self._tubes_box.setToolTip("Shaded tubes, or lines (cheaper)")
-        self._tubes_box.toggled.connect(self.set_tubes)
-        tb.addWidget(self._tubes_box)
+        tb.addWidget(QLabel(" Whiskers "))
+        self._whisker_box = QComboBox()
+        self._whisker_box.addItems(WHISKER_MODES)
+        self._whisker_box.setCurrentText(self._whisker)
+        self._whisker_box.setToolTip("Draw the whiskers as shaded tubes, lines (cheaper), or"
+                                     " not at all (only the marks)")
+        self._whisker_box.currentTextChanged.connect(self.set_whisker_mode)
+        tb.addWidget(self._whisker_box)
         self._persp_box = QCheckBox("Perspective")
         self._persp_box.setChecked(self._perspective)
         self._persp_box.setToolTip("Perspective projection (fov 60 deg); off: orthographic")
@@ -762,7 +858,7 @@ class DomeView(ViewWindow):
         self._fps_box.setToolTip("Target render rate (frames per second)")
         self._fps_box.valueChanged.connect(self.set_target_fps)
         tb.addWidget(self._fps_box)
-        views = QToolButton()
+        views = self._views_button = QToolButton()
         views.setText("View")
         views.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         menu = QMenu(views)
@@ -816,6 +912,16 @@ class DomeView(ViewWindow):
                                     " without one, the placeholder hole's whisker, marked ?)")
         self._labels_box.toggled.connect(self.set_labels_visible)
         tb.addWidget(self._labels_box)
+        tb.addWidget(QLabel(" Marks at "))
+        self._marks_box = QComboBox()
+        self._marks_box.addItems(["tips", "roots"])
+        self._marks_box.setToolTip(
+            "tips: neutral dots, arrows, trails and the grid at the whisker tips (on the shell"
+            " in centre mode).\nroots: all of them on the dome's surface instead, at the roots"
+            " (the bend mapped about the dome centre, a bend of phi = phi of arc on the dome);"
+            " the whiskers are drawn as set (Whiskers off to see the marks under them)")
+        self._marks_box.currentIndexChanged.connect(lambda i: self.set_marks_on_dome(i == 1))
+        tb.addWidget(self._marks_box)
         tb.addWidget(QLabel(" Pivot "))
         self._pivot_box = QComboBox()
         self._pivot_box.addItems(["centre", "root"])
@@ -860,34 +966,52 @@ class DomeView(ViewWindow):
 
     # ----- shell
     def grid_step_bend_deg(self) -> float:
-        return self._grid_bend_deg or nice_grid_step(self._gain)
+        """The grid step in degrees of bend: set, or auto (about 12 deg on the
+        shell; on the plane map about a fifth of the root spacing)."""
+        if self._grid_bend_deg:
+            return self._grid_bend_deg
+        if self._plane:
+            target = math.degrees(0.2 * self.plane.spacing / self._plane_radius())
+            return nice_grid_step(self._gain, target)
+        return nice_grid_step(self._gain)
 
     def _update_grid(self) -> None:
         bend = self.grid_step_bend_deg()
         shell_deg = max(bend * self._gain, 1.0)        # Shell.grid's floor
-        seg = self.shell.grid(np.radians(shell_deg)).reshape(-1, 3)
+        gs = self.grid_shell()
+        seg = gs.grid(np.radians(shell_deg)).reshape(-1, 3)
         self._grid_item.setData(pos=seg.astype(np.float32), color=_GRID_COLOR)
-        mm = self.shell.radius * np.radians(shell_deg)
         auto = "" if self._grid_bend_deg else "auto "
-        self._grid_label.setText(f" {auto}{bend:g} deg bend = {shell_deg:g} deg / {mm:.0f} mm"
-                                 f" on the shell (R {self.shell.radius:.0f}) ")
+        if self._plane:
+            mm = self.dome_shell.radius * np.radians(bend * self._gain)
+            where = f"{mm:.1f} mm on the map"
+        else:
+            mm = gs.radius * np.radians(shell_deg)
+            on = "the dome" if self._marks_on_dome else "the shell"
+            where = f"{shell_deg:g} deg / {mm:.0f} mm on {on} (R {gs.radius:.0f})"
+        self._grid_label.setText(f" {auto}{bend:g} deg bend = {where} ")
         self._grid_item.setVisible(self._show_grid)
+        self._update_plane_rings()
 
     def _shell_changed(self) -> None:
         """The shell's radius or cylinder length changed: grid, surface, marks."""
-        self._surface_item.setMeshData(meshdata=shell_surface(self.shell))
+        self._surface_item.setMeshData(meshdata=shell_surface(self.grid_shell()))
         self._update_grid()
         self._update_marks()
 
     def _restart_trail(self) -> None:
-        """Gain / pivot / radius changed: the old trail and the cylinder's growth go."""
+        """Gain / pivot / radius / marks changed: the old trails and the
+        cylinders' growth go."""
         self.trail.clear()
-        if self.shell.uncover():
+        self.plane_trail.clear()
+        grown = [sh.uncover() for sh in (self.shell, self.dome_shell)]
+        if any(grown):
             self._shell_changed()
 
     def set_grid_visible(self, on: bool) -> None:
         self._show_grid = bool(on)
         self._grid_item.setVisible(self._show_grid)
+        self._pl_rings.setVisible(self._show_grid)
 
     def set_surface_visible(self, on: bool) -> None:
         self._surface_item.setVisible(bool(on))
@@ -895,10 +1019,12 @@ class DomeView(ViewWindow):
     def set_neutral_visible(self, on: bool) -> None:
         self._show_neutral = bool(on)
         self._neutral_item.setVisible(self._show_neutral)
+        self._pl_neutral.setVisible(self._show_neutral)
 
     def set_arrows_visible(self, on: bool) -> None:
         self._show_arrows = bool(on)
         self._arrow_item.setVisible(self._show_arrows)
+        self._pl_arrow.setVisible(self._show_arrows)
         self._render_pose()
 
     def set_centre_pivot(self, on: bool) -> None:
@@ -907,14 +1033,24 @@ class DomeView(ViewWindow):
         self._update_neutral()
         self._render_pose()
 
+    def set_marks_on_dome(self, on: bool) -> None:
+        """Marks (neutral dots, arrows, trails, grid, surface) at the roots, on
+        the dome's surface, or (False) at the tips."""
+        self._marks_on_dome = bool(on)
+        self._restart_trail()
+        self._shell_changed()
+        self._update_neutral()
+        self._render_pose()
+
     def _update_neutral(self) -> None:
-        self._neutral = neutral_tips(self.layout_, self.shell if self._centre_pivot else None)
+        self._neutral = neutral_tips(self.layout_, self.mark_shell())
         self._neutral_item.setData(pos=self._neutral.astype(np.float32))
         self._place_marks()
 
     def set_trail_s(self, secs: float) -> None:
         self._trail_s = float(secs)
         self._trail_item.setVisible(self._trail_s > 0)
+        self._pl_trail.setVisible(self._trail_s > 0)
 
     def set_grid_step(self, bend_deg: float) -> None:
         self._grid_bend_deg = float(bend_deg)
@@ -924,9 +1060,141 @@ class DomeView(ViewWindow):
         self._shell_radius = float(r)
         self.shell = Shell.around(self.layout_, self._shell_radius)
         self.trail.clear()
+        self.plane_trail.clear()
         self._shell_changed()
         self._update_neutral()
         self._render_pose()
+
+    # ----- plane map: every whisker at once, flat, from the pilot's seat
+    def _make_plane_items(self) -> None:
+        plw = self._plw
+        self._pl_grid = gl.GLLinePlotItem(mode="lines", width=1.5, antialias=True,
+                                          color=_PLANE_GRID_COLOR, glOptions=_flat_gl())
+        self._pl_rings = gl.GLLinePlotItem(mode="lines", width=1.0, antialias=True,
+                                           glOptions=_flat_gl())
+        self._pl_centre = gl.GLLinePlotItem(mode="lines", width=1.0, antialias=True,
+                                            color=_CENTRE_LINE_COLOR, glOptions=_flat_gl())
+        self._pl_trail = gl.GLLinePlotItem(mode="lines", width=2.0, antialias=True,
+                                           glOptions=_flat_gl())
+        self._pl_neutral = gl.GLScatterPlotItem(size=8.0, color=_NEUTRAL_COLOR, pxMode=True,
+                                                glOptions=_flat_gl())
+        self._pl_arrow = gl.GLLinePlotItem(mode="lines", width=2.5, antialias=True,
+                                           glOptions=_flat_gl())
+        for k, it in enumerate((self._pl_rings, self._pl_centre, self._pl_grid, self._pl_trail,
+                                self._pl_neutral, self._pl_arrow)):
+            it.setDepthValue(k)
+            plw.addItem(it)
+        self._pl_sides: list[tuple[QLabel, np.ndarray]] = []
+        for text in ("PORT   fwd \u2192", "\u2190 fwd   STBD"):
+            lab = QLabel(text, plw)
+            lab.setStyleSheet("color: #303040; font-weight: bold; font-size: 13px;"
+                              " background: transparent;")
+            lab.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            lab.adjustSize()
+            self._pl_sides.append((lab, np.zeros(3)))
+        plw.camera_moved.connect(self._place_plane_marks)
+
+    def _plane_radius(self) -> float:
+        """mm on the map per radian of (gained) bend: the dome's radius, so
+        the map shows what Marks "roots" draws on the dome."""
+        return self.dome_shell.radius
+
+    def _update_plane(self) -> None:
+        """The map's static part (root grid, centre line, side labels) and camera."""
+        pm = self.plane
+        z = np.zeros((len(pm.segments), 2, 1))
+        self._pl_grid.setData(pos=np.concatenate([pm.segments, z], axis=2)
+                              .reshape(-1, 3).astype(np.float32))
+        y0, y1 = pm.xy[:, 1].min() - 0.8 * pm.spacing, pm.xy[:, 1].max() + 0.8 * pm.spacing
+        self._pl_centre.setData(pos=np.array([[0, y0, 0], [0, y1, 0]], np.float32))
+        x = np.abs(pm.xy[:, 0]).max()
+        for k, sgn in enumerate((-1, 1)):
+            lab = self._pl_sides[k][0]
+            self._pl_sides[k] = (lab, np.array([sgn * (pm.gap + x) / 2 + sgn * 0.5 * pm.gap,
+                                                y1, 0.0]))
+        self._pl_neutral.setData(pos=np.c_[pm.xy, np.zeros(len(pm.xy))].astype(np.float32))
+        self._update_plane_rings()
+        self.reset_plane_camera()
+
+    def _update_plane_rings(self) -> None:
+        """Rings round each root every grid step of bend, those within half
+        the root spacing (at most 4; none for a step wider than that): the
+        map's scale."""
+        if not hasattr(self, "_pl_rings"):
+            return
+        pm = self.plane
+        step = self._plane_radius() * math.radians(self.grid_step_bend_deg() * self._gain)
+        n = int(np.clip((0.5 * pm.spacing + 1e-6) // max(step, 1e-9), 0, 4))
+        a = np.linspace(0, 2 * np.pi, 49)
+        circ = np.c_[np.cos(a), np.sin(a)]
+        rings = [xy + k * step * circ for xy in pm.xy for k in range(1, n + 1)]
+        seg = (np.stack([np.stack([r[:-1], r[1:]], axis=1) for r in rings]).reshape(-1, 2)
+               if rings else np.zeros((0, 2)))
+        self._pl_rings.setData(pos=np.c_[seg, np.zeros(len(seg))].astype(np.float32),
+                               color=_GRID_COLOR)
+        self._pl_rings.setVisible(self._show_grid)
+
+    def reset_plane_camera(self) -> None:
+        """The whole map in view, head on (key 0 in the plane map)."""
+        pm, cam = self.plane, self._plw.cam
+        ext = np.abs(pm.xy).max(axis=0) + pm.spacing
+        aspect = self._plw.width() / max(self._plw.height(), 1)
+        half = max(ext[0], ext[1] * aspect)
+        cam.center = np.zeros(3)
+        cam.distance = half / math.tan(math.radians(cam.fov_deg) / 2)
+        cam.set_bounds(np.zeros(3), float(np.hypot(*ext)) + 10 * pm.spacing)
+        self._plw.moved()
+
+    def _place_plane_marks(self) -> None:
+        marks = list(self._pl_sides)
+        for lab, xy in zip(getattr(self, "_plane_labels", []), self.plane.xy):
+            if self._show_labels:                       # just under the root
+                marks.append((lab, np.r_[xy[0], xy[1] - 0.3 * self.plane.spacing, 0]))
+            else:
+                lab.setVisible(False)
+        for lab, at in marks:
+            xy = self._plw.project(at)
+            lab.setVisible(xy is not None)
+            if xy is not None:
+                lab.move(int(xy[0] - lab.width() / 2), int(xy[1] - lab.height() / 2))
+
+    def set_plane(self, on: bool) -> None:
+        """Show the plane map (True) or the 3D dome."""
+        self._plane = bool(on)
+        if self._scene_box.currentIndex() != int(self._plane):
+            self._scene_box.setCurrentIndex(int(self._plane))
+        self._stack.setCurrentWidget(self._plw if self._plane else self._glw)
+        for w in (self._whisker_box, self._persp_box, self._views_button, self._surface_box,
+                  self._marks_box, self._pivot_box, self._radius_box):
+            w.setEnabled(not self._plane)
+        self._restart_trail()
+        self._update_grid()
+        self.stats.reset()
+        if self._plane:
+            self.reset_plane_camera()
+        self._render_pose()
+
+    def _render_plane(self, th: np.ndarray, mag: np.ndarray, now: float) -> None:
+        """The map's live part: arrows from the roots and the trails; ``th``
+        (H, 2) rad already times the gain."""
+        pm = self.plane
+        tips = pm.tips(self.layout_, th, self._plane_radius())
+        tip3 = np.c_[tips, np.zeros(len(tips))]
+        root3 = np.c_[pm.xy, np.zeros(len(pm.xy))]
+        if self._show_arrows:
+            path = root3[:, None, :] + np.linspace(0, 1, 2)[None, :, None] * (tip3 - root3)[:, None]
+            normal = np.tile([0.0, 0.0, 1.0], (len(tips), 1))
+            seg = arrow_segments(path, normal, head_mm=max(3.0, 0.12 * pm.spacing))
+            col = np.tile(np.array(_ARROW_COLOR, np.float32), (len(seg), seg.shape[1] * 2, 1))
+            col[~np.isfinite(mag), :, 3] = 0.0
+            self._pl_arrow.setData(pos=seg.reshape(-1, 3).astype(np.float32),
+                                   color=col.reshape(-1, 4))
+        if self._trail_s > 0:
+            self.plane_trail.push(now, np.where(np.isfinite(mag)[:, None], tip3, np.nan), mag)
+            tp, tm, ta = self.plane_trail.segments(now, self._trail_s)
+            tc = self._colors(tm)
+            tc[:, 3] = ta
+            self._pl_trail.setData(pos=tp.astype(np.float32), color=tc.astype(np.float32))
 
     # ----- control (main window)
     def set_bus(self, bus, fs: Optional[float] = None) -> None:
@@ -959,11 +1227,20 @@ class DomeView(ViewWindow):
         self._update_grid()
         self._render_pose()
 
-    def set_tubes(self, on: bool) -> None:
-        self._tubes = bool(on)
-        self._tube_item.setVisible(self._tubes)
-        self._line_item.setVisible(not self._tubes)
+    def set_whisker_mode(self, mode: str) -> None:
+        """Whiskers drawn as "tube", "line" or "off" (only the marks)."""
+        if mode not in WHISKER_MODES:
+            raise ValueError(f"whisker mode {mode!r}: one of {WHISKER_MODES}")
+        self._whisker = mode
+        if self._whisker_box.currentText() != mode:
+            self._whisker_box.setCurrentText(mode)
+        self._tube_item.setVisible(mode == "tube")
+        self._line_item.setVisible(mode == "line")
         self._render_pose()
+
+    def set_tubes(self, on: bool) -> None:
+        """Tubes (True) or lines."""
+        self.set_whisker_mode("tube" if on else "line")
 
     def set_perspective(self, on: bool) -> None:
         """Perspective or orthographic; the camera's turn, centre and zoom stay."""
@@ -986,7 +1263,7 @@ class DomeView(ViewWindow):
             return
         if self._glw.cam.step(time.monotonic()):         # a snap turning
             self._glw.moved()
-        roll = self.stats.roll(self._glw)
+        roll = self.stats.roll(self._plw if self._plane else self._glw)
         if roll:
             self._stats_label.setText(
                 f"{roll['fps']:.0f} fps | pose {roll['pose_ms']:.2f} ms, upload "
@@ -1025,11 +1302,12 @@ class DomeView(ViewWindow):
     def _arrows(self, mag: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """(segment points, colours) of the neutral -> tip arrows, float32;
         transparent for a whisker without data."""
-        shell = self.shell if self._centre_pivot else None
+        shell = self.mark_shell()
         th = self.pose.angles() * self._gain
         path = tip_path(self.layout_, th, shell, ARROW_PTS)
-        pivot = centre_pivots(self.layout_) if self._centre_pivot else self.layout_.root
-        seg = arrow_segments(path, path[:, -1] - pivot, head_mm=max(6.0, 0.05 * self.shell.radius))
+        pivot = centre_pivots(self.layout_) if shell is not None else self.layout_.root
+        head = max(4.0 if self._marks_on_dome else 6.0, 0.05 * self.grid_shell().radius)
+        seg = arrow_segments(path, path[:, -1] - pivot, head_mm=head)
         n_per = seg.shape[1] * 2
         col = np.tile(np.array(_ARROW_COLOR, np.float32), (len(seg), n_per, 1))
         col[~np.isfinite(mag), :, 3] = 0.0
@@ -1039,22 +1317,37 @@ class DomeView(ViewWindow):
         """Draw the latest pose; ``now`` (s, monotonic by default) stamps the trail."""
         t0 = time.perf_counter() if t0 is None else t0
         now = time.monotonic() if now is None else now
+        if self._plane:
+            th = self.pose.angles() * self._gain
+            t1 = time.perf_counter()
+            self._render_plane(th, np.hypot(th[:, 0], th[:, 1]), now)
+            self._count_frame(t0, t1)
+            self._plw.update()
+            return
         pts, mag = self.pose.shape(self._gain, self.shell if self._centre_pivot else None,
                                    n_root=N_ROOT, n_shaft=N_SHAFT)
         col = self._colors(mag)                                  # (H, 4)
         n_pts = pts.shape[1]
         if self._centre_pivot and self.shell.cover(pts[:, -1]):
             self._shell_changed()                    # the cylinder grew under a tip
+        if self._marks_on_dome:                      # the marks' tips: on the dome
+            tips = centre_pivot_tips(self.layout_, self.dome_shell,
+                                     self.pose.angles() * self._gain)
+            if self.dome_shell.cover(tips):
+                self._shell_changed()
+        else:
+            tips = pts[:, -1]
         arrows = self._arrows(mag) if self._show_arrows else None
         trail = None
         if self._trail_s > 0:
-            tips = np.where(np.isfinite(mag)[:, None], pts[:, -1], np.nan)
-            self.trail.push(now, tips, mag)
+            self.trail.push(now, np.where(np.isfinite(mag)[:, None], tips, np.nan), mag)
             tp, tm, ta = self.trail.segments(now, self._trail_s)
             tc = self._colors(tm)
             tc[:, 3] = ta
             trail = (tp, tc)
-        if self._tubes:
+        if self._whisker == "off":
+            t1 = time.perf_counter()
+        elif self._whisker == "tube":
             V, N = tube_vertices(pts, TUBE_RADIUS_MM, TUBE_SIDES, self._binormals(pts))
             C = np.repeat(col, n_pts * TUBE_SIDES, axis=0)
             t1 = time.perf_counter()
@@ -1072,8 +1365,11 @@ class DomeView(ViewWindow):
                                      color=trail[1].astype(np.float32))
         if arrows is not None:
             self._arrow_item.setData(pos=arrows[0], color=arrows[1])
-        t2 = time.perf_counter()
+        self._count_frame(t0, t1)
+        self._glw.update()
+
+    def _count_frame(self, t0: float, t1: float) -> None:
+        """Frame stats: pose from ``t0`` to ``t1``, upload from ``t1`` to now."""
         self.stats.frames += 1
         self.stats.pose_s += t1 - t0
-        self.stats.upload_s += t2 - t1
-        self._glw.update()
+        self.stats.upload_s += time.perf_counter() - t1

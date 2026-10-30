@@ -280,3 +280,100 @@ def test_dome_view_with_a_dome_map(app):
     finally:
         v.set_bus(None)
         v.close()
+
+
+def test_dome_view_whisker_modes_and_marks_at_roots(app):
+    """Whiskers off / line / tube; Marks at roots puts the neutral dots,
+    arrows, trails and grid on the dome's surface."""
+    from wavi_py.views import dome_view as dvm
+
+    v = dvm.DomeView(fs=250.0)
+    try:
+        base = np.full((40, NCH), 250.0)
+        v.pose.feed(base, 250.0)
+        hole = v.pose.hole_of[1]
+        v._whisker_box.setCurrentText("off")
+        assert not v._tube_item.visible() and not v._line_item.visible()
+        v._marks_box.setCurrentText("roots")
+        ds = v.dome_shell
+        assert v.mark_shell() is ds and v.grid_shell() is ds
+        assert ds.radius == pytest.approx(v.layout_.dome_radius + dvm.MARK_LIFT_MM)
+        assert np.abs(ds.distance(v._neutral_item.pos)).max() < 1e-3
+        assert np.abs(ds.distance(v._grid_item.pos)).max() < 1e-3
+        assert np.linalg.norm(v._neutral - v.layout_.root, axis=1).max() < 10   # at the roots
+        assert "on the dome" in v._grid_label.text()
+        for k in range(6):
+            blk = base[:5].copy()
+            blk[:, CHANNEL_NAMES.index("W1_A")] += 3.0 * k
+            v.pose.feed(blk, 250.0)
+            v._render_pose(now=k / 60)
+        seg = v._arrow_item.pos.reshape(len(v.layout_), -1, 2, 3)
+        assert np.allclose(seg[hole, 0, 0], v._neutral[hole], atol=1e-3)
+        assert np.abs(ds.distance(seg[hole, :-2].reshape(-1, 3))).max() < 1e-3
+        trail = v._trail_item.pos.reshape(len(v.layout_), -1, 2, 3)[hole]
+        assert np.abs(ds.distance(trail.reshape(-1, 3))).max() < 1e-3
+        assert np.linalg.norm(trail[-1, 1] - trail[0, 0]) > 5
+        v._whisker_box.setCurrentText("line")
+        assert v._line_item.visible() and not v._tube_item.visible()
+        v._marks_box.setCurrentText("tips")
+        assert v.mark_shell() is v.shell
+        v.set_whisker_mode("tube")
+        assert v._whisker_box.currentText() == "tube" and v._tube_item.visible()
+        with pytest.raises(ValueError):
+            v.set_whisker_mode("ribbon")
+    finally:
+        v.close()
+
+
+def test_dome_view_plane_map(app):
+    """The plane map: port left, starboard right, front columns toward the
+    centre line; a forward bend points toward the centre, lift up points up."""
+    from wavi_py.views import dome_view as dvm
+    from whisker_link.dome_map import DEFAULT_MAP, DomeMap
+
+    m = DomeMap.load(DEFAULT_MAP)
+    v = dvm.DomeView(fs=250.0, dome_map=m)
+    try:
+        v._plw.resize(800, 600)
+        key = [p.key for p in m.positions]
+        xy = dict(zip(key, v.plane.xy))
+        assert xy["LFM"][0] < 0 < xy["RFM"][0]                       # port on the left
+        assert xy["LBM"][0] < xy["LFM"][0] and xy["RFM"][0] < xy["RBM"][0]
+        assert xy["LFU"][1] > xy["LFM"][1] > xy["LFL"][1]
+        assert len(v.plane.segments) == 14                         # 2 x (2 x 2 + 3 x 1)
+        v._scene_box.setCurrentIndex(1)
+        assert v._plane and v._stack.currentWidget() is v._plw
+        assert not v._marks_box.isEnabled() and not v._whisker_box.isEnabled()
+        assert "on the map" in v._grid_label.text()
+        base = np.full((40, NCH), 250.0)
+        v.pose.feed(base, 250.0)
+        bend = base[:5].copy()
+        bend[:, CHANNEL_NAMES.index("W6_A")] += 5.0                # LFM drag +
+        bend[:, CHANNEL_NAMES.index("W11_A")] += 5.0               # RFM drag +
+        bend[:, CHANNEL_NAMES.index("W12_B")] += 5.0               # RFU lift +
+        # LFU: lift gauge flipped on port, so a - reading is lift +
+        bend[:, CHANNEL_NAMES.index("W7_B")] -= 5.0
+        v.pose.feed(bend, 250.0)
+        v._render_pose(now=0.0)
+        h = len(v.layout_)
+        seg = v._pl_arrow.pos.reshape(h, -1, 2, 3)
+        d = {k: seg[i, -1, 0, :2] - seg[i, 0, 0, :2] for i, k in enumerate(key)}
+        assert d["LFM"][0] > 0 and d["RFM"][0] < 0                 # forward = toward the centre
+        assert abs(d["LFM"][1]) < 1e-6
+        assert d["RFU"][1] > 0 and d["LFU"][1] > 0 and abs(d["RFU"][0]) < 1e-6
+        assert np.allclose(seg[:, 0, 0, :2], v.plane.xy)
+        assert np.allclose(v._pl_neutral.pos[:, :2], v.plane.xy)
+        assert v._pl_rings.pos.shape[0] > 0 and np.allclose(v._pl_grid.pos[:, 2], 0)
+        lab = v._plane_labels[key.index("LFU")]
+        assert lab.text() == "LFU (W7)"
+        # the whole map is in view
+        for p in v.plane.xy:
+            x, y = v._plw.project(np.r_[p, 0])
+            assert 0 < x < 800 and 0 < y < 600
+        v._render_pose(now=0.1)
+        assert len(v._pl_trail.pos) > 0
+        v._scene_box.setCurrentIndex(0)
+        assert not v._plane and v._marks_box.isEnabled()
+        v._render_pose()
+    finally:
+        v.close()
