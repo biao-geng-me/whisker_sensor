@@ -298,3 +298,18 @@ def test_sigusr1_dumps_stacks_and_keeps_running(tmp_path):
         out = _stop(srv)
     assert srv.returncode == 0, out
     assert "Thread 0x" in out and "_status_loop" in out, out
+
+
+def test_garbled_text_is_no_sign_of_life():
+    """Binary noise that the decoder passes on as Text (it splits at stray
+    newlines) must not hold off esp32_hung or the port reopen."""
+    import daq_server as ds
+    from whisker_link import esp32_frame as ef
+    src = ds.Esp32Source("/dev/null", 921600, ds.Hub("/nonexistent"), ds.RateCounter())
+    src.hub.publish = lambda ev: None
+    noise = ef.Text("�FhbE�~D�Zp��\x0cR�J�0")
+    assert ds._garbled(noise) and not ds._garbled(ef.Text("[halt #3] recovered\tok"))
+    src._handle(noise, 100.0)
+    assert src.faults._last_rx < 0
+    src._handle(ef.Text("whisker_daq boot"), 101.0)
+    assert src.faults._last_rx == 101.0

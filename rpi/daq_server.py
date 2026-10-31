@@ -288,6 +288,13 @@ class RateCounter:
             return out
 
 
+def _garbled(ev) -> bool:
+    """A ``Text`` "line" that is really binary noise split at a stray newline.
+    The firmware prints plain ASCII, so these are no sign of life."""
+    return isinstance(ev, ef.Text) and any(
+        c == "\ufffd" or (ord(c) < 32 and c != "\t") for c in ev.text)
+
+
 class Esp32Source:
     """Reads binary frames from the ESP32; reopens the port if it goes away."""
 
@@ -439,7 +446,8 @@ class Esp32Source:
             now = time.monotonic()
             if data:
                 for ev in self.decoder.feed(data):
-                    self.last_event_mono = now
+                    if not _garbled(ev):
+                        self.last_event_mono = now
                     self._handle(ev, now)
             quiet = now - max(self.last_event_mono, self._opened_mono)
             if quiet > self.REOPEN_S:
@@ -490,6 +498,8 @@ class Esp32Source:
                               "raw": ev.raw})
         elif isinstance(ev, ef.Text):
             self.hub.publish({"k": "txt", "t": now, "src": "esp32", "msg": ev.text})
+            if _garbled(ev):
+                return                             # noise must not count as a heartbeat
             with self._fault_lock:
                 self.faults.on_text(ev.text, now)
         elif isinstance(ev, ef.Info):
