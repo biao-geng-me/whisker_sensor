@@ -46,6 +46,7 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -248,6 +249,7 @@ class MainWindow(QMainWindow):
         self._rov_duration = False               # the server stops ours on its own
         self._foreign_rec: Optional[dict] = None  # status["rec"] of one not ours
         self._rec_cmd: Optional[dict] = None     # rec_start / rec_stop sent, ack pending
+        self._flag_cmd: Optional[dict] = None    # rec_flag sent, ack pending
         self._who = f"wavi_py@{socket.gethostname()}"
         self._t0_unix: Optional[float] = None    # stream start in unix time
         # live despike: the newest `pending` samples are provisional (raw) until judged,
@@ -707,6 +709,15 @@ class MainWindow(QMainWindow):
         h.addWidget(self._auto_stop_chk)
         h.addWidget(self._auto_stop_spin)
         h.addWidget(self._record_btn)
+
+        # the vehicle's recording index (trials.jsonl on the Pi): flag the newest
+        # recording bad, or good again; the file stays, convert skips bad ones
+        self._flag_btn = QPushButton("Mark bad")
+        self._flag_btn.clicked.connect(self._on_flag_clicked)
+        self._flag_btn.setEnabled(False)
+        self._flag_btn.setMinimumWidth(
+            self._flag_btn.fontMetrics().horizontalAdvance("Unmark bad") + 24)
+        h.addWidget(self._flag_btn)
         return box
 
     def _build_status_row(self) -> QGroupBox:
@@ -883,7 +894,7 @@ class MainWindow(QMainWindow):
         self._fault_marks_seen = 0
         self._beat_uptime, self._reboot_note = None, ""
         self._set_fault_state({})
-        self._foreign_rec, self._rec_cmd = None, None
+        self._foreign_rec, self._rec_cmd, self._flag_cmd = None, None, None
         if client.is_event_stream and not self._replaying:
             self._keeper.connected()
         self._show_mode_note()
@@ -926,7 +937,7 @@ class MainWindow(QMainWindow):
             self._stop_recording()
         # one not ours keeps running (the status line said so); a rec_start still
         # waiting for its ack is left to the server (the next connect adopts it)
-        self._foreign_rec, self._rec_cmd = None, None
+        self._foreign_rec, self._rec_cmd, self._flag_cmd = None, None, None
         self._timer.stop()
         if self._client is not None:
             self._client.stop()
@@ -1560,7 +1571,88 @@ class MainWindow(QMainWindow):
             self._foreign_rec = foreign
             self._update_record_button()
 
+    def _flag_target(self) -> Optional[tuple[str, bool]]:
+        """(the newest vehicle recording's file name, flagged bad) from the status:
+        the running one, else the last; None if there is none (or no vehicle)."""
+        if not self._vehicle_live:
+            return None
+        rec = self._last_status_rec.get("rec") or {}
+        if rec.get("on") and rec.get("path"):
+            return os.path.basename(rec["path"]), rec.get("keep", True) is False
+        last = rec.get("last") or {}
+        if last.get("path"):
+            return os.path.basename(last["path"]), last.get("keep", True) is False
+        return None
+
+    def _update_flag_button(self) -> None:
+        b, target = self._flag_btn, self._flag_target()
+        if target is None:
+            b.setText("Mark bad")
+            b.setEnabled(False)
+            b.setToolTip("Flag the newest ROV recording bad in the Pi's index (trials.jsonl)")
+            return
+        name, bad = target
+        b.setText("Unmark bad" if bad else "Mark bad")
+        b.setEnabled(self._flag_cmd is None)
+        b.setToolTip(f"{name} is flagged bad; click to keep it again" if bad else
+                     f"Flag {name} bad in the Pi's index (trials.jsonl). The file stays;"
+                     "\nwhisker_link.convert skips it.")
+
+    def _on_flag_clicked(self) -> None:
+        target = self._flag_target()
+        if target is None or self._client is None or self._flag_cmd is not None:
+            return
+        name, bad = target
+        if bad:
+            note, ok = "", QMessageBox.question(
+                self, "Keep recording", f"Keep {name} again (remove the bad flag)?"
+            ) == QMessageBox.StandardButton.Yes
+        else:
+            note, ok = QInputDialog.getText(
+                self, "Mark recording bad",
+                f"Mark {name} bad?\nThe file stays on the Pi; convert skips it.\n\nNote (optional):")
+        if not ok:
+            return
+        acks = self._client.bus.get_metadata().get("server_acks") or {}
+        cmd = {"cmd": "rec_flag", "file": name, "keep": bad, "who": self._who}
+        if note.strip():
+            cmd["note"] = note.strip()
+        if not self._client.send_command(cmd):
+            self._note("Mark bad: could not send the command.")
+            return
+        self._flag_cmd = {"sent": time.monotonic(), "file": name, "keep": bad,
+                          "seen": acks.get("rec_flag", (0, None))[0]}
+        self._update_flag_button()
+
+    def _tick_flag_ack(self, meta: dict) -> None:
+        pend = self._flag_cmd
+        if pend is None:
+            return
+        n, ack = (meta.get("server_acks") or {}).get("rec_flag", (0, None))
+        if n <= pend["seen"] or ack is None:
+            if time.monotonic() - pend["sent"] > REC_ACK_TIMEOUT_S:
+                self._flag_cmd = None
+                self._note("Mark bad: no reply from the server.")
+                self._update_flag_button()
+            return
+        self._flag_cmd = None
+        if ack.get("ok", True):
+            self._note(f"{ack.get('file', pend['file'])} "
+                       + ("kept again" if pend["keep"] else "marked bad (the file stays)"))
+            # until the next status says so
+            rec = self._last_status_rec.get("rec") or {}
+            for r in (rec, rec.get("last") or {}):
+                if r.get("path") and os.path.basename(r["path"]) == pend["file"]:
+                    r["keep"] = pend["keep"]
+        else:
+            err = str(ack.get("error", "?"))
+            if "unknown command" in err:
+                err = "this daq_server has no recording index (needs 0.3)"
+            self._note(f"Mark bad failed: {err}")
+        self._update_flag_button()
+
     def _update_record_button(self) -> None:
+        self._update_flag_button()
         b = self._record_btn
         if self._is_recording:
             b.setText("■ Stop")
@@ -1777,6 +1869,7 @@ class MainWindow(QMainWindow):
         self._tick_esp32_mode(meta)
         self._tick_esp32_reset(meta)
         self._tick_rec_ack(meta)
+        self._tick_flag_ack(meta)
         self._tick_faults(meta)
         self._maybe_apply_measured_rate(meta.get("fs_measured"))
         st = meta.get("server_status") or {}
@@ -1805,6 +1898,7 @@ class MainWindow(QMainWindow):
             self._last_status_rec = st
             if isinstance(st.get("rec"), dict):
                 self._on_rec_status(st["rec"])
+                self._update_flag_button()
             self._set_fault_state(st.get("esp32", {}).get("fault") or {})
             self._note_beat(st.get("esp32", {}).get("beat"))
             self._show_status(st)
@@ -1957,6 +2051,8 @@ class MainWindow(QMainWindow):
         rec = st.get("rec", {})
         if self._client.has_vehicle:
             pi_rec = f"ROV rec {rec.get('secs', 0):.0f}s" if rec.get("on") else "ROV rec off"
+            if rec.get("on") and rec.get("keep") is False:
+                pi_rec += " (marked bad)"
             if rec.get("on") and not self._replaying:
                 if not (self._rov_path and _same_rec(rec.get("path"), self._rov_path)):
                     pi_rec += (f" {os.path.basename(rec.get('path') or '')}"

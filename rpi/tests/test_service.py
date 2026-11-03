@@ -281,6 +281,8 @@ def test_die_stalled_closes_the_recording_and_exits_nonzero(tmp_path, monkeypatc
     finally:
         srv._ls.close()
     assert codes == [3] and not srv.hub.recorder.active and Path(path).stat().st_size > 0
+    stop = json.loads((tmp_path / "trials.jsonl").read_text().splitlines()[-1])
+    assert stop["ev"] == "stop" and stop["how"] == "crash"        # the watchdog's exit
     assert "test_die_stalled" in capfd.readouterr().err    # the stacks went to stderr
 
 

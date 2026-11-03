@@ -111,7 +111,7 @@ def rig(app, tmp_path):
 
 
 def _rov_files(tmp_path) -> list[Path]:
-    return sorted((tmp_path / "rec").glob("*.jsonl"))
+    return sorted((tmp_path / "rec").glob("whisker_*.jsonl"))
 
 
 def test_adopts_a_recording_it_did_not_start(app, rig, monkeypatch):
@@ -268,3 +268,33 @@ def test_auto_stop_is_fixed_while_the_server_holds_it(app, rig):
     mw._record_btn.click()
     assert _pump(app, lambda: not mw._is_recording and mw._rec_cmd is None, 4)
     assert mw._auto_stop_spin.isEnabled() and mw._auto_stop_spin.value() == 30
+
+
+def test_mark_last_recording_bad(app, rig, monkeypatch):
+    port, tmp_path, window = rig
+    mw = window()
+    assert not mw._flag_btn.isEnabled()               # no recording yet
+    mw._tag_edit.setText("flagme")
+    mw._record_btn.click()
+    assert _pump(app, lambda: mw._is_recording, 4)
+    mw._record_btn.click()
+    assert _pump(app, lambda: not mw._is_recording and mw._rec_cmd is None, 4)
+    assert _pump(app, lambda: mw._flag_btn.isEnabled(), 3)
+    (rov,) = _rov_files(tmp_path)
+    assert mw._flag_btn.text() == "Mark bad" and rov.name in mw._flag_btn.toolTip()
+    from PyQt6.QtWidgets import QInputDialog
+    prompts = []
+    monkeypatch.setattr(QInputDialog, "getText",
+                        lambda *a, **k: (prompts.append(a[2]), ("drifted", True))[1])
+    mw._flag_btn.click()
+    assert rov.name in prompts[0]
+    assert _pump(app, lambda: "marked bad" in mw._path_label.text(), 4), mw._path_label.text()
+    assert _pump(app, lambda: mw._flag_btn.text() == "Unmark bad", 3)
+    from whisker_link import rec_index
+    r = rec_index.read(str(tmp_path / "rec" / "trials.jsonl"))[rov.name]
+    assert r["keep"] is False and r["note"] == "drifted" and r["how"] == "user"
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
+    mw._flag_btn.click()
+    assert _pump(app, lambda: mw._flag_btn.text() == "Mark bad", 4)
+    assert rec_index.read(str(tmp_path / "rec" / "trials.jsonl"))[rov.name]["keep"] is True
+    assert rov.exists()

@@ -76,7 +76,12 @@ python3 ~/whisker_sensor/rpi/scripts/rec.py status                  # recording?
 python3 ~/whisker_sensor/rpi/scripts/rec.py start surge_fwd --duration 60
 python3 ~/whisker_sensor/rpi/scripts/rec.py stop                    # whatever runs; --path FILE: only that one
 python3 ~/whisker_sensor/rpi/scripts/rec.py mark "tap W3"
+python3 ~/whisker_sensor/rpi/scripts/rec.py bad --note "pilot overshot"   # the newest one; or bad FILE
+python3 ~/whisker_sensor/rpi/scripts/rec.py good FILE                     # undo
+python3 ~/whisker_sensor/rpi/scripts/rec.py list                          # the index (-n 0: all)
 ```
+
+**Recording index (server 0.3).** The server appends one line to `~/whisker_rec/trials.jsonl` when a recording starts (file, tag, who, duration) and one when it stops, with how it ended: `user` (a client's or `rec.py`'s stop), `auto` (its duration elapsed), `replaced` (a forced start), `restart` (the service was stopped or restarted) or `crash` (the stall watchdog's exit, or, found when the server next starts, a recording that a killed process or a power cut left without a stop; its length then comes from the file's last write). A recording can be flagged bad (`rec.py bad [FILE] --note …`, or **Mark bad** in wavi_py) and good again (`rec.py good FILE`): that adds a line and never touches the file, and the last flag wins. `python -m whisker_link.convert ~/whisker_rec/*.jsonl` skips the bad ones (`--all` converts them anyway) and the index itself. `rec.py list` prints the index, one line per recording. The format is in [`whisker_link/rec_index.py`](../whisker_link/rec_index.py); it's append-only, so a crash can't corrupt earlier lines. Recordings from before 0.3 aren't in it and can't be flagged. Copy `trials.jsonl` along with the recordings when you fetch them, so convert can see the flags. The laptop's local copies have other names (`st_…`) and aren't covered.
 
 `start` refuses while one runs (`--force` replaces it). It talks to `127.0.0.1:5600` (`--host`, `--port`). Exit code 0 = done, 1 = the server said no (the reason and the running recording on stderr), 2 = no server. `status` needs server 0.2; `stop` works with any server.
 

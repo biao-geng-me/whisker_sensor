@@ -2,6 +2,11 @@
 
     python -m whisker_link.convert rec.jsonl            # -> rec.npz
     python -m whisker_link.convert rec.jsonl --mat      # -> rec.mat as well
+    python -m whisker_link.convert ~/whisker_rec/*.jsonl  # recordings marked bad are skipped
+
+A recording marked bad in the ``trials.jsonl`` index next to it (``rpi/scripts/rec.py
+bad``, wavi_py's **Bad**; ``whisker_link/rec_index.py``) is skipped; ``--all``
+converts it anyway.
 
 Time base: seconds on the Pi's monotonic clock, zero at the recording start.
 
@@ -152,8 +157,18 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("files", nargs="+")
     ap.add_argument("--mat", action="store_true", help="also write a MATLAB .mat")
+    ap.add_argument("--all", action="store_true",
+                    help="also the recordings marked bad in the trials.jsonl next to them")
     args = ap.parse_args(argv)
+    from whisker_link import rec_index
     for fn in args.files:
+        if Path(fn).name == rec_index.INDEX_NAME:
+            continue                           # the index itself (a *.jsonl glob takes it)
+        st = rec_index.status_of(fn)
+        if st is not None and not st["keep"] and not args.all:
+            print(f"{fn}: skipped, marked bad" + (f" ({st['note']})" if st["note"] else "")
+                  + " (--all converts it)")
+            continue
         arrays = to_arrays(load(fn))
         stem = Path(fn).with_suffix("")
         np.savez_compressed(f"{stem}.npz", **arrays)

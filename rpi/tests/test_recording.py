@@ -80,7 +80,7 @@ def test_reconnect_sees_the_running_recording(server):
     assert lines[0]["k"] == "hello" and lines[0]["rec"]["tag"] == "run1"
     assert lines[-1]["k"] == "mark" and lines[-1]["rec"]["event"] == "stop"
     assert sum(e["k"] == "wsk" for e in lines) > 100          # kept recording while away
-    assert len(list(rec_dir.glob("*.jsonl"))) == 1
+    assert len(list(rec_dir.glob("whisker_*.jsonl"))) == 1
 
 
 def test_second_client_does_not_rotate_the_file(server):
@@ -91,7 +91,7 @@ def test_second_client_does_not_rotate_the_file(server):
     assert refused["ok"] is False and refused["busy"] is True
     assert refused["rec"]["path"] == first["path"] and "wavi_py@laptop" in refused["rec"]["by"]
     assert "a recording is running" in refused["error"]
-    assert len(list(rec_dir.glob("*.jsonl"))) == 1
+    assert len(list(rec_dir.glob("whisker_*.jsonl"))) == 1
     # a stale stop (another file's name) leaves it alone
     stale = _ack(b, {"cmd": "rec_stop", "path": "whisker_20000101_000000_old.jsonl"})
     assert stale["ok"] is False and stale["path"] is None and stale["rec"]["on"]
@@ -163,3 +163,125 @@ def test_rec_cli(server):
     assert any(e["k"] == "mark" and e.get("text") == "tap W3" for e in _lines(path))
     r = _rec(_free_port(), "status")                  # no server there
     assert r.returncode == 2, r
+
+
+def _index(rec_dir) -> list[dict]:
+    p = Path(rec_dir) / "trials.jsonl"
+    return [json.loads(x) for x in p.read_text().splitlines()] if p.exists() else []
+
+
+def test_index_records_how_each_recording_ended(server):
+    port, rec_dir, _ = server
+    a = Conn(port)
+    user = _ack(a, {"cmd": "rec_start", "tag": "u", "who": "wavi_py@laptop"})["path"]
+    _ack(a, {"cmd": "rec_stop"})
+    auto = _ack(a, {"cmd": "rec_start", "tag": "a", "duration": 1.0})["path"]
+    a.wait_for(lambda e: e["k"] == "status" and not e["rec"]["on"], 4)
+    time.sleep(1.0)                                   # a new file name
+    first = _ack(a, {"cmd": "rec_start", "tag": "r1"})["path"]
+    time.sleep(1.1)
+    second = _ack(a, {"cmd": "rec_start", "tag": "r2", "force": True})["path"]
+    _ack(a, {"cmd": "rec_stop"})
+    lines = _index(rec_dir)
+    starts = [e for e in lines if e["ev"] == "start"]
+    stops = {e["file"]: e for e in lines if e["ev"] == "stop"}
+    assert [e["file"] for e in starts] == [Path(p).name for p in (user, auto, first, second)]
+    assert starts[0]["tag"] == "u" and "wavi_py@laptop" in starts[0]["by"]
+    assert starts[1]["duration"] == 1.0 and starts[0]["duration"] is None
+    assert {Path(p).name: stops[Path(p).name]["how"] for p in (user, auto, first, second)} == {
+        Path(user).name: "user", Path(auto).name: "auto",
+        Path(first).name: "replaced", Path(second).name: "user"}
+    assert 1.0 <= stops[Path(auto).name]["secs"] < 1.1
+    assert all(e["unix"] > 1.7e9 for e in lines)
+    # the file's stop mark says the same
+    assert _lines(auto)[-1]["rec"]["how"] == "auto"
+
+
+def test_mark_bad_and_good_again(server):
+    port, rec_dir, _ = server
+    a = Conn(port)
+    old = _ack(a, {"cmd": "rec_start", "tag": "one"})["path"]
+    _ack(a, {"cmd": "rec_stop"})
+    time.sleep(1.1)
+    new = _ack(a, {"cmd": "rec_start", "tag": "two"})["path"]
+    _ack(a, {"cmd": "rec_stop"})
+    # no file: the newest
+    f = _ack(a, {"cmd": "rec_flag", "note": "overshot", "who": "wavi_py@laptop"})
+    assert f["ok"] and f["file"] == Path(new).name and f["keep"] is False
+    st = a.wait_for(lambda e: e["k"] == "status", 3)
+    assert st["rec"]["last"]["keep"] is False
+    assert _ack(a, {"cmd": "rec_flag", "file": old, "keep": False})["file"] == Path(old).name
+    assert _ack(a, {"cmd": "rec_flag", "file": Path(old).name, "keep": True})["ok"]
+    bad = _ack(a, {"cmd": "rec_flag", "file": "whisker_19990101_000000.jsonl"})
+    assert bad["ok"] is False and "not in" in bad["error"]
+    from whisker_link import rec_index
+    recs = rec_index.read(str(rec_dir / "trials.jsonl"))
+    assert recs[Path(new).name]["keep"] is False and recs[Path(new).name]["note"] == "overshot"
+    assert recs[Path(old).name]["keep"] is True
+    assert Path(old).exists() and Path(new).exists()          # nothing deleted
+    # running: the flag shows in the status while it records
+    run = _ack(a, {"cmd": "rec_start", "tag": "three"})["path"]
+    _ack(a, {"cmd": "rec_flag"})
+    st = a.wait_for(lambda e: e["k"] == "status" and e["rec"]["on"], 3)
+    assert st["rec"]["keep"] is False
+    _ack(a, {"cmd": "rec_stop"})
+    assert rec_index.read(str(rec_dir / "trials.jsonl"))[Path(run).name]["keep"] is False
+
+    # convert skips the bad ones (and the index itself), --all takes them
+    from whisker_link import convert
+    convert.main([str(p) for p in sorted(rec_dir.glob("*.jsonl"))])
+    assert Path(old).with_suffix(".npz").exists()
+    assert not Path(new).with_suffix(".npz").exists() and not Path(run).with_suffix(".npz").exists()
+    assert not (rec_dir / "trials.npz").exists()
+    convert.main(["--all", new])
+    assert Path(new).with_suffix(".npz").exists()
+
+
+def test_rec_cli_bad_good_list(server):
+    port, rec_dir, _ = server
+    assert _rec(port, "start", "cli").returncode == 0
+    assert _rec(port, "stop").returncode == 0
+    r = _rec(port, "bad", "--note", "pilot overshot")
+    assert r.returncode == 0 and "_cli.jsonl marked bad" in r.stdout, r
+    r = subprocess.run([*SERVER_PY, str(REC_PY), "list", "--rec-dir", str(rec_dir)],
+                       capture_output=True, text=True, timeout=15)
+    assert r.returncode == 0 and r.stdout.startswith("BAD whisker_") and "user" in r.stdout, r
+    assert "[pilot overshot]" in r.stdout
+    name = r.stdout.split()[1]
+    r = _rec(port, "good", name)
+    assert r.returncode == 0 and "marked good" in r.stdout, r
+    r = _rec(port, "bad", "nope.jsonl")
+    assert r.returncode == 1 and "not in" in r.stderr, r
+
+
+def test_restart_and_crash_are_indexed(tmp_path):
+    """SIGTERM (systemctl stop / restart) closes it as 'restart'; a process that
+    died with one open (SIGKILL) gets a 'crash' stop when the next one starts."""
+    rec = tmp_path / "rec"
+
+    def start():
+        port = _free_port()
+        srv = subprocess.Popen([*SERVER_PY, "-u", str(SERVER), "--serial", "none",
+                                "--mavlink", "none", "--bind", f"127.0.0.1:{port}",
+                                "--rec-dir", str(rec)],
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        return srv, Conn(port)
+    srv, c = start()
+    p1 = _ack(c, {"cmd": "rec_start", "tag": "term"})["path"]
+    out = _stop(srv)
+    assert srv.returncode == 0, out
+    srv, c = start()
+    time.sleep(1.1)
+    p2 = _ack(c, {"cmd": "rec_start", "tag": "killed"})["path"]
+    time.sleep(2.6)                                   # flushed at least once after the hello
+    srv.kill()
+    srv.wait()
+    srv, c = start()                                  # the next start finds it open
+    _ack(c, {"cmd": "status"})
+    out = _stop(srv)
+    stops = {e["file"]: e for e in _index(rec) if e["ev"] == "stop"}
+    assert stops[Path(p1).name]["how"] == "restart"
+    assert stops[Path(p2).name]["how"] == "crash" and stops[Path(p2).name]["by"] == "server"
+    assert 0.9 < stops[Path(p2).name]["secs"] < 5
+    assert "had no stop in the index" in out and Path(p2).name in out
+    assert len(stops) == 2                            # the sweep doesn't repeat

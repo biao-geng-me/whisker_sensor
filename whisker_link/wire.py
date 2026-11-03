@@ -34,12 +34,16 @@ Commands, client -> server, are JSON lines too::
     {"cmd": "mark", "text": "tap W3"}
     {"cmd": "esp32", "data": "b"}        raw bytes to the firmware
     {"cmd": "status"}                    the status (without rates) in the ack
+    {"cmd": "rec_flag", "keep": false, "note": "overshot"}   the newest recording: bad
+    {"cmd": "rec_flag", "file": "whisker_....jsonl", "keep": true}   good again
 
 ``rec_start`` (server 0.2) is refused (``ok`` false, ``busy`` true, the running
 one in ``rec``) while a recording runs, unless ``force``, which closes it and
 opens the new file (the ack's ``replaced``). ``duration`` (s): the server stops
 the recording itself then. ``who`` names the client in the status. ``rec_stop``
-with ``path`` (or just the file name) stops only that recording.
+with ``path`` (or just the file name) stops only that recording. ``rec_flag``
+(server 0.3) adds a line to the recording index (``whisker_link/rec_index.py``);
+the ack has ``file`` and ``keep``.
 """
 
 from __future__ import annotations
