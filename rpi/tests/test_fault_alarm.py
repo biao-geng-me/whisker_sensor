@@ -124,6 +124,8 @@ def test_legacy_unrecovered_latches_and_clears(tmp_path):
     (rec,) = list(tmp_path.glob("whisker_*.jsonl"))
     marks = [json.loads(x) for x in rec.read_text().splitlines() if '"k": "mark"' in x
              or '"k":"mark"' in x]
+    assert marks[-1]["rec"]["why"] == "server stopped"   # the file's last line says how it ended
+    marks = marks[:-1]
     assert [m["fault"]["event"] for m in marks] == ["fault", "warn", "clear"], marks
     print(f"onset {onset_s:.1f} s, clear {clear_s:.1f} s; marks: {[m['text'] for m in marks]}")
 
@@ -152,7 +154,7 @@ def test_record_start_during_a_fault(tmp_path):
     rig = Rig(tmp_path, "legacy", ["--adc-dead"])
     try:
         rig.wait_for(lambda e: _fault(e).get("level") == "fault", 10)
-        rig.c.sendall(b'{"cmd": "rec_start", "tag": "late"}\n')
+        rig.c.sendall(b'{"cmd": "rec_start", "tag": "late", "force": true}\n')  # over --record
         rig.read(1.5)
     finally:
         rig.close()

@@ -219,29 +219,58 @@ class WaviClient:
 
     # ----- record-indicator passthrough
 
-    def send_record_start(self, tag: str = "", local_copy: Optional[str] = None) -> bool:
+    def send_record_start(self, tag: str = "", local_copy: Optional[str] = None, *,
+                          duration: Optional[float] = None, force: bool = False,
+                          who: str = "") -> bool:
         """Start recording at the source. Returns True if sent.
 
         Arduino: send 'S' so it raises its CONTROL_PIN. Server: start the
-        recording on the vehicle, and if ``local_copy`` is given also tee the
-        raw stream to that local .jsonl path. ESP32: only the local tee.
+        recording on the vehicle (``duration`` s: the server stops it itself;
+        ``force``: replace one that is running, else the server refuses it, see
+        rpi/daq_server.py), and if ``local_copy`` is given also tee the raw stream
+        to that local .jsonl path (``start_local_copy`` does that later, e.g. once
+        the server's ack is in). ESP32: only the local tee.
         """
         if self._transport_kind == "replay":
             return False                      # a recording: nothing to record at the source
         if self.is_event_stream:
-            if local_copy and isinstance(self._reader, ServerReader):
-                self._reader.start_tee(local_copy)
-            return self.send_command({"cmd": "rec_start", "tag": tag})
+            if local_copy:
+                self.start_local_copy(local_copy)
+            cmd: dict = {"cmd": "rec_start", "tag": tag}
+            if duration and duration > 0:
+                cmd["duration"] = float(duration)
+            if force:
+                cmd["force"] = True
+            if who:
+                cmd["who"] = who
+            return self.send_command(cmd)
         return self._send_cmd(b"S")
 
-    def send_record_stop(self) -> bool:
-        """Stop recording at the source (Arduino: 'E'). Returns True if sent."""
+    def start_local_copy(self, path: str) -> None:
+        """Event streams: tee the raw stream to the local .jsonl ``path``."""
+        if isinstance(self._reader, ServerReader):
+            self._reader.start_tee(path)
+
+    def stop_local_copy(self) -> None:
+        if isinstance(self._reader, ServerReader):
+            self._reader.stop_tee()
+
+    def send_record_stop(self, path: Optional[str] = None, who: str = "",
+                         local: bool = True) -> bool:
+        """Stop recording at the source (Arduino: 'E'). Returns True if sent.
+        Server: ``path`` = only that recording (a stale stop can't end a newer
+        one); ``local`` also closes the local tee."""
         if self._transport_kind == "replay":
             return False
         if self.is_event_stream:
-            if isinstance(self._reader, ServerReader):
-                self._reader.stop_tee()
-            return self.send_command({"cmd": "rec_stop"})
+            if local:
+                self.stop_local_copy()
+            cmd: dict = {"cmd": "rec_stop"}
+            if path:
+                cmd["path"] = path
+            if who:
+                cmd["who"] = who
+            return self.send_command(cmd)
         return self._send_cmd(b"E")
 
     def send_command(self, cmd: dict) -> bool:

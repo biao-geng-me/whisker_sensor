@@ -268,7 +268,7 @@ def test_die_stalled_closes_the_recording_and_exits_nonzero(tmp_path, monkeypatc
     import daq_server as ds
     srv, _, _ = _server_with_fake_serial(_FakeSerial())
     srv.hub = ds.Hub(str(tmp_path))
-    path = srv.hub.rec_start("t")
+    path, _ = srv.hub.rec_start("t")
     codes = []
 
     def fake_exit(code):

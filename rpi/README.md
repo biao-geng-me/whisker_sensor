@@ -65,7 +65,20 @@ On the laptop:
 python -m wavi_py --transport server --host 192.168.2.2 --scale 0.2
 ```
 
-**Rec** in the GUI starts a recording on the Pi *and* writes the same stream to a local `.jsonl` (plus the usual whisker-only `.dat`) in `~/wavi_data`. **IMU** opens the accel / gyro / attitude view. Recording without the GUI: start the server with `--record --tag run1`, or send commands over the socket (`{"cmd":"rec_start","tag":"run1"}`, `{"cmd":"rec_stop"}`, `{"cmd":"mark","text":"tap W3"}`).
+**Rec** in the GUI starts a recording on the Pi *and* writes the same stream to a local `.jsonl` (plus the usual whisker-only `.dat`) in `~/wavi_data`. **IMU** opens the accel / gyro / attitude view. Recording without the GUI: start the server with `--record --tag run1` (`--duration 600` to stop it after 10 min), use `rpi/scripts/rec.py` below, or send commands over the socket (`{"cmd":"rec_start","tag":"run1"}`, `{"cmd":"rec_stop"}`, `{"cmd":"mark","text":"tap W3"}`; all fields in [`whisker_link/wire.py`](../whisker_link/wire.py)).
+
+**The recording belongs to the Pi, not to a client.** A client that disconnects or crashes doesn't stop it; it runs until a `rec_stop`, its duration, or a server restart (which closes the file). The 1 Hz status record says what runs: file, elapsed, who started it (`by`, e.g. `wavi_py@laptop (192.168.2.1:50412)`), its duration and time left, and how the previous one ended (`last`: stopped by a client, duration elapsed, replaced, server stopped / exit). A `rec_start` while a recording runs is refused (`ok` false, `busy`) unless it carries `force`, so a second client (laptop and Steam Deck) can't silently close another's file; wavi_py asks before forcing. `rec_start` with `duration` (s) makes the server stop it itself, so an auto-stop works with the client gone; wavi_py's auto-stop sends it. `rec_stop` with `path` (or the file name) stops only that recording, so a late stop can't end the next one; without it, it stops whatever runs (as older clients send it). Each file starts with the hello (its `rec` field: tag, by, duration) and ends with a `mark` saying how it ended (`rec.why`). Server 0.2 (2026-11-03) brought all this; with an older server wavi_py falls back to its own timer and can't be refused.
+
+**From a shell on the Pi** (over SSH, e.g. after a client crash), [`scripts/rec.py`](scripts/rec.py), Python 3 stdlib only:
+
+```bash
+python3 ~/whisker_sensor/rpi/scripts/rec.py status                  # recording? file, elapsed, by, time left, the last one
+python3 ~/whisker_sensor/rpi/scripts/rec.py start surge_fwd --duration 60
+python3 ~/whisker_sensor/rpi/scripts/rec.py stop                    # whatever runs; --path FILE: only that one
+python3 ~/whisker_sensor/rpi/scripts/rec.py mark "tap W3"
+```
+
+`start` refuses while one runs (`--force` replaces it). It talks to `127.0.0.1:5600` (`--host`, `--port`). Exit code 0 = done, 1 = the server said no (the reason and the running recording on stderr), 2 = no server. `status` needs server 0.2; `stop` works with any server.
 
 ### Testing without the vehicle
 

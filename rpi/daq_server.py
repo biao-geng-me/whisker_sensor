@@ -67,7 +67,7 @@ from whisker_link.channels import CHANNEL_NAMES  # noqa: E402
 
 log = logging.getLogger("daq_server")
 
-SERVER_VERSION = "0.1"
+SERVER_VERSION = "0.2"     # 0.2: rec_start duration / force / who, rec_stop path
 DEFAULT_SERIAL_BAUD = 921600
 DEFAULT_MAVLINK = "udpin:0.0.0.0:14670"
 
@@ -94,28 +94,46 @@ DEFAULT_MAV_RATES = {
 # ─────────────────────────────────────────────────────────────────────────────
 
 class Recorder:
+    """One recording at a time. Who started it (``by``), its tag, an optional
+    duration after which it stops itself (``stop_at``), and how the previous one
+    ended (``last``: path, why, by, secs, unix) are kept for the status record.
+    The caller holds the hub lock."""
+
     def __init__(self, rec_dir: str):
         self.rec_dir = os.path.expanduser(rec_dir)
         self._f = None
         self.path: Optional[str] = None
         self.started_mono: Optional[float] = None
+        self.started_unix: Optional[float] = None
         self.n_events = 0
+        self.tag = ""
+        self.by = ""
+        self.duration: Optional[float] = None
+        self.last: Optional[dict] = None
+        self.expired: Optional[dict] = None      # set when the duration ran out (Hub logs it)
         self._last_flush = 0.0
 
     @property
     def active(self) -> bool:
         return self._f is not None
 
-    def start(self, tag: str, hello: dict) -> str:
-        self.stop()
+    @property
+    def secs(self) -> float:
+        return (time.monotonic() - self.started_mono) if self.active else 0.0
+
+    def start(self, tag: str, hello: dict, by: str = "", duration: Optional[float] = None) -> str:
+        self.stop("replaced by a new recording", by)
         os.makedirs(self.rec_dir, exist_ok=True)
         safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in tag)[:40]
         name = f"whisker_{datetime.now():%Y%m%d_%H%M%S}" + (f"_{safe}" if safe else "") + ".jsonl"
         self.path = os.path.join(self.rec_dir, name)
         self._f = open(self.path, "wb", buffering=1 << 16)
         self.started_mono = time.monotonic()
+        self.started_unix = time.time()
         self.n_events = 0
-        self.write(wire.dumps(hello))
+        self.tag, self.by = tag, by
+        self.duration = duration if duration and duration > 0 else None
+        self.write(wire.dumps(dict(hello, rec={"tag": tag, "by": by, "duration": self.duration})))
         return self.path
 
     def write(self, line: bytes) -> None:
@@ -127,10 +145,26 @@ class Recorder:
         if now - self._last_flush > 1.0:       # bound loss on power cut to ~1 s
             self._f.flush()
             self._last_flush = now
+        if self.duration is not None and now - self.started_mono >= self.duration:
+            self.stop(f"duration {self.duration:g} s elapsed", "server")
+            self.expired = self.last
 
-    def stop(self) -> Optional[str]:
+    def check_duration(self) -> None:
+        """Stop on the duration even when no events arrive (both sources down)."""
+        if (self._f is not None and self.duration is not None
+                and time.monotonic() - self.started_mono >= self.duration):
+            self.stop(f"duration {self.duration:g} s elapsed", "server")
+            self.expired = self.last
+
+    def stop(self, why: str = "stopped", by: str = "") -> Optional[str]:
         if self._f is None:
             return None
+        secs = self.secs
+        # the last line says how it ended (the clients don't get it: the file is closing)
+        self._f.write(wire.dumps({"k": "mark", "t": time.monotonic(),
+                                  "text": f"recording stopped: {why}" + (f" ({by})" if by else ""),
+                                  "rec": {"event": "stop", "why": why, "by": by,
+                                          "secs": round(secs, 3)}}))
         self._f.flush()
         try:
             os.fsync(self._f.fileno())
@@ -138,7 +172,22 @@ class Recorder:
             pass
         self._f.close()
         self._f = None
+        self.last = {"path": self.path, "why": why, "by": by, "secs": round(secs, 1),
+                     "unix": time.time()}
         return self.path
+
+    def state(self) -> dict:
+        """The ``rec`` part of the status record (``on``/``path``/``secs``/``events``
+        as before; the rest new in server 0.2)."""
+        secs = self.secs
+        st = {"on": self.active, "path": self.path, "secs": secs, "events": self.n_events}
+        if self.active:
+            st.update(tag=self.tag, by=self.by, duration=self.duration,
+                      unix=self.started_unix,
+                      left=(max(0.0, self.duration - secs) if self.duration else None))
+        if self.last:
+            st["last"] = self.last
+        return st
 
 
 class _Client:
@@ -232,6 +281,9 @@ class Hub:
         with self._lock:
             self.recorder.write(line)
             clients = list(self._clients)
+            expired, self.recorder.expired = self.recorder.expired, None
+        if expired:
+            log.info("recording stopped (%s): %s", expired["why"], expired["path"])
         for c in clients:
             if not c.enqueue(line):
                 log.warning("dropping slow client %s", c.addr)
@@ -256,17 +308,39 @@ class Hub:
         with self._lock:
             return len(self._clients)
 
-    def rec_start(self, tag: str = "") -> str:
+    def rec_start(self, tag: str = "", by: str = "", duration: Optional[float] = None,
+                  force: bool = True) -> tuple[Optional[str], dict]:
+        """(the new file, the state before). Without ``force``, a running recording
+        is left alone and the file is None."""
         with self._lock:
-            return self.recorder.start(tag, self.hello())
+            before = self.recorder.state()
+            if self.recorder.active and not force:
+                return None, before
+            return self.recorder.start(tag, self.hello(), by, duration), before
 
-    def rec_stop(self, timeout: float = -1) -> Optional[str]:
+    def rec_stop(self, timeout: float = -1, why: str = "stopped", by: str = "",
+                 path: Optional[str] = None) -> Optional[str]:
+        """Stop the recording (only if it is ``path``, when given); its file, or None."""
         if not self._lock.acquire(timeout=timeout):
             return None
         try:
-            return self.recorder.stop()
+            if path and self.recorder.active and not _same_file(path, self.recorder.path):
+                return None
+            return self.recorder.stop(why, by)
         finally:
             self._lock.release()
+
+    def check_duration(self) -> None:
+        with self._lock:
+            self.recorder.check_duration()
+            expired, self.recorder.expired = self.recorder.expired, None
+        if expired:
+            log.info("recording stopped (%s): %s", expired["why"], expired["path"])
+
+
+def _same_file(a: str, b: Optional[str]) -> bool:
+    """A path or just the file name (what a client shows) names the recording ``b``."""
+    return bool(b) and (a == b or os.path.basename(a) == os.path.basename(b))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -660,10 +734,9 @@ class Server:
 
     def _dispatch(self, name, cmd: dict, client: _Client, t: float, reply: dict) -> None:
         if name == "rec_start":
-            reply["path"] = self._rec_start(str(cmd.get("tag", "")))
+            self._cmd_rec_start(cmd, client, reply)
         elif name == "rec_stop":
-            reply["path"] = self.hub.rec_stop()
-            log.info("recording stopped: %s", reply["path"])
+            self._cmd_rec_stop(cmd, client, reply)
         elif name == "mark":
             self.hub.publish({"k": "mark", "t": t, "text": str(cmd.get("text", ""))})
         elif name == "esp32":
@@ -680,13 +753,69 @@ class Server:
                 self.hub.publish({"k": "mark", "t": t,
                                   "text": f"ESP32 reset (EN pulse) by client {client.addr[0]}"})
         elif name == "status":
-            reply.update(self._status(1.0, {}))
+            st = self._status(1.0, {})
+            st.pop("k")                        # the reply stays an ack (not a status record)
+            st.pop("hz")                       # rates need a period: the 1 Hz record has them
+            reply.update(st)
         else:
             reply.update(ok=False, error=f"unknown command {name!r}")
 
-    def _rec_start(self, tag: str) -> str:
-        path = self.hub.rec_start(tag)
-        log.info("recording -> %s", path)
+    @staticmethod
+    def _who(cmd: dict, client) -> str:
+        """The client as the status shows it: its ``who`` (e.g. wavi_py@laptop) and address."""
+        addr = f"{client.addr[0]}:{client.addr[1]}"
+        who = str(cmd.get("who", "")).strip()[:60]
+        return f"{who} ({addr})" if who else addr
+
+    def _cmd_rec_start(self, cmd: dict, client, reply: dict) -> None:
+        """``{"cmd": "rec_start", "tag": .., "duration": s, "force": bool, "who": ..}``.
+        A running recording is not replaced unless ``force``: the ack is ok false with
+        ``busy`` true and the running one in ``rec``. ``duration`` (s, > 0): the server
+        stops it then, whether or not a client is still there."""
+        dur = cmd.get("duration")
+        try:
+            dur = float(dur) if dur is not None else None
+        except (TypeError, ValueError):
+            raise ValueError(f"duration must be a number of seconds, got {dur!r}")
+        if dur is not None and (dur != dur or dur <= 0):
+            dur = None
+        by = self._who(cmd, client)
+        path, before = self._rec_start(str(cmd.get("tag", "")), by, dur,
+                                       force=bool(cmd.get("force")))
+        if path is None:
+            reply.update(ok=False, busy=True, rec=before,
+                         error=f"a recording is running: {os.path.basename(before['path'])}"
+                               f" (by {before.get('by') or '?'}, {before['secs']:.0f} s);"
+                               " stop it first, or send force")
+            log.info("rec_start from %s refused: %s is running", by, before["path"])
+            return
+        reply.update(path=path, duration=dur)
+        if before.get("on"):
+            reply["replaced"] = before["path"]
+            log.warning("recording %s replaced by %s (force)", before["path"], by)
+
+    def _cmd_rec_stop(self, cmd: dict, client, reply: dict) -> None:
+        """``{"cmd": "rec_stop", "path": ..}``: with ``path`` (or its file name) only
+        that recording is stopped, so a stale stop can't end a newer one."""
+        by = self._who(cmd, client)
+        want = cmd.get("path")
+        want = str(want) if want else None
+        cur = self.hub.recorder.path if self.hub.recorder.active else None
+        reply["path"] = self.hub.rec_stop(why="stopped by a client", by=by, path=want)
+        if reply["path"]:
+            log.info("recording stopped by %s: %s", by, reply["path"])
+        elif want and cur:
+            reply.update(ok=False, error=f"{os.path.basename(want)} is not the running"
+                                         f" recording ({os.path.basename(cur)} is); not stopped")
+        reply["rec"] = self.hub.recorder.state()
+
+    def _rec_start(self, tag: str, by: str = "", duration: Optional[float] = None,
+                   force: bool = True) -> tuple[Optional[str], dict]:
+        path, before = self.hub.rec_start(tag, by, duration, force)
+        if path is None:
+            return None, before
+        log.info("recording -> %s (by %s%s)", path, by or "?",
+                 f", stops after {duration:g} s" if duration else "")
         if self.esp32:
             st = self.esp32.fault_status()
             if st["level"] != "ok":                # a fault from before the recording
@@ -698,7 +827,7 @@ class Server:
                 self.hub.publish({"k": "mark", "t": time.monotonic(), "fault": ev,
                                   "text": f"at record start: ESP32 {st['level']} {st['code']}:"
                                           f" {st['msg']} (since {since})"})
-        return path
+        return path, before
 
     def _on_client_closed(self, c: _Client) -> None:
         log.info("client %s disconnected (%d left)", c.addr, self.hub.remove_client(c))
@@ -709,9 +838,7 @@ class Server:
         rec = self.hub.recorder
         st: dict = {
             "k": "status", "t": time.monotonic(), "clients": self.hub.n_clients,
-            "rec": {"on": rec.active, "path": rec.path,
-                    "secs": (time.monotonic() - rec.started_mono) if rec.active else 0,
-                    "events": rec.n_events},
+            "rec": rec.state(),
             "hz": {k: round(v / dt, 1) for k, v in sorted(counts.items())},
         }
         if self.esp32:
@@ -758,7 +885,7 @@ class Server:
         log.critical("%s: dumping thread stacks and exiting for a restart", "; ".join(why))
         sys.stderr.flush()
         faulthandler.dump_traceback(all_threads=True)
-        path = self.hub.rec_stop(timeout=2.0)
+        path = self.hub.rec_stop(timeout=2.0, why="server exit: " + "; ".join(why), by="server")
         if path:
             log.critical("recording closed: %s", path)
         logging.shutdown()
@@ -772,6 +899,7 @@ class Server:
             stalled = self._stalled(now)
             if stalled:
                 self._die_stalled(stalled)
+            self.hub.check_duration()
             st = self._status(now - last, self.rates.snapshot_and_reset())
             last = now
             self.hub.publish(st)
@@ -807,7 +935,8 @@ class Server:
             self.mav.start()
         threading.Thread(target=self._status_loop, name="status", daemon=True).start()
         if self.args.record:
-            self._rec_start(self.args.tag)
+            self._rec_start(self.args.tag, "daq_server --record",
+                            getattr(self.args, "duration", None))
         while not self._stop.is_set():
             try:
                 conn, addr = self._ls.accept()
@@ -825,7 +954,7 @@ class Server:
         if self._stop.is_set():
             return
         self._stop.set()
-        path = self.hub.rec_stop()
+        path = self.hub.rec_stop(why="server stopped", by="server")
         if path:
             log.info("recording closed: %s", path)
         for src in (self.esp32, self.mav):
@@ -908,6 +1037,8 @@ def main(argv: Optional[list[str]] = None) -> None:
     ap.add_argument("--rec-dir", default="~/whisker_rec")
     ap.add_argument("--record", action="store_true", help="start recording immediately")
     ap.add_argument("--tag", default="", help="tag for the --record file name")
+    ap.add_argument("--duration", type=float, default=None,
+                    help="with --record: stop the recording after this many seconds")
     ap.add_argument("--log-every", type=int, default=5, help="status log period, s")
     ap.add_argument("--stall-exit", type=float, default=20.0,
                     help="exit (for systemd to restart) when the ESP32 or MAVLink thread is"

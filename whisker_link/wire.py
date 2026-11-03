@@ -15,16 +15,31 @@ Pi's monotonic clock). Kinds:
 ``mav``     one MAVLink message: ``type`` (e.g. ``RAW_IMU``), ``src``
             ``[sysid, compid]``, ``d`` (message fields).
 ``txt``     a log line: ``src`` (``esp32`` / ``server``), ``msg``.
-``mark``    user annotation: ``text``.
-``status``  ~1 Hz health: rates, counters, recording state.
+``mark``    user annotation: ``text``. A recording's last line is a mark with
+            ``rec`` = ``{event: stop, why, by, secs}`` (how it ended).
+``status``  ~1 Hz health: rates, counters, recording state (``rec``: ``on``,
+            ``path``, ``secs``, ``events``; server 0.2 also ``tag``, ``by``,
+            ``duration``, ``left``, ``unix`` while on, and ``last`` = the
+            previous one's ``path``, ``why``, ``by``, ``secs``, ``unix``).
 ``info``    ESP32 INFO frame fields.
+``ack``     the reply to a command: ``cmd``, ``ok``, ``error`` if not ok.
 
 Commands, client -> server, are JSON lines too::
 
     {"cmd": "rec_start", "tag": "tank_run1"}
+    {"cmd": "rec_start", "tag": "run2", "duration": 60, "who": "wavi_py@laptop"}
+    {"cmd": "rec_start", "tag": "run3", "force": true}
     {"cmd": "rec_stop"}
+    {"cmd": "rec_stop", "path": "whisker_20261103_120000_run2.jsonl"}
     {"cmd": "mark", "text": "tap W3"}
     {"cmd": "esp32", "data": "b"}        raw bytes to the firmware
+    {"cmd": "status"}                    the status (without rates) in the ack
+
+``rec_start`` (server 0.2) is refused (``ok`` false, ``busy`` true, the running
+one in ``rec``) while a recording runs, unless ``force``, which closes it and
+opens the new file (the ack's ``replaced``). ``duration`` (s): the server stops
+the recording itself then. ``who`` names the client in the status. ``rec_stop``
+with ``path`` (or just the file name) stops only that recording.
 """
 
 from __future__ import annotations

@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import math
 import os
+import socket
 import threading
 import time
 from datetime import datetime, timedelta
@@ -90,6 +91,9 @@ from whisker_link.dome_map import DEFAULT_MAP, DomeMap, DomeMapError
 from whisker_link.esp32_frame import MV_PER_CODE, info_cfg
 
 RESET_ACK_TIMEOUT_S = 3.0     # esp32_reset's ack (the RTS pulse takes 0.1 s)
+REC_ACK_TIMEOUT_S = 5.0       # rec_start / rec_stop's ack from daq_server
+SERVER_STOP_GRACE_S = 3.0     # auto-stop: the server's own stop (rec_start duration) gets
+                              # this long to show up in the status before the client stops
 REBOOT_NOTE_S = 30.0         # an ESP32 reboot (with its reset reason) stays in the status line
 NOTE_HOLD_S = 5.0            # a reply / result stays in the panel label before the status
 
@@ -123,6 +127,11 @@ class _WrapLabel(QLabel):
         h = self.heightForWidth(max(1, self.width()))
         if h > 0 and h != self.minimumHeight():
             self.setMinimumHeight(h)
+
+
+def _same_rec(a: Optional[str], b: Optional[str]) -> bool:
+    """Two names of the vehicle's recording (a path, or just the file name)."""
+    return bool(a) and bool(b) and (a == b or os.path.basename(a) == os.path.basename(b))
 
 
 class MainWindow(QMainWindow):
@@ -231,6 +240,16 @@ class MainWindow(QMainWindow):
         self._dat_writer: Optional[DatWriter] = None
         self._record_start_dt: Optional[datetime] = None
         self._auto_stop_s = 0.0
+        # the vehicle's recording (server transport): ours is the one this window
+        # started (_rov_path, from the ack); one running that isn't ours (another
+        # client's, or ours from before a crash / reconnect) is adopted from the
+        # status record: the Rec button then only stops it, never starts over it
+        self._rov_path: Optional[str] = None
+        self._rov_confirmed = False              # a status record showed ours running
+        self._rov_duration = False               # the server stops ours on its own
+        self._foreign_rec: Optional[dict] = None  # status["rec"] of one not ours
+        self._rec_cmd: Optional[dict] = None     # rec_start / rec_stop sent, ack pending
+        self._who = f"wavi_py@{socket.gethostname()}"
         self._t0_unix: Optional[float] = None    # stream start in unix time
         # live despike: the newest `pending` samples are provisional (raw) until judged,
         # 28 samples later; the .dat gets each sample once final, from index _rec_from on
@@ -852,6 +871,7 @@ class MainWindow(QMainWindow):
         self._fault_marks_seen = 0
         self._beat_uptime, self._reboot_note = None, ""
         self._set_fault_state({})
+        self._foreign_rec, self._rec_cmd = None, None
         if client.is_event_stream and not self._replaying:
             self._keeper.connected()
         self._show_mode_note()
@@ -868,7 +888,7 @@ class MainWindow(QMainWindow):
             for v in (self._spectrum_view, self._fft_view, self._spec_view):
                 v.set_units("")
         # a replay records nothing (the file is the recording)
-        self._record_btn.setEnabled(not self._replaying)
+        self._update_record_button()
         self._set_transport_inputs_enabled(False)
         if not self._replaying and client.has_vehicle:
             self._replay.set_live(client.timeline)      # live: the events and depth so far
@@ -892,6 +912,9 @@ class MainWindow(QMainWindow):
     def _disconnect(self) -> None:
         if self._is_recording:
             self._stop_recording()
+        # one not ours keeps running (the status line said so); a rec_start still
+        # waiting for its ack is left to the server (the next connect adopts it)
+        self._foreign_rec, self._rec_cmd = None, None
         self._timer.stop()
         if self._client is not None:
             self._client.stop()
@@ -910,6 +933,7 @@ class MainWindow(QMainWindow):
             "Open" if self._transport_combo.currentText().upper() == "REPLAY" else "Connect")
         self._pause_btn.setChecked(False)
         self._set_stream_buttons_enabled(False)
+        self._update_record_button()
         self._record_btn.setEnabled(False)
         self._set_transport_inputs_enabled(True)
         self._path_label.setText(f"Disconnected. Output dir: {self._outpath}")
@@ -921,12 +945,15 @@ class MainWindow(QMainWindow):
         """The DAQ thread ended on its own (server dropped us, cable, timeout)."""
         reason = (self._client.error if self._client else None) or "stream ended"
         was_recording = self._is_recording
+        server_stops = self._rov_duration
         self._disconnect()
         msg = f"Connection lost: {reason}. Click Connect to reconnect."
         for v in self._stream_views:
             v.set_stream_status(f"Connection lost: {reason}")
         if was_recording:
-            msg += " The local recording was saved; the ROV-side recording may still be running."
+            msg += (" The local recording was saved; the ROV-side recording "
+                    + ("stops by itself at its auto-stop time." if server_stops
+                       else "may still be running (Connect shows it)."))
         self._path_label.setText(msg)
 
     @property
@@ -1270,6 +1297,10 @@ class MainWindow(QMainWindow):
         self._samples_since_clear = 0
         self._path_label.setText("Resetting V0...")
 
+    def _set_auto_stop(self, secs: float) -> None:
+        """Auto-stop after ``secs`` (0: off), as if typed into the panel."""
+        self._auto_stop_spin.setValue(float(secs))
+
     def _on_auto_stop_changed(self, v: float) -> None:
         if 0 < v < MIN_REC_LEN_S:
             self._auto_stop_spin.blockSignals(True)
@@ -1281,13 +1312,47 @@ class MainWindow(QMainWindow):
     def _on_record_clicked(self) -> None:
         if self._is_recording:
             self._stop_recording()
+        elif self._foreign_rec is not None:
+            self._stop_foreign_recording()
         else:
             self._start_recording()
 
-    def _start_recording(self) -> None:
-        if self._client is None or self._replaying:
+    @property
+    def _vehicle_live(self) -> bool:
+        """Connected to daq_server: the recording is the vehicle's, with acks and a
+        status record to follow (not the ESP32 / Sim transports' local tee)."""
+        return (self._client is not None and not self._replaying
+                and self._client.transport_kind == "server")
+
+    def _start_recording(self, force: bool = False) -> None:
+        if self._client is None or self._replaying or self._is_recording or self._rec_cmd:
             return
         tag = self._tag_edit.text().strip()
+        if not self._vehicle_live:
+            self._begin_local_recording(tag)
+            return
+        if self._foreign_rec is not None and not force:
+            return                                   # the button stops that one instead
+        # daq_server: the local .dat / .jsonl start once the server says it started
+        # (it refuses while another recording runs, unless forced)
+        try:
+            self._outpath.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            QMessageBox.critical(self, "Record failed", f"{exc}")
+            return
+        acks = self._client.bus.get_metadata().get("server_acks") or {}
+        dur = self._auto_stop_s if self._auto_stop_s > 0 else None
+        if not self._client.send_record_start(tag, duration=dur, force=force, who=self._who):
+            self._note("Rec: could not send the command.")
+            return
+        self._rec_cmd = {"cmd": "rec_start", "tag": tag, "sent": time.monotonic(),
+                         "seen": acks.get("rec_start", (0, None))[0]}
+        self._path_label.setText("Starting the ROV recording...")
+        self._update_record_button()
+
+    def _begin_local_recording(self, tag: str) -> bool:
+        """The local .dat (and, event streams, the .jsonl tee) from now on."""
+        assert self._client is not None
         start_dt = datetime.now()
         fname = build_datalog_filename(start_dt, tag)
         fullpath = self._outpath / fname
@@ -1295,20 +1360,20 @@ class MainWindow(QMainWindow):
             self._dat_writer = DatWriter(fullpath, self._nch)
         except OSError as exc:
             QMessageBox.critical(self, "Record failed", f"{exc}")
-            return
+            return False
         self._record_start_dt = start_dt
         self._is_recording = True
         # from the oldest sample not yet final (the provisional ones come later)
         self._rec_from = self._next_idx - (self._despiker.pending if self._despiker else 0)
-        # Server transport: also starts the recording on the vehicle, and tees
-        # the full whisker+IMU stream to a local .jsonl next to the .dat.
-        self._client.send_record_start(tag, local_copy=str(fullpath.with_suffix(".jsonl")))
+        # the full whisker+IMU stream to a local .jsonl next to the .dat
+        if self._vehicle_live:
+            self._client.start_local_copy(str(fullpath.with_suffix(".jsonl")))
+        else:
+            self._client.send_record_start(tag, local_copy=str(fullpath.with_suffix(".jsonl")))
 
-        self._record_btn.setText("■ Stop")
-        self._record_btn.setStyleSheet(
-            "QPushButton { background-color: #c00; color: white; font-weight: bold; }"
-        )
-        self._path_label.setText(f"Recording → {fullpath}")
+        self._update_record_button()
+        self._path_label.setText(f"Recording → {fullpath}"
+                                 + (f"\nROV: {self._rov_path}" if self._rov_path else ""))
         self._progress.setValue(0)
         self._fault_sidecar_path = fullpath.with_suffix(".faults.txt")
         f = self._fault_state
@@ -1316,8 +1381,11 @@ class MainWindow(QMainWindow):
             since = datetime.fromtimestamp(f.get("since", 0)).strftime("%H:%M:%S")
             self._write_fault_sidecar(f"at record start: {f['level']} {f.get('code')}:"
                                       f" {f.get('msg')} (since {since})")
+        return True
 
-    def _stop_recording(self) -> None:
+    def _stop_recording(self, server_stopped: str = "") -> None:
+        """Stop ours: the local files, and (unless ``server_stopped`` says the
+        server already did, and why) the vehicle's."""
         d = self._despiker
         if d is not None and d.pending and self._dat_writer is not None:
             self._record_final(self._sig[-d.pending:], self._next_idx - d.pending)
@@ -1327,17 +1395,174 @@ class MainWindow(QMainWindow):
             self._fault_sidecar = None
         self._fault_sidecar_path = None
         if self._client is not None:
-            self._client.send_record_stop()
+            if server_stopped:
+                self._client.stop_local_copy()
+            elif self._vehicle_live:
+                acks = self._client.bus.get_metadata().get("server_acks") or {}
+                if self._client.send_record_stop(path=self._rov_path, who=self._who):
+                    # until the ack, a status in flight may still show it running
+                    self._rec_cmd = {"cmd": "rec_stop", "own": True, "sent": time.monotonic(),
+                                     "seen": acks.get("rec_stop", (0, None))[0]}
+            else:
+                self._client.send_record_stop()
+        rov = self._rov_path
+        self._rov_path, self._rov_confirmed, self._rov_duration = None, False, False
         if self._dat_writer is not None:
             try:
                 self._dat_writer.close()
             finally:
                 p = self._dat_writer.path
                 self._dat_writer = None
-                self._path_label.setText(f"Saved {p}")
-        self._record_btn.setText("● Rec")
-        self._record_btn.setStyleSheet("QPushButton { color: #c00; font-weight: bold; }")
+                text = f"Saved {p}"
+                if server_stopped:
+                    text += f"\nROV recording {os.path.basename(rov or '')} {server_stopped}"
+                self._note(text) if server_stopped else self._path_label.setText(text)
+        self._update_record_button()
         self._progress.setValue(0)
+
+    def _stop_foreign_recording(self) -> None:
+        """Stop the vehicle's recording that this window didn't start (after asking)."""
+        rec = self._foreign_rec
+        if rec is None or self._client is None or self._rec_cmd:
+            return
+        name = os.path.basename(rec.get("path") or "?")
+        text = (f"The ROV is recording {name} ({rec.get('secs', 0):.0f} s"
+                + (f", started by {rec['by']}" if rec.get("by") else "")
+                + ").\n\nThis window didn't start it (another client, or this one before a"
+                  " reconnect). Stop it?")
+        if QMessageBox.question(self, "Stop ROV recording", text) != QMessageBox.StandardButton.Yes:
+            return
+        acks = self._client.bus.get_metadata().get("server_acks") or {}
+        if not self._client.send_record_stop(path=rec.get("path"), who=self._who, local=False):
+            self._note("Stop: could not send the command.")
+            return
+        self._rec_cmd = {"cmd": "rec_stop", "sent": time.monotonic(),
+                         "seen": acks.get("rec_stop", (0, None))[0]}
+        self._update_record_button()
+
+    def _tick_rec_ack(self, meta: dict) -> None:
+        """The ack of the rec_start / rec_stop this window sent."""
+        pend = self._rec_cmd
+        if pend is None:
+            return
+        n, ack = (meta.get("server_acks") or {}).get(pend["cmd"], (0, None))
+        if n <= pend["seen"] or ack is None:
+            if time.monotonic() - pend["sent"] > REC_ACK_TIMEOUT_S:
+                self._rec_cmd = None
+                self._note(f"{pend['cmd']}: no reply from the server (the status line shows"
+                           " whether the ROV records).")
+                self._update_record_button()
+            return
+        self._rec_cmd = None
+        if pend["cmd"] == "rec_stop":
+            self._foreign_rec = None
+            if pend.get("own") and ack.get("ok", True):
+                pass                               # the label says "Saved ..." already
+            elif ack.get("ok", True):
+                self._note(f"ROV recording stopped: {ack.get('path') or '(none was running)'}")
+            else:
+                self._note(f"ROV recording not stopped: {ack.get('error', '?')}")
+            rec = ack.get("rec")
+            if isinstance(rec, dict) and rec.get("on"):
+                self._foreign_rec = rec
+            self._update_record_button()
+            return
+        if ack.get("ok", True) and ack.get("path"):
+            self._rov_path = str(ack["path"])
+            self._rov_confirmed = False
+            self._rov_duration = ack.get("duration") is not None
+            self._foreign_rec = None
+            if not self._begin_local_recording(pend["tag"]):
+                # the ROV records, here nothing does: show it as one to stop
+                self._foreign_rec = {"on": True, "path": self._rov_path, "secs": 0,
+                                     "by": self._who}
+                self._rov_path = None
+                self._update_record_button()
+                return
+            if ack.get("replaced"):
+                self._note(f"Recording; closed the ROV's previous one, {ack['replaced']}")
+            return
+        if ack.get("busy"):
+            # another recording runs (started since the last status): ask, outside this tick
+            rec = ack.get("rec") if isinstance(ack.get("rec"), dict) else {}
+            self._foreign_rec = rec or None
+            self._update_record_button()
+            QTimer.singleShot(0, lambda: self._ask_replace(rec, pend["tag"]))
+            return
+        self._note(f"ROV recording not started: {ack.get('error', 'no path in the reply')}")
+        self._update_record_button()
+
+    def _ask_replace(self, rec: dict, tag: str) -> None:
+        name = os.path.basename(rec.get("path") or "?")
+        box = QMessageBox(QMessageBox.Icon.Question, "ROV already recording",
+                          f"The ROV is already recording {name} ({rec.get('secs', 0):.0f} s"
+                          + (f", started by {rec['by']}" if rec.get("by") else "") + ").\n\n"
+                          "Replace closes that file and starts yours; Keep leaves it running"
+                          " (the Rec button then stops it).", parent=self)
+        replace = box.addButton("Replace", QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton("Keep", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is replace and self._client is not None:
+            self._foreign_rec = None
+            self._tag_edit.setText(tag)
+            self._start_recording(force=True)
+
+    def _on_rec_status(self, rec: dict) -> None:
+        """The vehicle's recording in a status record: adopt one not ours; follow
+        ours (the server may stop it: its duration, another client, a restart)."""
+        if not self._vehicle_live or self._rec_cmd is not None:
+            return
+        on = bool(rec.get("on"))
+        if self._is_recording and self._rov_path:
+            ours_on = on and _same_rec(rec.get("path"), self._rov_path)
+            if ours_on:
+                self._rov_confirmed = True
+                return
+            last = rec.get("last") or {}
+            if _same_rec(last.get("path"), self._rov_path):
+                why = f"stopped by the server: {last.get('why', '?')}" + (
+                    f" ({last['by']})" if last.get("by") and last.get("by") != "server" else "")
+            elif self._rov_confirmed:
+                why = "is no longer running"
+            else:
+                return                             # a status from before ours started
+            print(f"[MainWindow] ROV recording {why}")
+            self._stop_recording(server_stopped=why)
+            if on:                                 # and another one runs now
+                self._foreign_rec = rec
+                self._update_record_button()
+            return
+        if self._is_recording:
+            return
+        foreign = rec if on else None
+        if (foreign is None) != (self._foreign_rec is None) or foreign is not None:
+            self._foreign_rec = foreign
+            self._update_record_button()
+
+    def _update_record_button(self) -> None:
+        b = self._record_btn
+        if self._is_recording:
+            b.setText("■ Stop")
+            b.setStyleSheet("QPushButton { background-color: #c00; color: white; font-weight: bold; }")
+            b.setToolTip("Stop this recording (local files and the ROV's)")
+        elif self._rec_cmd is not None:
+            b.setText("Starting…" if self._rec_cmd["cmd"] == "rec_start" else "Stopping…")
+            b.setStyleSheet("QPushButton { color: #888; font-weight: bold; }")
+            b.setToolTip("Waiting for the server's reply")
+        elif self._foreign_rec is not None:
+            r = self._foreign_rec
+            b.setText(f"■ Stop ROV rec {r.get('secs', 0):.0f}s")
+            b.setStyleSheet("QPushButton { background-color: #d07000; color: white; font-weight: bold; }")
+            b.setToolTip(f"The ROV is recording {r.get('path') or '?'}"
+                         + (f"\nstarted by {r['by']}" if r.get("by") else "")
+                         + (f", stops in {r['left']:.0f} s" if r.get("left") is not None else "")
+                         + "\nThis window didn't start it, so nothing is recorded locally."
+                           "\nClick to stop it (asks first).")
+        else:
+            b.setText("● Rec")
+            b.setStyleSheet("QPushButton { color: #c00; font-weight: bold; }")
+            b.setToolTip("")
+        b.setEnabled(self._client is not None and not self._replaying and self._rec_cmd is None)
 
     # ------------------------------------------------------------------
     # the data tick
@@ -1520,6 +1745,7 @@ class MainWindow(QMainWindow):
                     self._imu_last_seq = max(self._imu_last_seq, seq)
         self._tick_esp32_mode(meta)
         self._tick_esp32_reset(meta)
+        self._tick_rec_ack(meta)
         self._tick_faults(meta)
         self._maybe_apply_measured_rate(meta.get("fs_measured"))
         st = meta.get("server_status") or {}
@@ -1546,6 +1772,8 @@ class MainWindow(QMainWindow):
         if st and st.get("t", 0) != self._last_status_t:
             self._last_status_t = st.get("t", 0)
             self._last_status_rec = st
+            if isinstance(st.get("rec"), dict):
+                self._on_rec_status(st["rec"])
             self._set_fault_state(st.get("esp32", {}).get("fault") or {})
             self._note_beat(st.get("esp32", {}).get("beat"))
             self._show_status(st)
@@ -1698,6 +1926,12 @@ class MainWindow(QMainWindow):
         rec = st.get("rec", {})
         if self._client.has_vehicle:
             pi_rec = f"ROV rec {rec.get('secs', 0):.0f}s" if rec.get("on") else "ROV rec off"
+            if rec.get("on") and not self._replaying:
+                if not (self._rov_path and _same_rec(rec.get("path"), self._rov_path)):
+                    pi_rec += (f" {os.path.basename(rec.get('path') or '')}"
+                               + (f" by {rec['by']}" if rec.get("by") else "") + " (not ours)")
+                if rec.get("left") is not None:
+                    pi_rec += f", stops in {rec['left']:.0f}s"
         else:
             pi_rec = "streaming" if st.get("esp32", {}).get("streaming") else "NOT streaming"
         e = st.get("esp32", {})
@@ -1796,7 +2030,10 @@ class MainWindow(QMainWindow):
         elapsed = (datetime.now() - self._record_start_dt).total_seconds()
         frac = min(1.0, elapsed / self._auto_stop_s)
         self._progress.setValue(int(round(frac * 1000)))
-        if elapsed >= self._auto_stop_s:
+        # a server that took the duration stops it itself (its status ends ours here);
+        # this is the fallback, for an older server or a lost status
+        limit = self._auto_stop_s + (SERVER_STOP_GRACE_S if self._rov_duration else 0.0)
+        if elapsed >= limit:
             print(f"[MainWindow] auto-stop after {elapsed:.1f}s")
             self._stop_recording()
 
