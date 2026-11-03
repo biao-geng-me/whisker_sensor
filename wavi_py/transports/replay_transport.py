@@ -33,6 +33,11 @@ because that would end ``ServerReader`` and read as a lost link. ``play``
 after the end starts over from 0. With a loop set, reaching its end seeks to
 its start (a new ``gen``), so the GUI sees the same thing as a user's seek.
 
+Despike (``despike``, off by default): the whisker scans are served with the
+index's spikes replaced (``daq/despike.py``, centred over the whole file;
+``RecordingIndex.read_lines``). Switching it seeks to the playhead, so the
+buffers refill with the other version at once.
+
 Commands are refused (it is a recording): each JSON line written gets an ack
 with ``ok: false``, except ``status`` (ok). Nothing is ever written.
 """
@@ -58,7 +63,7 @@ SPEEDS = (0.25, 0.5, 1.0, 2.0, 4.0, 8.0)
 class ReplayTransport(Transport):
     def __init__(self, index: RecordingIndex, *, speed: Optional[float] = 1.0,
                  start_s: float = 0.0, playing: bool = False,
-                 preroll_s: float = DEFAULT_T_BUFFER_S,
+                 preroll_s: float = DEFAULT_T_BUFFER_S, despike: bool = False,
                  clock: Callable[[], float] = time.monotonic):
         self.index = index
         self.preroll_s = float(preroll_s)
@@ -76,6 +81,7 @@ class ReplayTransport(Transport):
         self._loop: Optional[tuple[float, float]] = None
         self._state = "paused"
         self._first_seek = True
+        self._despike = bool(despike)
         with self._cv:
             self._seek_locked(start_s, self.preroll_s)
             if playing:
@@ -104,6 +110,17 @@ class ReplayTransport(Transport):
             self._wall = self._clock()
             self._speed = None if v is None else float(v)
             self._cv.notify_all()
+
+    @property
+    def despike(self) -> bool:
+        return self._despike
+
+    @despike.setter
+    def despike(self, on: bool) -> None:
+        with self._cv:
+            if bool(on) != self._despike:
+                self._despike = bool(on)
+                self._seek_locked(self._pos_locked() - self.index.t0, self.preroll_s)
 
     @property
     def position(self) -> float:
@@ -302,12 +319,12 @@ class ReplayTransport(Transport):
             self._pending.popleft()
         else:
             self._pending[0] = (j, i1)
-        return self.index.read_lines(self._f, i0, j)
+        return self.index.read_lines(self._f, i0, j, self._despike)
 
     def _serve(self, i0: int, i1: int, max_n: int) -> bytes:
         j = self._fit(i0, i1, max_n)
         self._cur = j
-        return self.index.read_lines(self._f, i0, j)
+        return self.index.read_lines(self._f, i0, j, self._despike)
 
     def _fit(self, i0: int, i1: int, max_n: int) -> int:
         """The end of lines i0.. that fit in max_n bytes (at least one line)."""

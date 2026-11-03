@@ -11,6 +11,9 @@ depth and the seek state are parsed):
   ``tus`` for the whisker scans, RAW_IMU ``time_usec`` for the IMU;
 - the scan rate (from ``tus``), and V0 (the mean of the first 0.25 s of scans;
   a clip, ``replay/export.py``, carries its source's V0 and surface pressure);
+- the spikes of the whisker scans (``daq/despike.py``, every window centred):
+  line, gauge and replacement of each, sparse (~30 in a 13 min dive), so the
+  replay transport can serve the scans raw or despiked (``read_lines``);
 - the line numbers of every hello / info / status line (the state a seek
   restores) and the events and depth (``replay/events.py``).
 
@@ -45,10 +48,11 @@ from typing import Callable, Optional
 import numpy as np
 
 from wavi_py.daq.clock import FittedClock, fit_segments
+from wavi_py.daq.despike import find_spikes
 from wavi_py.replay.events import WATER_DENSITY, Event, EventTracker, TimelineQueries, hpa_per_cm
 from whisker_link.esp32_frame import MV_PER_CODE
 
-INDEX_VERSION = 1
+INDEX_VERSION = 2
 V0_S = 0.25                    # V0 = mean of this much of the first scans
 
 KINDS = ("other", "hello", "wsk", "mav", "status", "info", "txt", "mark", "ack")
@@ -117,6 +121,9 @@ class RecordingIndex(TimelineQueries):
         self.imu_segs: list = []
         self.n_wsk = 0
         self.n_raw_imu = 0
+        self.spk_line = np.empty(0, np.int64)  # spikes: line, gauge, replacement (raw units)
+        self.spk_ch = np.empty(0, np.int64)
+        self.spk_val = np.empty(0, np.float64)
         self.events: list[Event] = []
         self.armed_spans: list[list[float]] = []   # session seconds
         self.press_t = np.empty(0)                 # session seconds
@@ -167,6 +174,7 @@ class RecordingIndex(TimelineQueries):
         imu_t: list[float] = []
         imu_us: list[int] = []
         v0_rows: list[list[int]] = []
+        raw_parts: list[bytes] = []            # the "raw" list of every wsk line, as text
         tracker = EventTracker()
         hello = None
         pos = 0
@@ -211,6 +219,8 @@ class RecordingIndex(TimelineQueries):
                         tracker.wsk_seq(t, seq)
                     if hello is not None and len(v0_rows) < 512:
                         v0_rows.append(json.loads(line)["raw"])
+                    r0 = line.find(b'"raw":[', e)
+                    raw_parts.append(line[r0 + 7:line.find(b"]", r0)] if r0 >= 0 else b"")
                 elif kind == k_mav:
                     ty = line.find(b'"type":"', e)
                     if ty < 0:
@@ -263,6 +273,7 @@ class RecordingIndex(TimelineQueries):
             mv = float(hello.get("mv_per_code", MV_PER_CODE))
             self.v0 = (np.asarray(v0_rows[:nv0], dtype=np.float64).mean(axis=0) * mv
                        ).astype(np.float32)
+        self._find_spikes(raw_parts)
         self._take_events(tracker)
         clip = hello.get("clip")
         if isinstance(clip, dict):          # a clip (replay/export.py): the source's zero, surface
@@ -271,6 +282,21 @@ class RecordingIndex(TimelineQueries):
             if clip.get("surface_hpa") is not None:
                 self.surface_hpa = float(clip["surface_hpa"])
         return self
+
+    def _find_spikes(self, raw_parts: list[bytes]) -> None:
+        """The spikes of the scans (``daq/despike.py``), by line. Skipped when the
+        scans do not all have the same gauges."""
+        n = len(raw_parts)
+        nch = raw_parts[0].count(b",") + 1 if n and raw_parts[0] else 0
+        if n < 2 or not nch:
+            return
+        x = np.fromstring(b",".join(raw_parts), dtype=np.float64, sep=",")
+        if len(x) != n * nch:
+            print(f"[RecordingIndex] {self.path.name}: scans of mixed width, no despike")
+            return
+        rows, cols, vals = find_spikes(x.reshape(n, nch))
+        lines = np.nonzero(self.kind == K["wsk"])[0]
+        self.spk_line, self.spk_ch, self.spk_val = lines[rows], cols, vals
 
     def _take_events(self, tr: EventTracker) -> None:
         t0 = self.t0
@@ -300,6 +326,7 @@ class RecordingIndex(TimelineQueries):
         with open(tmp, "wb") as f:
             np.savez(f, off=self.off, t=self.t, kind=self.kind, v0=self.v0,
                      press_t=self.press_t, press_hpa=self.press_hpa,
+                     spk_line=self.spk_line, spk_ch=self.spk_ch, spk_val=self.spk_val,
                      meta=np.asarray(json.dumps(meta)))
         os.replace(tmp, path)
 
@@ -314,6 +341,7 @@ class RecordingIndex(TimelineQueries):
                 self = cls()
                 self.off, self.t, self.kind = z["off"], z["t"], z["kind"]
                 self.v0, self.press_t, self.press_hpa = z["v0"], z["press_t"], z["press_hpa"]
+                self.spk_line, self.spk_ch, self.spk_val = z["spk_line"], z["spk_ch"], z["spk_val"]
         except (OSError, ValueError, KeyError):
             return None
         self.path, self.size, self.mtime_ns = path, st.st_size, st.st_mtime_ns
@@ -361,12 +389,43 @@ class RecordingIndex(TimelineQueries):
         j = int(np.searchsorted(lines, i)) - 1
         return int(lines[j]) if j >= 0 else None
 
-    def read_lines(self, f, i0: int, i1: int) -> bytes:
-        """Bytes of lines [i0, i1) from the open (binary) file ``f``."""
+    def read_lines(self, f, i0: int, i1: int, despike: bool = False) -> bytes:
+        """Bytes of lines [i0, i1) from the open (binary) file ``f``; with
+        ``despike``, the scans with spikes rewritten with their replacements."""
         if i1 <= i0:
             return b""
         f.seek(int(self.off[i0]))
-        return f.read(int(self.off[i1] - self.off[i0]))
+        data = f.read(int(self.off[i1] - self.off[i0]))
+        if not despike:
+            return data
+        s0, s1 = np.searchsorted(self.spk_line, [i0, i1])
+        if s0 == s1:
+            return data
+        base = int(self.off[i0])
+        out, at = [], 0
+        lines, chs, vals = self.spk_line[s0:s1], self.spk_ch[s0:s1], self.spk_val[s0:s1]
+        for ln in np.unique(lines):
+            a, b = int(self.off[ln]) - base, int(self.off[ln + 1]) - base
+            ev = json.loads(data[a:b])
+            raw = ev["raw"]
+            is_int = isinstance(raw[0], int)
+            for c, v in zip(chs[lines == ln], vals[lines == ln]):
+                raw[int(c)] = int(round(v)) if is_int else round(float(v), 6)
+            out += [data[at:a], (json.dumps(ev, separators=(",", ":")) + "\n").encode()]
+            at = b
+        out.append(data[at:])
+        return b"".join(out)
+
+    def despiked_scan(self, line: int, raw: list) -> list:
+        """The ``raw`` list of scan ``line`` with its spikes replaced (in place)."""
+        s0, s1 = np.searchsorted(self.spk_line, [line, line + 1])
+        for c, v in zip(self.spk_ch[s0:s1], self.spk_val[s0:s1]):
+            raw[int(c)] = v
+        return raw
+
+    @property
+    def n_spikes(self) -> int:
+        return len(self.spk_line)
 
     def depth(self, rho: float = WATER_DENSITY) -> tuple[np.ndarray, np.ndarray]:
         """(session seconds, depth cm) from the external pressure; empty without it."""
@@ -378,4 +437,4 @@ class RecordingIndex(TimelineQueries):
         n_ev = len(self.events)
         return (f"{self.path.name}: {self.duration:.1f} s, {self.n_lines} lines, "
                 f"{self.n_wsk} scans at {self.fs:.2f} Hz, {self.n_raw_imu} RAW_IMU, "
-                f"{n_ev} events" + (" (cached index)" if self.from_cache else ""))
+                f"{n_ev} events, {self.n_spikes} spikes" + (" (cached index)" if self.from_cache else ""))

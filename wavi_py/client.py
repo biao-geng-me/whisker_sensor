@@ -29,7 +29,7 @@ Replay a recording through the same pipeline (``speed=None``: as fast as it
 is read; the GUI paces it and drives ``client.replay``)::
 
     client = WaviClient(transport="replay", path="st_..._pilot2.jsonl",
-                        replay_speed=None)
+                        replay_speed=None)          # replay_despike=True: spikes replaced
 """
 
 from __future__ import annotations
@@ -88,6 +88,7 @@ class WaviClient:
         replay_speed: Optional[float] = 1.0,
         replay_start_s: float = 0.0,
         replay_playing: bool = True,
+        replay_despike: bool = False,
     ):
         transport = transport.lower()
         if transport not in ("tcp", "serial", "server", "esp32", "sim", "replay"):
@@ -123,6 +124,7 @@ class WaviClient:
         self._replay_speed = replay_speed
         self._replay_start_s = float(replay_start_s)
         self._replay_playing = bool(replay_playing)
+        self._replay_despike = bool(replay_despike)
 
         # acquisition params
         self.nsensor = int(nsensor)
@@ -330,7 +332,7 @@ class WaviClient:
             assert self.index is not None
             return ReplayTransport(self.index, speed=self._replay_speed,
                                    start_s=self._replay_start_s, playing=self._replay_playing,
-                                   preroll_s=self.t_buffer_s)
+                                   preroll_s=self.t_buffer_s, despike=self._replay_despike)
         assert self._serial_port is not None
         if self._transport_kind == "esp32":
             return Esp32SerialTransport(self._serial_port)
