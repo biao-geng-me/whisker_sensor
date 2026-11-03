@@ -18,10 +18,15 @@ Nothing in the views is changed: the bench wraps their redraw / paint methods.
         [--layout grid|stacked|single] [--secs 14] [--warmup 4] [--tag NAME] \
         [--preset "all live"] [--dome-fps 60] [--opengl] [--shots DIR] [--profile FILE]
 
-Windows: line, spectrum, fft, spec, imu, dome. The Dome view needs a GL
-context (on the cluster: Xvfb + Mesa llvmpipe, xrun.sh). The Sim transport has
-no IMU, so with ``imu`` the bench feeds the IMU window the way the control
-panel does for the Server transport: 100 Hz rows, 30 s kept, every tick.
+Windows: line, spectrum, fft, spec, imu, dome, rov. The Dome and ROV views
+need a GL context (on the cluster: Xvfb + Mesa llvmpipe, xrun.sh). The Sim
+transport has no IMU, so with ``imu`` the bench feeds the IMU window the way the
+control panel does for the Server transport: 100 Hz rows, 30 s kept, every tick.
+
+``--replay FILE.jsonl [--speed 4|max] [--start S]`` runs a recording instead
+(the real IMU, MAVLink and status included) and adds a ``replay`` record: the
+playhead's speed over the wall clock, the whisker / IMU rows reaching the
+buses per second, and how far the newest plotted sample lags the playhead.
 ``--opengl`` turns on pyqtgraph's OpenGL viewports (the app: WAVI_PG_OPENGL=1).
 """
 from __future__ import annotations
@@ -45,7 +50,7 @@ from PyQt6.QtWidgets import QApplication  # noqa: E402
 
 import pyqtgraph as pg  # noqa: E402
 
-WINDOWS = ("line", "spectrum", "fft", "spec", "imu", "dome")
+WINDOWS = ("line", "spectrum", "fft", "spec", "imu", "dome", "rov")
 
 
 class Meter:
@@ -118,6 +123,8 @@ def instrument() -> None:
         from wavi_py.views.dome_view import DomeView, _GLView
         _timed(_GLView, "paintGL", lambda s: _key(s, "paint"))
         _timed(DomeView, "_render_pose", lambda s: _key(s, "render"))
+        from wavi_py.views.rov_view import RovView
+        _timed(RovView, "_render", lambda s: _key(s, "render"))
     except Exception:
         pass
     # the main tick and its parts
@@ -143,6 +150,10 @@ def main() -> None:
     ap.add_argument("--switch", type=float, default=0.0, help="sys.setswitchinterval (s), 0: default")
     ap.add_argument("--opengl", action="store_true", help="pyqtgraph useOpenGL (GL viewports)")
     ap.add_argument("--preset", default="dome", help="Sim signal preset (dome, all live, ...)")
+    ap.add_argument("--replay", default="", metavar="FILE.jsonl",
+                    help="replay this recording instead of the Sim transport (real IMU)")
+    ap.add_argument("--speed", default="1", help="replay speed (0.25 .. 8, or max)")
+    ap.add_argument("--start", type=float, default=0.0, help="replay: start here (s)")
     args = ap.parse_args()
     wins = [w for w in args.windows.split(",") if w and w != "none"]
     for w in wins:
@@ -160,24 +171,42 @@ def main() -> None:
     instrument()
     from wavi_py.main_window import MainWindow
 
-    mw = MainWindow(transport="sim", nsensor=16, fs=62.5, auto_fs=True,
-                    scan_mode=(args.fs_mode,), selects="0123457")
-    mw.show()
-    mw._sim.preset(args.preset)
-    mw._transport_combo.setCurrentText("Sim")
-    mw._connect()
+    speed = None if args.speed == "max" else float(args.speed)
+    if args.replay:
+        mw = MainWindow(transport="replay", nsensor=16, replay_path=args.replay,
+                        replay_speed=speed, replay_start_s=args.start)
+        mw.show()
+        mw.open_replay(args.replay)
+        t_end = time.monotonic() + 60
+        while not mw._replay.active and time.monotonic() < t_end:
+            app.processEvents()
+            time.sleep(0.005)
+        if not mw._replay.active:
+            raise SystemExit(f"cannot open {args.replay}")
+        mw._replay.set_speed(speed)
+        mw._replay.play()
+    else:
+        mw = MainWindow(transport="sim", nsensor=16, fs=62.5, auto_fs=True,
+                        scan_mode=(args.fs_mode,), selects="0123457")
+        mw.show()
+        mw._sim.preset(args.preset)
+        mw._transport_combo.setCurrentText("Sim")
+        mw._connect()
 
     views = {"line": mw._line_view, "spectrum": mw._spectrum_view, "fft": mw._fft_view,
              "spec": mw._spec_view, "imu": mw._imu_view}
     toggles = {"line": mw._toggle_line, "spectrum": mw._toggle_spectrum, "fft": mw._toggle_fft,
-               "spec": mw._toggle_spec, "imu": mw._toggle_imu, "dome": mw._toggle_dome}
+               "spec": mw._toggle_spec, "imu": mw._toggle_imu, "dome": mw._toggle_dome,
+               "rov": mw._toggle_rov}
     sizes = {"line": (1400, 900), "spectrum": (1000, 700), "fft": (1000, 760),
-             "spec": (1000, 700), "imu": (900, 700), "dome": (1280, 800)}
+             "spec": (1000, 700), "imu": (900, 700), "dome": (1280, 800), "rov": (900, 700)}
     for w in wins:
         toggles[w].setChecked(True)
         if w == "dome":
             views["dome"] = mw._dome_view
             mw._dome_view._fps_box.setValue(args.dome_fps)
+        if w == "rov":
+            views["rov"] = mw._rov_view
         views[w].resize(*sizes[w])
     for name, v in views.items():
         _owner[id(v)] = name
@@ -202,7 +231,7 @@ def main() -> None:
         if not mw._is_paused and mw._imu_view.isVisible():
             mw._imu_view.update_view(np.arange(-n + 1, 1) / 100.0, rows)
 
-    if "imu" in wins:
+    if "imu" in wins and not args.replay:
         imu_timer = QTimer()
         imu_timer.timeout.connect(feed_imu)
         imu_timer.start(50)
@@ -247,6 +276,10 @@ def main() -> None:
         stall.update(worst=0.0, sum_late=0.0, n=0, last=time.perf_counter())
         idle["s"] = 0.0
         mark.update(t=time.perf_counter(), cpu=time.process_time(), main=time.thread_time())
+        if args.replay:
+            mw._replay.poll()
+            mark.update(pos=mw._replay.position, n_bus=mw._client.bus.total_published,
+                        n_imu=mw._client.imu_bus.total_published)
         if prof:
             prof.enable()
 
@@ -273,6 +306,18 @@ def main() -> None:
                       "wall_pct": round(100 * (r.s + p.s) / dt, 1),
                       "cpu_pct": round(100 * (r.cpu + p.cpu) / dt, 1)}
         res["views"] = per
+        if args.replay:
+            # the replay kept up: playhead speed (wall), what reached the buses, the lag of
+            # the newest plotted sample behind the playhead
+            mw._replay.poll()
+            c = mw._client
+            res["replay"] = {
+                "speed_set": args.speed,
+                "speed_got": round((mw._replay.position - mark["pos"]) / dt, 2),
+                "position": round(mw._replay.position, 1),
+                "wsk_per_s": round((c.bus.total_published - mark["n_bus"]) / dt, 1),
+                "imu_per_s": round((c.imu_bus.total_published - mark["n_imu"]) / dt, 1),
+                "lag_s": round(mw._replay.position - float(mw._sig_t[-1]), 3)}
         res["tick"] = {k.split(".", 1)[1]: {"per_s": round(m.n / dt, 1),
                                            "ms": round(1e3 * m.s / max(m.n, 1), 3),
                                            "cpu_pct": round(100 * m.s / dt, 2)}
