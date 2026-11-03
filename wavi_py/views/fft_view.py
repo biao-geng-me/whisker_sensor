@@ -10,10 +10,13 @@ above it (fmin..fmax), drawn in a closed frame:
 - Box over frequency: the spread of the channel's amplitudes across the
   band's bins. Box = 25..75 %, line = median (the noise floor, roughly),
   whiskers = 5..95 %, dot = the peak.
-- Box over time: the spread of the band peak over the last ``history``
-  seconds of frames. Box / whiskers as above, dot = the newest frame. The
-  history restarts when the band changes and only collects while the window
-  is shown.
+- Box over time (the default): the spread of the band peak over the last
+  ``history`` seconds of frames. Box / whiskers as above, dot = the newest
+  frame. The frames are keyed on data time (the time of their last sample),
+  so in a replay at any speed ``history`` is seconds of recording, not of
+  wall clock. The history restarts when the band changes or the buffers
+  start over (seek, rate change), and only collects while the window is
+  shown.
 
 Each channel's bar / box sits right under its heatmap column: both plots get
 the same left axis width, and the lower plot a right margin as wide as the
@@ -42,6 +45,7 @@ from wavi_py.views.spectral_base import SpectralWindow, to_db
 from wavi_py.views.whisker_plots import auto_width as _auto_width
 
 _MODES = ("Peak bars", "Box over frequency", "Box over time")
+_DEFAULT_MODE = 2                                  # Box over time
 _A_RGB, _B_RGB = (220, 40, 40), (40, 80, 220)
 _KEYS_HELP = """\
 <table cellspacing=4>
@@ -113,6 +117,7 @@ class FftView(SpectralWindow):
         row.setContentsMargins(8, 2, 8, 0)
         self._mode = QComboBox()
         self._mode.addItems(_MODES)
+        self._mode.setCurrentIndex(_DEFAULT_MODE)
         self._mode.setToolTip("Per-channel summary of the band [M]")
         self._mode.setFocusPolicy(Qt.FocusPolicy.NoFocus)        # keys stay with the window
         self._mode.currentIndexChanged.connect(lambda _i: (self._update_mode_widgets(), self._redraw()))
@@ -180,15 +185,28 @@ class FftView(SpectralWindow):
         self._fft = None
         self._hist.clear()
 
-    def update_view(self, fft_map: np.ndarray, fs: float) -> None:
-        """``fft_map`` (nfreq, nch) amplitude of the newest frame, at sample rate ``fs``."""
+    def update_view(self, fft_map: np.ndarray, fs: float, frames: np.ndarray | None = None,
+                    t: np.ndarray | None = None) -> None:
+        """``fft_map`` (nfreq, nch) amplitude of the newest frame, at sample rate ``fs``.
+        ``frames`` (k, nfreq, nch): all frames since the last call, oldest first
+        (default: just ``fft_map``), with ``t`` (k,) the data time of each one's last
+        sample, in s (default: the wall clock, for a caller without sample times)."""
         if fft_map.ndim != 2 or fft_map.shape != (self._nfreq, self._nch):
             return
         new_axis = fs != self._fs
         self._fft, self._fs = fft_map, float(fs)
+        if frames is None:
+            frames = fft_map[None]
+        if t is None:
+            t = np.full(len(frames), time.monotonic())
+        t = np.asarray(t, dtype=float)
+        if self._hist and t.size and t[0] < self._hist[-1][0]:
+            self._hist.clear()                  # time went back: a new stream
         k = self._band_bins()
-        self._hist.append((time.monotonic(), fft_map[k].max(axis=0) if k.size else
-                           np.zeros(self._nch)))
+        peaks = frames[:, k].max(axis=1) if k.size else np.zeros((len(frames), self._nch))
+        for ti, p in zip(t, peaks):
+            if np.isfinite(ti):
+                self._hist.append((float(ti), p))
         while self._hist and self._hist[-1][0] - self._hist[0][0] > self._history.maximum():
             self._hist.popleft()
         if new_axis:
@@ -321,6 +339,9 @@ class FftView(SpectralWindow):
     def _set_boxes(self, ok: np.ndarray, y0: np.ndarray, height: np.ndarray) -> None:
         """Boxes / bars for the channels in ``ok`` only (absent ones draw nothing)."""
         idx = np.flatnonzero(ok)
+        if idx.size == 0:                       # (pyqtgraph 0.13 fails on an empty pens list)
+            self._boxes.setOpts(x=np.empty(0), y0=np.empty(0), height=np.empty(0))
+            return
         self._boxes.setOpts(x=idx.astype(float), y0=y0[idx], height=height[idx],
                             brushes=[self._brushes[i] for i in idx], pens=[self._pens[i] for i in idx])
 

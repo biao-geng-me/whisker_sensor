@@ -204,9 +204,13 @@ class SpectralWindow(ViewWindow):
         return float(lo), float(hi)
 
     def _show_levels(self, lo_hi: tuple[float, float] | None = None) -> None:
-        """Put the range in use into the min / max boxes (without editing it)."""
+        """Put the range in use into the min / max boxes (without editing it). A box
+        being typed into is left alone: Auto redraws call this every frame, and would
+        otherwise overwrite the text under the caret."""
         lo, hi = lo_hi if lo_hi is not None else self._levels_saved[self.db]
         for box, v in ((self._lo, lo), (self._hi, hi)):
+            if box.hasFocus() or box.lineEdit().hasFocus():
+                continue
             box.blockSignals(True)
             box.setValue(v)
             box.blockSignals(False)
