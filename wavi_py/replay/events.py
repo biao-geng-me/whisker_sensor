@@ -23,13 +23,20 @@ wanders. Fresh water by default; set ``WATER_DENSITY`` (or pass ``rho``) for
 salt water (~1025 kg/m^3).
 
 Times are seconds on the Pi's receive clock (the event ``t``), as given;
-the index converts them to session seconds.
+the index converts them to session seconds. The tracker may be fed by the DAQ
+thread while the GUI reads it (``lock``).
+
+``TimelineQueries`` is what the timeline widgets ask of a source, in session
+seconds: ``events``, ``armed_spans``, ``depth()``, ``duration`` and the
+queries built on them. ``RecordingIndex`` is one source (a whole recording);
+``LiveTimeline`` is another (a live stream so far, from the reader's tracker).
 """
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
-from typing import Optional
+import threading
+from dataclasses import asdict, dataclass, replace
+from typing import Callable, Optional
 
 import numpy as np
 
@@ -75,6 +82,7 @@ class Event:
 
 class EventTracker:
     def __init__(self) -> None:
+        self.lock = threading.Lock()
         self.events: list[Event] = []
         self.armed_spans: list[list[float]] = []      # [t_arm, t_disarm or None]
         self._armed: Optional[bool] = None
@@ -96,6 +104,10 @@ class EventTracker:
 
     def feed(self, ev: dict) -> None:
         """One parsed event (any kind; the ones not used are ignored)."""
+        with self.lock:
+            self._feed(ev)
+
+    def _feed(self, ev: dict) -> None:
         k = ev.get("k")
         t = float(ev.get("t", 0.0))
         if k == "mav":
@@ -110,7 +122,7 @@ class EventTracker:
                 self._pressure(t, d)
         elif k == "wsk":
             if "seq" in ev:
-                self.wsk_seq(t, int(ev["seq"]))
+                self._wsk_seq(t, int(ev["seq"]))
         elif k == "status":
             self._status(t, ev)
         elif k == "mark":
@@ -124,6 +136,13 @@ class EventTracker:
 
     def wsk_seq(self, t: float, seq: int) -> None:
         """A whisker scan's sequence number (the index pulls it without json)."""
+        if self._last_seq is not None and seq == self._last_seq + 1:
+            self._last_seq = seq                 # the common case, without the lock
+            return
+        with self.lock:
+            self._wsk_seq(t, seq)
+
+    def _wsk_seq(self, t: float, seq: int) -> None:
         prev, self._last_seq = self._last_seq, seq
         if prev is None or seq == prev + 1:
             return
@@ -227,3 +246,105 @@ class EventTracker:
 
     def sorted_events(self) -> list[Event]:
         return sorted(self.events, key=lambda e: e.t)
+
+
+class TimelineQueries:
+    """Queries over ``events`` / ``armed_spans`` / ``depth()`` (session seconds)."""
+
+    events: list
+    armed_spans: list
+
+    @property
+    def duration(self) -> float:
+        raise NotImplementedError
+
+    def depth(self, rho: float = WATER_DENSITY) -> tuple[np.ndarray, np.ndarray]:
+        raise NotImplementedError
+
+    def depth_at(self, t_sess: float, rho: float = WATER_DENSITY) -> Optional[float]:
+        t, d = self.depth(rho)
+        if not len(t):
+            return None
+        i = max(0, int(np.searchsorted(t, t_sess, side="right")) - 1)
+        return float(d[i])
+
+    def depth_crossing(self, t_from: float, depth_cm: float, forward: bool = True,
+                       rho: float = WATER_DENSITY) -> Optional[float]:
+        """The next (``forward``) or previous time the depth crosses ``depth_cm``
+        (going down or up), from session time ``t_from``."""
+        t, d = self.depth(rho)
+        if len(t) < 2:
+            return None
+        s = np.sign(d - depth_cm)
+        s[s == 0] = 1
+        cross = np.nonzero(s[1:] != s[:-1])[0] + 1          # first sample past the crossing
+        tc = t[cross]
+        if forward:
+            k = tc[tc > t_from + 1e-6]
+            return float(k[0]) if k.size else None
+        k = tc[tc < t_from - 1e-6]
+        return float(k[-1]) if k.size else None
+
+    def max_depth(self, rho: float = WATER_DENSITY) -> Optional[tuple[float, float]]:
+        """(session time, depth cm) of the deepest point."""
+        t, d = self.depth(rho)
+        if not len(t):
+            return None
+        i = int(np.argmax(d))
+        return float(t[i]), float(d[i])
+
+    def armed_at(self, t_sess: float) -> bool:
+        return any(a <= t_sess < b for a, b in self.armed_spans)
+
+    def event_near(self, t_sess: float, forward: bool, skip_s: float = 0.5) -> Optional[Event]:
+        """The next (previous) event more than ``skip_s`` after (before) ``t_sess``."""
+        evs = self.events
+        if forward:
+            return next((e for e in evs if e.t > t_sess + skip_s), None)
+        return next((e for e in reversed(evs) if e.t < t_sess - skip_s), None)
+
+
+class LiveTimeline(TimelineQueries):
+    """A live stream's events so far, in session seconds: the reader's tracker,
+    its session zero (``t_ref()``, receive clock) and its newest time
+    (``t_last()``)."""
+
+    def __init__(self, tracker: EventTracker, t_ref: Callable[[], Optional[float]],
+                 t_last: Callable[[], float], unix0: Callable[[], Optional[float]]):
+        self._tr = tracker
+        self._t_ref = t_ref
+        self._t_last = t_last
+        self._unix0 = unix0
+
+    def _t0(self) -> float:
+        t0 = self._t_ref()
+        return float(t0) if t0 is not None else 0.0
+
+    @property
+    def unix0(self) -> float:
+        u = self._unix0()
+        return float(u) if u is not None else 0.0
+
+    @property
+    def duration(self) -> float:
+        return max(0.0, float(self._t_last()) - self._t0())
+
+    @property
+    def events(self) -> list[Event]:
+        t0 = self._t0()
+        with self._tr.lock:
+            evs = [replace(e, t=e.t - t0, t_last=None if e.t_last is None else e.t_last - t0)
+                   for e in self._tr.events]
+        return sorted(evs, key=lambda e: e.t)
+
+    @property
+    def armed_spans(self) -> list[list[float]]:
+        t0, end = self._t0(), self.duration
+        with self._tr.lock:
+            spans = [list(s) for s in self._tr.armed_spans]
+        return [[a - t0, (b - t0) if b is not None else end] for a, b in spans]
+
+    def depth(self, rho: float = WATER_DENSITY) -> tuple[np.ndarray, np.ndarray]:
+        with self._tr.lock:
+            t, d = self._tr.depth_cm(rho)
+        return t - self._t0(), d

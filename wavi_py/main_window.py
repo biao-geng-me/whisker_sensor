@@ -33,7 +33,7 @@ from typing import Optional
 
 import numpy as np
 from PyQt6.QtCore import QRegularExpression, QTimer, Qt
-from PyQt6.QtGui import QGuiApplication, QRegularExpressionValidator
+from PyQt6.QtGui import QGuiApplication, QKeySequence, QRegularExpressionValidator, QShortcut
 from PyQt6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
@@ -74,9 +74,9 @@ from wavi_py.scan_mode import (DEFAULT_SELECTS, PRESETS, ModeKeeper, ScanRequest
                                legacy_nominal_hz, parse_selects)
 from wavi_py.transports.sim_transport import SimSignals
 from wavi_py.views import FftView, ImuView, LineView, SpectrogramView, SpectrumView
-from wavi_py.views.base import alarm_label, show_alarm
+from wavi_py.views.base import add_timeline_dock, alarm_label, show_alarm
 from wavi_py.views.fault_log import FaultLogView
-from wavi_py.views.replay_bar import ReplayControls, ReplayModel, fmt_t
+from wavi_py.views.replay_bar import FINE_STEP_S, STEP_S, ReplayModel, TimelineBar, fmt_t
 from wavi_py.views.sim_panel import SimPanel
 from wavi_py.views.spectral_base import FFT_WINDOWS_S
 from whisker_link.channels import NUM_WHISKER, SAT_CODE
@@ -277,6 +277,17 @@ class MainWindow(QMainWindow):
         # replay: playback state drives the Pause buttons
         self._replay.stateChanged.connect(self._on_replay_state)
         self._replay.seeked.connect(lambda _t: self._line_view.go_live())
+        # the timeline (replay controls, depth, events): a dock in the panel and in
+        # every view window, all on the one model; shown while there is a source
+        self._timeline_docks = [add_timeline_dock(self, TimelineBar(self._replay))]
+        for v in (self._line_view, self._spectrum_view, self._fft_view, self._spec_view,
+                  self._imu_view):
+            self._timeline_docks.append(v.add_timeline(TimelineBar(self._replay)))
+        self._replay.sourceChanged.connect(self._show_timelines)
+        self._replay.liveSeekRequested.connect(self._show_time_from_buffer)
+        self._live_events_t = 0.0
+        self._line_view.zeroAtRequested.connect(self.zero_at)
+        self._build_keys()
 
         # main-thread timer that drains the bus
         self._timer = QTimer(self)
@@ -373,9 +384,6 @@ class MainWindow(QMainWindow):
         rows = QVBoxLayout(box)
         h = QHBoxLayout()
         rows.addLayout(h)
-        # replay: play / pause, speed, time, go to (shown with the Replay transport)
-        self._replay_controls = ReplayControls(self._replay)
-        rows.addWidget(self._replay_controls)
         rows.addLayout(self._build_scan_mode_row())
 
         self._transport_combo = QComboBox()
@@ -671,7 +679,6 @@ class MainWindow(QMainWindow):
             w.setVisible(not replay)
         for w in self._replay_inputs:
             w.setVisible(replay)
-        self._replay_controls.setVisible(replay)
         if self._client is None:
             self._connect_btn.setText("Open" if replay else "Connect")
         self._host_edit.setEnabled(kind in ("TCP", "SERVER"))
@@ -819,6 +826,8 @@ class MainWindow(QMainWindow):
         # a replay records nothing (the file is the recording)
         self._record_btn.setEnabled(not self._replaying)
         self._set_transport_inputs_enabled(False)
+        if not self._replaying and client.has_vehicle:
+            self._replay.set_live(client.timeline)      # live: the events and depth so far
         if self._replaying:
             assert index is not None
             self._replay.attach(client.replay, index)
@@ -845,7 +854,7 @@ class MainWindow(QMainWindow):
             self._client = None
         if self._dome_view is not None:
             self._dome_view.set_bus(None)
-        if self._replay.active:
+        if self._replay.source is not None:
             self._replay.detach()
             self.setWindowTitle("Wavi (Python)")
 
@@ -913,6 +922,8 @@ class MainWindow(QMainWindow):
                 self._toggle_dome.setChecked(False)
                 return
             self._dome_view.closed.connect(lambda: self._toggle_dome.setChecked(False))
+            self._timeline_docks.append(self._dome_view.add_timeline(TimelineBar(self._replay)))
+            self._timeline_docks[-1].setVisible(self._replay.source is not None)
             self._dome_view.set_paused(self._is_paused)
             if self._client is not None:
                 self._dome_view.set_bus(self._client.bus, self._fs)
@@ -988,6 +999,44 @@ class MainWindow(QMainWindow):
         self._is_paused = on
         if self._dome_view is not None:
             self._dome_view.set_paused(on)
+
+    def _show_timelines(self) -> None:
+        on = self._replay.source is not None
+        for d in self._timeline_docks:
+            d.setVisible(on)
+        if on and self.height() < 480:
+            self.resize(max(self.width(), 760), self.height() + 170)
+
+    def _build_keys(self) -> None:
+        """Panel keys: Space pause / play; replay: Left / Right -+5 s (Shift: 1 s),
+        , / . previous / next event, [ / ] slower / faster. (The view windows keep
+        their own keys; their Space is Pause too.)"""
+        m = self._replay
+
+        def key(seq, fn) -> None:
+            QShortcut(QKeySequence(seq), self, activated=fn)
+        key(Qt.Key.Key_Space, lambda: self._pause_btn.isEnabled() and self._pause_btn.toggle())
+        key(Qt.Key.Key_Left, lambda: m.step(-STEP_S))
+        key(Qt.Key.Key_Right, lambda: m.step(STEP_S))
+        key("Shift+Left", lambda: m.step(-FINE_STEP_S))
+        key("Shift+Right", lambda: m.step(FINE_STEP_S))
+        key(",", lambda: m.event_step(False))
+        key(".", lambda: m.event_step(True))
+        key("[", lambda: m.speed_step(False))
+        key("]", lambda: m.speed_step(True))
+
+    def _show_time_from_buffer(self, t: float) -> None:
+        """Live: a time picked on the timeline is shown from the plot buffers (the
+        newest t_buffer_s), centred, at the Line window's current span."""
+        n = self._samples_since_clear
+        if n <= 0 or not (self._sig_t[-n] <= t <= self._sig_t[-1]):
+            self._path_label.setText(f"{fmt_t(t)} is not in the buffer (the last "
+                                     f"{self._t_buffer_s:g} s): pause sooner, or replay the "
+                                     "recording.")
+            return
+        x0, x1 = self._line_view._visible_x_range()
+        span = min(x1 - x0, self._t_buffer_s)
+        self._line_view.set_time_window(t - span / 2, t + span / 2)
 
     def _on_line_time_window(self, x0: float, x1: float) -> None:
         """The Line window's visible time range: the IMU window follows it."""
@@ -1188,6 +1237,11 @@ class MainWindow(QMainWindow):
         # clocks, else the sample index since the stream start / fs).
         latest_t = float(self._sig_t[-1])
         t_axis = self._sig_t
+        if not self._replay.active and self._replay.source is not None:
+            self._replay.set_live_position(latest_t)
+            if time.monotonic() - self._live_events_t > 1.0:
+                self._live_events_t = time.monotonic()
+                self._replay.sourceUpdated.emit()           # more events / depth
 
         # Plot updates (skipped while paused, but data still buffered + recorded).
         if not self._is_paused:

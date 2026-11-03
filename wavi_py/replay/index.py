@@ -41,7 +41,7 @@ from typing import Callable, Optional
 import numpy as np
 
 from wavi_py.daq.clock import FittedClock, fit_segments
-from wavi_py.replay.events import WATER_DENSITY, Event, EventTracker
+from wavi_py.replay.events import WATER_DENSITY, Event, EventTracker, TimelineQueries, hpa_per_cm
 from whisker_link.esp32_frame import MV_PER_CODE
 
 INDEX_VERSION = 1
@@ -90,7 +90,7 @@ def cache_paths(path: Path) -> list[Path]:
             _cache_dir() / f"{path.stem}.{tag}.idx.npz"]
 
 
-class RecordingIndex:
+class RecordingIndex(TimelineQueries):
     """Everything replay needs to serve and seek a recording. Build with
     ``RecordingIndex.open(path)`` (cached) or ``RecordingIndex.build(path)``."""
 
@@ -355,46 +355,9 @@ class RecordingIndex:
 
     def depth(self, rho: float = WATER_DENSITY) -> tuple[np.ndarray, np.ndarray]:
         """(session seconds, depth cm) from the external pressure; empty without it."""
-        from wavi_py.replay.events import hpa_per_cm
-
         if self.surface_hpa is None or not len(self.press_t):
             return np.empty(0), np.empty(0)
         return self.press_t, (self.press_hpa - self.surface_hpa) / hpa_per_cm(rho)
-
-    def depth_at(self, t_sess: float, rho: float = WATER_DENSITY) -> Optional[float]:
-        t, d = self.depth(rho)
-        if not len(t):
-            return None
-        i = max(0, int(np.searchsorted(t, t_sess, side="right")) - 1)
-        return float(d[i])
-
-    def depth_crossing(self, t_from: float, depth_cm: float, forward: bool = True,
-                       rho: float = WATER_DENSITY) -> Optional[float]:
-        """The next (``forward``) or previous time the depth crosses ``depth_cm``
-        (going down or up), from session time ``t_from``."""
-        t, d = self.depth(rho)
-        if len(t) < 2:
-            return None
-        s = np.sign(d - depth_cm)
-        s[s == 0] = 1
-        cross = np.nonzero(s[1:] != s[:-1])[0] + 1          # first sample past the crossing
-        tc = t[cross]
-        if forward:
-            k = tc[tc > t_from + 1e-6]
-            return float(k[0]) if k.size else None
-        k = tc[tc < t_from - 1e-6]
-        return float(k[-1]) if k.size else None
-
-    def max_depth(self, rho: float = WATER_DENSITY) -> Optional[tuple[float, float]]:
-        """(session time, depth cm) of the deepest point."""
-        t, d = self.depth(rho)
-        if not len(t):
-            return None
-        i = int(np.argmax(d))
-        return float(t[i]), float(d[i])
-
-    def armed_at(self, t_sess: float) -> bool:
-        return any(a <= t_sess < b for a, b in self.armed_spans)
 
     def summary(self) -> str:
         n_ev = len(self.events)

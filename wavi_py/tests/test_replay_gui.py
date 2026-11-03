@@ -197,3 +197,103 @@ def test_dome_follows_seek_and_zero(app, win):
         w._dome_view = None
         dv.set_bus(None)
         dv.close()
+
+
+def test_timeline(app, win):
+    """The timeline docks: events list, click / scrub seeks, loop, panel keys."""
+    from PyQt6.QtCore import Qt
+
+    from wavi_py.views.replay_bar import EVENT_LEAD_S, TimelineBar
+
+    w = win
+    w._toggle_line.setChecked(True)
+    bars = [d.widget() for d in w._timeline_docks]
+    assert len(bars) == 6 and all(isinstance(b, TimelineBar) for b in bars)
+    assert all(d.isVisible() for d in (w._timeline_docks[0], w._line_view.timeline_dock))
+    bar = w._line_view.timeline_dock.widget()
+    evs = w._index.events
+    assert bar.events.count() == len(evs) + 1 and bar.controls.isVisible()
+    assert len(bar.strip.spans) == 1 and bar.strip.ticks
+    # pick the fault event: 2 s before it
+    i = next(k for k, e in enumerate(evs) if e.kind == "fault")
+    bar.events.activated.emit(i + 1)
+    assert abs(w._replay.position - (evs[i].t - EVENT_LEAD_S)) < 1e-6
+    # every bar's playhead follows
+    _pump(app, lambda: False, 0.1)
+    assert all(abs(b.strip.head.value() - w._replay.position) < 1e-6 for b in bars)
+    # next / previous event walk the list
+    p0 = w._replay.position
+    w._replay.event_step(True)
+    nxt = next(e for e in evs if e.t > p0 + EVENT_LEAD_S + 0.5)
+    assert abs(w._replay.position - (nxt.t - EVENT_LEAD_S)) < 1e-6
+    w._replay.event_step(False)
+    assert abs(w._replay.position - p0) < 1e-6
+    # scrub: drags are rate-limited, the release seeks fully
+    gen = w._client.replay.gen
+    for x in (1.0, 1.1, 1.2):
+        w._replay.request_seek(x, False)
+    assert w._client.replay.gen == gen + 1
+    w._replay.request_seek(2.0, True)
+    assert w._client.replay.gen == gen + 2 and w._replay.position == 2.0
+    # panel keys (offscreen windows are never active: fire the shortcuts directly)
+    from PyQt6.QtGui import QKeySequence, QShortcut
+
+    keys = {sc.key().toString(): sc for sc in w.findChildren(QShortcut)}
+
+    def press(k):
+        keys[QKeySequence(k).toString()].activated.emit()
+    press(Qt.Key.Key_Right)
+    assert abs(w._replay.position - 7.0) < 1e-6
+    press("Shift+Left")
+    assert abs(w._replay.position - 6.0) < 1e-6
+    press("]")
+    assert w._replay.speed == 8.0
+    # loop: around the playhead, and playback wraps inside it
+    w._replay.seek(3.0)
+    bar.loop_btn.setChecked(True)
+    assert w._replay.loop == (0.0, 8.0) and w._client.replay.loop == (0.0, 8.0)
+    assert all(b.strip.loop.isVisible() and b.loop_btn.isChecked() for b in bars)
+    w._replay.set_loop((3.0, 4.0))
+    gen = w._client.replay.gen
+    w._pause_btn.setChecked(False)
+    assert _pump(app, lambda: w._client.replay.gen >= gen + 2, 5)    # wrapped twice
+    assert 3.0 - 1e-6 <= w._replay.position <= 4.0 + 1e-6
+    w._replay.set_loop(None)
+    assert not bars[0].loop_btn.isChecked() and w._client.replay.loop is None
+    w._pause_btn.setChecked(True)
+    _shot(w, "timeline_panel")
+    _shot(w._line_view, "timeline_line")
+    # Zero at... in the Line window
+    w._replay.seek(5.0)
+    assert _pump(app, lambda: w._samples_since_clear > 0 and w._sig_t[-1] > 4.9, 5)
+    v0 = w._v0.copy()
+    w._line_view._act_zero_at.setChecked(True)
+    w._line_view.zeroAtRequested.emit(4.0)
+    assert not np.allclose(w._v0, v0)
+
+
+def test_live_timeline_and_buffer_seek(app, win):
+    """The live source: the reader's tracker in session seconds; a timeline pick
+    shows that time from the buffer."""
+    from wavi_py.replay.events import EventTracker, LiveTimeline
+
+    tr = EventTracker()
+    tr.feed({"k": "mav", "t": 105.0, "type": "HEARTBEAT", "src": [1, 1],
+             "d": {"base_mode": 209, "custom_mode": 19}})
+    tr.feed({"k": "mav", "t": 106.0, "type": "STATUSTEXT", "src": [1, 1],
+             "d": {"severity": 4, "text": "hi"}})
+    lt = LiveTimeline(tr, lambda: 100.0, lambda: 110.0, lambda: 1.79e9)
+    assert lt.duration == 10.0
+    assert [(e.kind, e.t) for e in lt.events] == [("arm", 5.0), ("mode", 5.0),
+                                                  ("statustext", 6.0)]
+    assert lt.armed_spans == [[5.0, 10.0]] and lt.armed_at(7.0)
+    assert lt.event_near(5.4, True).text == "hi"
+    w = win
+    w._toggle_line.setChecked(True)
+    w._replay.seek(6.0)
+    assert _pump(app, lambda: w._samples_since_clear > 0 and w._sig_t[-1] > 5.9, 5)
+    w._show_time_from_buffer(5.0)
+    x0, x1 = w._line_view._visible_x_range()
+    assert abs((x0 + x1) / 2 - 5.0) < 0.05
+    w._show_time_from_buffer(100.0)
+    assert "not in the buffer" in w._path_label.text()

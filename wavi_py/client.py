@@ -50,6 +50,7 @@ from wavi_py.config import (
 from wavi_py.daq.bus import SampleBus
 from wavi_py.daq.reader import Reader
 from wavi_py.daq.server_reader import IMU_CHANNELS, ServerReader
+from wavi_py.replay.events import LiveTimeline
 from wavi_py.replay.index import RecordingIndex
 from wavi_py.transports.base import Transport
 from wavi_py.transports.esp32_transport import Esp32SerialTransport
@@ -159,7 +160,8 @@ class WaviClient:
         if self.is_event_stream:
             clock = self.index.clock() if self.index is not None else None
             self._reader = ServerReader(self._transport, self.bus, self.imu_bus,
-                                        fs=self.fs, nch=self.nch, clock=clock)
+                                        fs=self.fs, nch=self.nch, clock=clock,
+                                        track_events=self._transport_kind != "replay")
             self._reader.start()
             return
 
@@ -275,6 +277,18 @@ class WaviClient:
         """The replay transport (play / pause / seek / speed / loop), while started."""
         t = self._transport
         return t if isinstance(t, ReplayTransport) else None
+
+    @property
+    def timeline(self):
+        """Events, armed spans and depth in session seconds (``replay/events.py``):
+        the recording's index in replay, the stream so far live; None otherwise."""
+        if self.index is not None:
+            return self.index
+        r = self._reader
+        if isinstance(r, ServerReader) and r.tracker is not None:
+            return LiveTimeline(r.tracker, lambda: r._t_ref, lambda: r._last_t,
+                                lambda: self.bus.get_metadata().get("t0_unix"))
+        return None
 
     @property
     def has_vehicle(self) -> bool:

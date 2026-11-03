@@ -39,6 +39,9 @@ spectrogram views work unchanged. Differences:
   over at a seek. The first seek also carries the session zero ``t0`` and the
   wall clock ``unix0`` (``t0_unix`` is then the recording's, not now) and the
   V0 of the file's first scans, which is kept across seeks.
+- ``tracker`` (``replay/events.py``) follows the arm state, modes, STATUSTEXT,
+  faults, seq gaps, counters and the depth of a live stream, for the timeline
+  (off in replay: the recording's index has them).
 """
 
 from __future__ import annotations
@@ -54,11 +57,14 @@ import numpy as np
 
 from wavi_py.daq.bus import SampleBus
 from wavi_py.daq.clock import LiveClock
+from wavi_py.replay.events import EventTracker
 from wavi_py.transports.base import Transport
 from whisker_link.esp32_frame import MV_PER_CODE
 
 FS_WINDOW_S = 10.0        # sliding window for the rate estimate
 FS_MIN_SPAN_S = 2.0       # report nothing until the window spans this long
+
+_TRACKED_MAV = ("HEARTBEAT", "STATUSTEXT", "SCALED_PRESSURE2")
 
 IMU_CHANNELS = [
     "ax_mg", "ay_mg", "az_mg",               # RAW_IMU accel
@@ -69,7 +75,7 @@ IMU_CHANNELS = [
 
 class ServerReader:
     def __init__(self, transport: Transport, bus: SampleBus, imu_bus: SampleBus, *,
-                 fs: float, nch: int, clock=None):
+                 fs: float, nch: int, clock=None, track_events: bool = True):
         self._transport = transport
         self._bus = bus
         self._imu_bus = imu_bus
@@ -102,6 +108,7 @@ class ServerReader:
         self._row_t: list[float] = []             # session times of the pending rows
         self._imu_t: list[float] = []
         self._marks: collections.deque = collections.deque(maxlen=16)
+        self.tracker: Optional[EventTracker] = EventTracker() if track_events else None
 
     # ----- lifecycle (same surface as Reader)
 
@@ -203,6 +210,8 @@ class ServerReader:
             t_rx = float(ev.get("t", 0.0))
             if "seq" in ev and "tus" in ev:
                 self._note_scan_clock(int(ev["seq"]), int(ev["tus"]))
+                if self.tracker is not None:
+                    self.tracker.wsk_seq(t_rx, int(ev["seq"]))
                 self._row_t.append(self._clock.wsk(t_rx, int(ev["tus"])) - self._ref(t_rx))
             else:
                 self._row_t.append(t_rx - self._ref(t_rx))
@@ -211,6 +220,9 @@ class ServerReader:
             d = ev.get("d", {})
             if mtype == "ATTITUDE":
                 self._attitude[:] = (d.get("roll", 0), d.get("pitch", 0), d.get("yaw", 0))
+            elif mtype in _TRACKED_MAV:
+                if self.tracker is not None:
+                    self.tracker.feed(ev)
             elif mtype == "RAW_IMU":
                 imu_rows.append(np.array(
                     [d.get(f, 0) for f in ("xacc", "yacc", "zacc", "xgyro", "ygyro", "zgyro")]
@@ -221,6 +233,8 @@ class ServerReader:
                 self._imu_t.append(t - self._ref(t_rx))
         elif k == "status":
             self._bus.set_metadata(server_status=ev)
+            if self.tracker is not None:
+                self.tracker.feed(ev)
         elif k == "info":
             self._flush(rows, imu_rows)       # what came before is the old scan config
             self._note_info({f: v for f, v in ev.items() if f not in ("k", "t")})
@@ -238,11 +252,14 @@ class ServerReader:
             if ev.get("src") == "esp32":
                 self._n_txt += 1
                 self._bus.set_metadata(esp32_txt=(self._n_txt, str(ev.get("msg", ""))))
-        elif k == "mark" and isinstance(ev.get("fault"), dict):
-            print(f"[{ev['fault'].get('event', '?')}] {ev.get('text', '')}")
-            self._n_fault_marks += 1
-            self._fault_marks.append((self._n_fault_marks, ev))
-            self._bus.set_metadata(fault_marks=list(self._fault_marks))
+        elif k == "mark":
+            if self.tracker is not None:
+                self.tracker.feed(ev)
+            if isinstance(ev.get("fault"), dict):
+                print(f"[{ev['fault'].get('event', '?')}] {ev.get('text', '')}")
+                self._n_fault_marks += 1
+                self._fault_marks.append((self._n_fault_marks, ev))
+                self._bus.set_metadata(fault_marks=list(self._fault_marks))
         elif k == "replay":
             self._on_replay(ev, rows, imu_rows)
         elif k == "ack":

@@ -9,7 +9,9 @@ seconds (default: the whole buffer). Zooming time (= / -) keeps it live (the
 right edge stays at "now"); panning time or mouse zoom / pan leaves live.
 Live (L) returns to live keeping the zoom (time span, Y ranges, gain); Resume
 does the same. Reset view (R) also restores the full span, auto Y and gain 1.
-Re-zero mirrors the control panel's Reset (re-capture V0).
+Re-zero mirrors the control panel's Reset (re-capture V0). Zero at... (Q) then
+a click in a plot re-zeroes at that time instead: V0 = the mean of the 0.25 s
+around it (``MainWindow.zero_at``; live while paused, or in replay).
 
 Y fixed (toolbar): every plot shows +-value around zero, i.e. around each
 channel's own V0 baseline (the traces are drawn minus V0, so the gauges' DC
@@ -34,7 +36,7 @@ from PyQt6.QtGui import QAction, QKeySequence
 
 import pyqtgraph as pg
 
-from wavi_py.views.whisker_plots import WhiskerPlotsView, gauge_html
+from wavi_py.views.whisker_plots import GRID, STACKED, WhiskerPlotsView, gauge_html
 
 
 _LABEL_AVG_S = 0.1              # absolute-value labels: mean of the last 0.1 s
@@ -52,6 +54,7 @@ _KEYS_HELP = """\
 <tr><td><b>Y</b></td><td>link Y: all grid tiles share one Y range</td></tr>
 <tr><td><b>Z</b></td><td>zoom box mode (drag a rectangle) / pan mode</td></tr>
 <tr><td><b>0</b></td><td>re-zero (re-capture V0)</td></tr>
+<tr><td><b>Q</b></td><td>zero at: the next click in a plot re-zeroes at that time</td></tr>
 <tr><td><b>Esc</b></td><td>back to all whiskers</td></tr>
 </table>
 The framed tile is the one last under the mouse. Mouse: wheel zooms time and that
@@ -88,6 +91,7 @@ def _peak_decimate(t: np.ndarray, y: np.ndarray, k: int) -> tuple[np.ndarray, np
 class LineView(WhiskerPlotsView):
     # the visible time range changed (any layout); the IMU window follows it
     timeWindowChanged = pyqtSignal(float, float)
+    zeroAtRequested = pyqtSignal(float)            # re-zero at this time (Zero at...)
 
     TITLE = "Wavi - Line"
     X_LABEL = ("Time", "s")
@@ -136,7 +140,34 @@ class LineView(WhiskerPlotsView):
             self._act_rezero.setToolTip("Re-capture the V0 baseline (the control panel's Reset) [0]")
             self._act_rezero.setShortcut(QKeySequence("0"))
             self._act_rezero.triggered.connect(self.resetRequested)
-        return [self._act_rezero]
+            self._act_zero_at = QAction("Zero at...", self, checkable=True)
+            self._act_zero_at.setToolTip("Then click a time in a plot: re-zero (V0) from the 0.25 s"
+                                         " around it (pause first, or in replay) [Q]")
+            self._act_zero_at.setShortcut(QKeySequence("Q"))
+            self._act_zero_at.toggled.connect(self._on_zero_at_toggled)
+        return [self._act_rezero, self._act_zero_at]
+
+    def _on_zero_at_toggled(self, on: bool) -> None:
+        self.statusBar().showMessage("Zero at: click the time to re-zero at (Q again: cancel)"
+                                     if on else self._idle_hint())
+
+    def _on_mouse_clicked(self, ev) -> None:
+        if (self._act_zero_at.isChecked() and not ev.double()
+                and ev.button() == pg.QtCore.Qt.MouseButton.LeftButton):
+            pos = ev.scenePos()
+            page = self._pages.currentIndex()
+            plots = ([self._stacked.getPlotItem()] if page == STACKED else
+                     self._tiles if page == GRID else [self._single_plot.getPlotItem()])
+            for p in plots:
+                vb = p.getViewBox()
+                if vb.sceneBoundingRect().contains(pos):
+                    t = float(vb.mapSceneToView(pos).x())
+                    self._act_zero_at.setChecked(False)
+                    self.zeroAtRequested.emit(t)
+                    self.statusBar().showMessage(f"Re-zeroed at t = {t:.3f} s", 4000)
+                    return
+            return
+        super()._on_mouse_clicked(ev)
 
     # ------------------------------------------------------------------
     # live following

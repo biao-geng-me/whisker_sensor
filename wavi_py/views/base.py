@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PyQt6.QtCore import pyqtSignal
-from PyQt6.QtWidgets import QLabel, QMainWindow
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtWidgets import QDockWidget, QLabel, QMainWindow, QToolBar, QWidget
 
 # the ESP32 / ADC alarm banner (see whisker_link/esp32_fault.py)
 ALARM_STYLE = {
@@ -41,6 +41,7 @@ class ViewWindow(QMainWindow):
 
     closed = pyqtSignal()
     _alarm: Optional[QLabel] = None
+    timeline_dock: Optional[QDockWidget] = None
 
     def set_alarm(self, text: str, level: str) -> None:
         if self._alarm is None:
@@ -50,6 +51,29 @@ class ViewWindow(QMainWindow):
             self.setMenuWidget(self._alarm)     # above the toolbars; no menu bar here
         show_alarm(self._alarm, text, level)
 
+    def add_timeline(self, bar: QWidget) -> QDockWidget:
+        """The replay / timeline bar as a dock at the bottom (movable, floatable,
+        closable; the first toolbar gets a Timeline toggle)."""
+        self.timeline_dock = add_timeline_dock(self, bar)
+        return self.timeline_dock
+
     def closeEvent(self, event) -> None:  # noqa: N802 — Qt naming
         super().closeEvent(event)
         self.closed.emit()
+
+
+def add_timeline_dock(win: QMainWindow, bar: QWidget) -> QDockWidget:
+    dock = QDockWidget("Timeline", win)
+    dock.setObjectName("timeline")
+    dock.setWidget(bar)
+    dock.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetMovable
+                     | QDockWidget.DockWidgetFeature.DockWidgetFloatable
+                     | QDockWidget.DockWidgetFeature.DockWidgetClosable)
+    win.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, dock)
+    act = dock.toggleViewAction()
+    act.setToolTip("Show / hide the timeline (replay controls, depth, events)")
+    tbs = win.findChildren(QToolBar)
+    if tbs:
+        tbs[0].addAction(act)
+    dock.hide()
+    return dock
