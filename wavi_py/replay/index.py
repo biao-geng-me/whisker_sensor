@@ -9,7 +9,8 @@ depth and the seek state are parsed):
   so ``t`` steps back by up to ~0.2 s in file order; pacing uses ``t_play``);
 - the device clocks fitted onto the receive clock (``daq/clock.py``): ESP32
   ``tus`` for the whisker scans, RAW_IMU ``time_usec`` for the IMU;
-- the scan rate (from ``tus``), and V0 (the mean of the first 0.25 s of scans);
+- the scan rate (from ``tus``), and V0 (the mean of the first 0.25 s of scans;
+  a clip, ``replay/export.py``, carries its source's V0 and surface pressure);
 - the line numbers of every hello / info / status line (the state a seek
   restores) and the events and depth (``replay/events.py``).
 
@@ -27,6 +28,9 @@ The index is cached as ``<file>.idx.npz`` next to the recording (keyed by
 size, mtime and ``INDEX_VERSION``), or in the user cache directory
 (``%LOCALAPPDATA%/wavi_py`` on Windows, ``~/.cache/wavi_py`` elsewhere) when
 the recording's folder is read-only.
+
+``open`` also takes a ``.dat`` (no ``.jsonl``): whisker-only, converted once
+into a stream in the user cache (``replay/dat_source.py``).
 """
 
 from __future__ import annotations
@@ -52,7 +56,7 @@ K = {name: i for i, name in enumerate(KINDS)}
 _KIND_BYTES = {name.encode(): i for i, name in enumerate(KINDS)}
 _PARSED_MAV = (b"HEARTBEAT", b"STATUSTEXT", b"SCALED_PRESSURE2")
 # hello.server of the GUI's own transports: no vehicle (no IMU) in those recordings
-LOCAL_SERVERS = ("wavi_py-esp32", "wavi_py-sim")
+LOCAL_SERVERS = ("wavi_py-esp32", "wavi_py-sim", "wavi_py-dat")
 
 
 class NotARecording(ValueError):
@@ -126,6 +130,11 @@ class RecordingIndex(TimelineQueries):
     def open(cls, path, progress: Optional[Callable[[float], None]] = None,
              use_cache: bool = True) -> "RecordingIndex":
         path = Path(path)
+        if path.suffix.lower() == ".dat":           # whisker only, via a converted stream
+            from wavi_py.replay.dat_source import ensure_jsonl
+            outer = progress
+            path = ensure_jsonl(path, None if outer is None else (lambda p: outer(0.5 * p)))
+            progress = None if outer is None else (lambda p: outer(0.5 + 0.5 * p))
         st = path.stat()
         if use_cache:
             for c in cache_paths(path):
@@ -255,6 +264,12 @@ class RecordingIndex(TimelineQueries):
             self.v0 = (np.asarray(v0_rows[:nv0], dtype=np.float64).mean(axis=0) * mv
                        ).astype(np.float32)
         self._take_events(tracker)
+        clip = hello.get("clip")
+        if isinstance(clip, dict):          # a clip (replay/export.py): the source's zero, surface
+            if clip.get("v0"):
+                self.v0 = np.asarray(clip["v0"], dtype=np.float32)
+            if clip.get("surface_hpa") is not None:
+                self.surface_hpa = float(clip["surface_hpa"])
         return self
 
     def _take_events(self, tr: EventTracker) -> None:

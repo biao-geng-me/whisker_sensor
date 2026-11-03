@@ -94,7 +94,11 @@ The **timeline** (a dock at the bottom of the panel and of every view window, al
 
 Events: arm / disarm (HEARTBEAT from the autopilot, `[1,1]`, only), flight mode changes, every STATUSTEXT coloured by severity (the same text again within 10 s is one entry with a count), fault marks, whisker `seq` gaps, and ADC error counter increments from the server status (grouped per 10 s). A seek writes a line in the Fault log (it is not cleared). Live (Server transport), the timeline shows the same events and depth for the stream so far; a click there shows that time from the plot buffers (the last `t_buffer_s`; pause first to hold them).
 
-Read-only: in replay the ESP32 commands, Scan mode, Reset ESP32 and Rec are disabled (the replay transport refuses commands with an error ack), Pause / Play drive playback, and **Reset** re-zeros at the newest samples. **Zero at...** (Line window, Q, then click a time) re-zeros the V0 and the Dome's tare from the 0.25 s round any buffered time, live, paused or in replay. Headless: `WaviClient(transport="replay", path="rec.jsonl", replay_speed=None)` plays a file as fast as it is read; `client.replay` is the transport (`seek`, `play`, `pause`, `speed`, `position`, `state`), `client.index` the index (events, `depth_at`, `depth_crossing`, `max_depth`).
+Read-only: in replay the ESP32 commands, Scan mode, Reset ESP32 and Rec are disabled (the replay transport refuses commands with an error ack), Pause / Play drive playback, and **Reset** re-zeros at the newest samples. **Zero at...** (Line window, Q, then click a time) re-zeros the V0 and the Dome's tare from the 0.25 s round any buffered time, live, paused or in replay. **Export...** (timeline, replay only) saves the loop range (without Loop: the Line window's time span) as a `.jsonl` clip or a `.dat` (`replay/export.py`). The clip is a byte copy of the range's lines after a copy of the hello and the newest info / status line, re-stamped to the range start (wall clocks kept); its hello carries the source's V0 and surface pressure, so the clip replays with the same zero and depth as the full recording, and `whisker_link.convert` reads it as any recording. The `.dat` is the recorder's format: mV with the outliers filled per 20 Hz block as the panel does, each row's wall clock from the fitted scan time.
+
+A `.dat` without its `.jsonl` (older recordings) opens too, whiskers only: it is converted once into a stream in the user cache (`replay/dat_source.py`, `%LOCALAPPDATA%\wavi_py\dat`), with no IMU, events, depth or status, and times that count samples as the recorder wrote them (its values are already outlier-filled). Only the array's 32-gauge `.dat` is taken.
+
+Headless: `WaviClient(transport="replay", path="rec.jsonl", replay_speed=None)` plays a file as fast as it is read; `client.replay` is the transport (`seek`, `play`, `pause`, `speed`, `position`, `state`), `client.index` the index (events, `depth_at`, `depth_crossing`, `max_depth`).
 
 ## Run (library / headless)
 
@@ -147,6 +151,8 @@ wavi_py/
     spectra.py         amplitude spectra (batched rfft), the spectrogram ring (SpecHistory)
   replay/
     index.py           RecordingIndex: byte offsets, clock fits, V0, events, depth; cached
+    export.py          Export range: a .jsonl clip (keeps the source's zero, depth), a .dat
+    dat_source.py      a .dat alone: converted to a whisker-only stream for replay
     events.py          EventTracker (index and live), depth, TimelineQueries
   transports/
     base.py            abstract Transport

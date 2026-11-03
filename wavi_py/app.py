@@ -68,7 +68,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         "replay = a recording (.jsonl, see --replay); default tcp")
     p.add_argument("--replay", metavar="FILE.jsonl", default=None,
                    help="open this recording (a daq_server .jsonl: the Pi's whisker_rec, or the "
-                        "local copy next to a .dat) and replay it; implies --transport replay")
+                        "local copy next to a .dat; a .dat alone: whiskers only) and replay it;"
+                        " implies --transport replay")
     p.add_argument("--speed", type=_arg(_speed), default=1.0,
                    help="replay speed (0.25 .. 8, or max; default 1)")
     p.add_argument("--start", type=_arg(_start), default=0.0,

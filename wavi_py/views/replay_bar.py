@@ -16,7 +16,8 @@ coloured by kind / severity (hover for the text), the playhead (drag to scrub:
 a short-preroll seek at most every ``SCRUB_S``, a full one on release; click
 anywhere to go there) and the loop range (Loop: ``LOOP_S`` either side of the
 playhead; drag its edges), an event list (picking one goes to ``EVENT_LEAD_S``
-before it) and previous / next event.
+before it), previous / next event, and Export (``exportRequested``: the panel
+saves the loop range, see replay/export.py).
 
 ``ReplayControls`` is the compact row: play / pause, speed, step back and
 forward, the time readout (session seconds / length, the recording's wall
@@ -98,6 +99,7 @@ class ReplayModel(QObject):
     speedChanged = pyqtSignal(object)          # float, or None = max
     sourceChanged = pyqtSignal()               # a recording opened / a live stream started
     sourceUpdated = pyqtSignal()               # live: more events / depth since
+    exportRequested = pyqtSignal()             # Export...: the panel saves a range
     seeked = pyqtSignal(float)                 # a seek was asked for (GUI side)
     loopChanged = pyqtSignal(object)           # (t0, t1) or None
     liveSeekRequested = pyqtSignal(float)      # live: show this time (from the buffers)
@@ -516,7 +518,11 @@ class TimelineBar(QWidget):
         self.loop_btn.setToolTip(f"Loop over {LOOP_S:g} s either side of the playhead; drag the"
                                  " blue range's edges to change it")
         self.loop_btn.toggled.connect(self._on_loop_toggled)
-        for w in (self._prev, self._next, self.loop_btn):
+        self.export_btn = QPushButton("Export...")
+        self.export_btn.setToolTip("Save the loop range (without Loop: the Line window's time"
+                                   " span) as a .jsonl clip or a .dat")
+        self.export_btn.clicked.connect(model.exportRequested.emit)
+        for w in (self._prev, self._next, self.loop_btn, self.export_btn):
             w.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             row.addWidget(w)
         side.addStretch(1)
@@ -538,6 +544,7 @@ class TimelineBar(QWidget):
         src = m.source
         self.controls.setVisible(m.active)
         self.loop_btn.setEnabled(m.active)
+        self.export_btn.setVisible(m.active)
         self.strip.head.setMovable(True)
         if src is None:
             self.strip.depth.setData([], [])

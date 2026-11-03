@@ -85,6 +85,7 @@ from whisker_link.esp32_frame import MV_PER_CODE, info_cfg
 
 RESET_ACK_TIMEOUT_S = 3.0     # esp32_reset's ack (the RTS pulse takes 0.1 s)
 REBOOT_NOTE_S = 30.0         # an ESP32 reboot (with its reset reason) stays in the status line
+NOTE_HOLD_S = 5.0            # a reply / result stays in the panel label before the status
 
 
 def _default_outpath() -> Path:
@@ -163,6 +164,7 @@ class MainWindow(QMainWindow):
         self._replay_gen = 0                         # the newest seek handled
         self._replay_seek_at: Optional[int] = None   # its bus index, until "live"
         self._status_shown_t = 0.0
+        self._note_until = 0.0                 # a reply / result in the panel label until then
         self._nsensor = int(nsensor)
         self._nch = self._nsensor * 2
         # Server transport with auto_fs: fs is only a starting guess, replaced
@@ -286,6 +288,7 @@ class MainWindow(QMainWindow):
             self._timeline_docks.append(v.add_timeline(TimelineBar(self._replay)))
         self._replay.sourceChanged.connect(self._show_timelines)
         self._replay.liveSeekRequested.connect(self._show_time_from_buffer)
+        self._replay.exportRequested.connect(self.export_range)
         self._live_events_t = 0.0
         self._line_view.zeroAtRequested.connect(self.zero_at)
         self._build_keys()
@@ -406,9 +409,11 @@ class MainWindow(QMainWindow):
         self._serial_port_edit.setPlaceholderText("COM3 or /dev/ttyACM0")
 
         self._file_edit = QLineEdit(self._initial_replay_path)
-        self._file_edit.setPlaceholderText("recording (.jsonl)")
+        self._file_edit.setPlaceholderText("recording (.jsonl, or .dat)")
         self._file_edit.setToolTip("A daq_server recording: the Pi's whisker_rec/*.jsonl, or the\n"
-                                   "local copy next to a .dat (also the ESP32 / Sim tees)")
+                                   "local copy next to a .dat (also the ESP32 / Sim tees).\n"
+                                   "A .dat alone replays the whiskers only (no IMU, events,\n"
+                                   "status; the times count samples)")
         self._browse_btn = QPushButton("Browse...")
         self._browse_btn.clicked.connect(self._choose_recording)
 
@@ -519,7 +524,7 @@ class MainWindow(QMainWindow):
         acks = self._client.bus.get_metadata().get("server_acks") or {}
         self._reset_ack_seen = acks.get("esp32_reset", (0, None))[0]
         if not self._client.send_command({"cmd": "esp32_reset"}):
-            self._path_label.setText("ESP32 reset: could not send the command.")
+            self._note("ESP32 reset: could not send the command.")
             return
         self._reset_sent_at = time.monotonic()
         self._path_label.setText("ESP32 reset sent, waiting for the reply...")
@@ -533,10 +538,10 @@ class MainWindow(QMainWindow):
             msg = ("ESP32 reset: EN pulsed, it is rebooting (streaming resumes in a few s)."
                    if ack.get("ok") else f"ESP32 reset failed: {ack.get('error', 'no reason given')}")
             print(f"[MainWindow] {msg}")
-            self._path_label.setText(msg)
+            self._note(msg)
         elif time.monotonic() - self._reset_sent_at > RESET_ACK_TIMEOUT_S:
             self._reset_sent_at = None
-            self._path_label.setText("ESP32 reset: no reply (is the server up to date?).")
+            self._note("ESP32 reset: no reply (is the server up to date?).")
 
     def _show_mode_note(self) -> None:
         """The keeper's note (or the reported mode) next to the dropdown and in the
@@ -714,7 +719,7 @@ class MainWindow(QMainWindow):
         cur = self._file_edit.text().strip()
         start = str(Path(cur).parent) if cur else str(self._outpath)
         path, _ = QFileDialog.getOpenFileName(self, "Open a recording", start,
-                                              "Recordings (*.jsonl);;All files (*)")
+                                              "Recordings (*.jsonl *.dat);;All files (*)")
         if path:
             self._file_edit.setText(path)
             if self._client is None and self._index_job is None:
@@ -1069,7 +1074,7 @@ class MainWindow(QMainWindow):
         newest t_buffer_s), centred, at the Line window's current span."""
         n = self._samples_since_clear
         if n <= 0 or not (self._sig_t[-n] <= t <= self._sig_t[-1]):
-            self._path_label.setText(f"{fmt_t(t)} is not in the buffer (the last "
+            self._note(f"{fmt_t(t)} is not in the buffer (the last "
                                      f"{self._t_buffer_s:g} s): pause sooner, or replay the "
                                      "recording.")
             return
@@ -1078,6 +1083,42 @@ class MainWindow(QMainWindow):
         self._line_view.set_time_window(t - span / 2, t + span / 2)
         if self._rov_view is not None:
             self._rov_view.show_at(t)
+
+    def export_range(self, path: Optional[str] = None,
+                     rng: Optional[tuple[float, float]] = None) -> Optional[Path]:
+        """Export... (replay): ``rng`` (session seconds; default the loop range, else the
+        Line window's time span, else the 10 s before the playhead) saved as a .jsonl
+        clip or, by the extension, a .dat (replay/export.py). Asks for the file unless
+        ``path`` is given. Returns where it wrote, None if not."""
+        idx = self._index if self._replay.active else None
+        if idx is None:
+            return None
+        if rng is None:
+            rng = self._replay.loop
+        if rng is None and self._line_view.isVisible():
+            rng = self._line_view._visible_x_range()
+        if rng is None:
+            rng = (self._replay.position - 10.0, self._replay.position)
+        t0, t1 = max(0.0, float(rng[0])), min(idx.duration, float(rng[1]))
+        if path is None:
+            stem = f"{idx.path.stem}_{int(t0)}-{int(math.ceil(t1))}s"
+            path, _ = QFileDialog.getSaveFileName(
+                self, f"Export {fmt_t(t0)} .. {fmt_t(t1)}", str(idx.path.with_name(stem + ".jsonl")),
+                "Recording clip (*.jsonl);;Whisker .dat (*.dat)")
+            if not path:
+                return None
+        from wavi_py.replay.export import export_dat, export_jsonl
+        out = Path(path)
+        try:
+            if out.suffix.lower() == ".dat":
+                what = f"{export_dat(idx, t0, t1, out)} scans"
+            else:
+                what = f"{export_jsonl(idx, t0, t1, out)} lines"
+        except (OSError, ValueError) as exc:
+            QMessageBox.critical(self, "Export failed", f"{out}: {exc}")
+            return None
+        self._note(f"Exported {fmt_t(t0)} .. {fmt_t(t1)} ({what}) to {out}")
+        return out
 
     def _on_line_time_window(self, x0: float, x1: float) -> None:
         """The Line window's visible time range: the IMU window follows it."""
@@ -1091,7 +1132,7 @@ class MainWindow(QMainWindow):
             if self._pause_btn.isChecked() != paused:
                 self._pause_btn.setChecked(paused)
         if state == "eof":
-            self._path_label.setText("End of the recording (Play starts over).")
+            self._note("End of the recording (Play starts over).")
 
     def zero_at(self, t: Optional[float] = None, window_s: float = 0.25) -> bool:
         """Re-zero (V0, and the Dome's tare) from the buffered samples: the mean over
@@ -1114,7 +1155,7 @@ class MainWindow(QMainWindow):
         if self._dome_view is not None:
             self._dome_view.set_zero(self._v0)
         where = "the newest samples" if t is None else f"t = {t:.2f} s"
-        self._path_label.setText(f"Re-zeroed at {where} ({int(sel.sum())} samples).")
+        self._note(f"Re-zeroed at {where} ({int(sel.sum())} samples).")
         self._fault_log.append(f"{self._now():%Y-%m-%d %H:%M:%S}  info   re-zero at {where}")
         self._request_redraw()
         return True
@@ -1535,9 +1576,16 @@ class MainWindow(QMainWindow):
             v.set_stream_status(text)
             if v._stream_status.styleSheet() != style:
                 v._stream_status.setStyleSheet(style)
-        if not self._is_recording:
+        if not self._is_recording and time.monotonic() >= self._note_until:
             self._path_label.setText(f"{link}\n{adc}")
             self._path_label.setStyleSheet(style or "QLabel { color: #555; }")
+
+    def _note(self, text: str, hold_s: float = NOTE_HOLD_S) -> None:
+        """A command's reply or an action's result in the panel label, kept there for
+        ``hold_s`` before the stream status line (1 Hz) takes the label back."""
+        self._path_label.setText(text)
+        self._path_label.setStyleSheet("")
+        self._note_until = time.monotonic() + hold_s
 
     def _format_status(self, st: dict) -> tuple[str, str]:
         """The server / ESP32 status record as two lines: the link (where, rates,
