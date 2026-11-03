@@ -1670,7 +1670,8 @@ class MainWindow(QMainWindow):
         # the spectrogram history above is kept regardless; the windows only mark
         # themselves dirty here and read the data when they redraw
         if self._fft_view.isVisible():
-            self._fft_view.update_view(self._fft_map, self._fs)
+            # every frame of this tick, keyed on its last sample's (data) time
+            self._fft_view.update_view(self._fft_map, self._fs, frames, self._sig_t[ends - 1])
         if self._spec_view.isVisible():
             self._spec_view.update_view(self._spec_hist, self._fs, hop / self._fs)
 
