@@ -5,6 +5,16 @@ This is one subscriber on the SampleBus among many. It owns:
 - The control panel (transport selector, record, pause, view toggles, tag, auto-stop).
 - The view windows (line, spectrum, fft, spectrogram, imu, dome).
 - The local processing chain: outlier removal → recording → (optional) filter → plot updates.
+- Replay of a recording (.jsonl, transport "Replay"): the file is indexed in the
+  background, then played through the same pipeline as live
+  (``transports/replay_transport.py``). Pause pauses playback; a seek is a
+  discontinuity the buffers start over at (``replay_marks``); Rec, the scan
+  mode, Reset ESP32 and the mode keeper are off (nothing to command).
+
+Sample times: event streams carry each scan's and IMU row's time (the device
+clocks mapped onto the Pi's receive clock, ``daq/clock.py``; fitted over the
+whole file in replay), so the Line and IMU windows share one time axis (session
+seconds) and the IMU window can follow the Line window's time range.
 
 External agent loops can subscribe to ``WaviClient.bus`` independently without
 touching this module. The GUI's slow plot redraws can never starve them — they
@@ -15,6 +25,7 @@ from __future__ import annotations
 
 import math
 import os
+import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -58,12 +69,14 @@ from wavi_py.config import (
 from wavi_py.daq.outliers import fill_outliers_linear
 from wavi_py.daq.spectra import SPEC_COL_HZ, SpecHistory, amp_spectra, amp_spectrum
 from wavi_py.io.dat_writer import DatWriter, build_datalog_filename
+from wavi_py.replay.index import RecordingIndex
 from wavi_py.scan_mode import (DEFAULT_SELECTS, PRESETS, ModeKeeper, ScanRequest, describe_cfg,
                                legacy_nominal_hz, parse_selects)
 from wavi_py.transports.sim_transport import SimSignals
 from wavi_py.views import FftView, ImuView, LineView, SpectrogramView, SpectrumView
 from wavi_py.views.base import alarm_label, show_alarm
 from wavi_py.views.fault_log import FaultLogView
+from wavi_py.views.replay_bar import ReplayControls, ReplayModel, fmt_t
 from wavi_py.views.sim_panel import SimPanel
 from wavi_py.views.spectral_base import FFT_WINDOWS_S
 from whisker_link.channels import NUM_WHISKER, SAT_CODE
@@ -127,6 +140,9 @@ class MainWindow(QMainWindow):
         scan_mode: Optional[tuple[int, ...]] = None,
         selects: str = DEFAULT_SELECTS,
         dome_map: Optional[DomeMap] = None,
+        replay_path: Optional[str] = None,
+        replay_speed: Optional[float] = 1.0,
+        replay_start_s: float = 0.0,
     ):
         super().__init__()
         self.setWindowTitle("Wavi (Python)")
@@ -137,6 +153,16 @@ class MainWindow(QMainWindow):
         self._initial_host = host
         self._initial_port = int(port)
         self._initial_serial_port = serial_port
+        # replay: the file, and where / how fast the first open starts
+        self._initial_replay_path = replay_path or ""
+        self._replay_speed = replay_speed
+        self._replay_start_s = float(replay_start_s)
+        self._replay = ReplayModel()
+        self._index: Optional[RecordingIndex] = None
+        self._index_job: Optional[dict] = None       # the background indexing
+        self._replay_gen = 0                         # the newest seek handled
+        self._replay_seek_at: Optional[int] = None   # its bus index, until "live"
+        self._status_shown_t = 0.0
         self._nsensor = int(nsensor)
         self._nch = self._nsensor * 2
         # Server transport with auto_fs: fs is only a starting guess, replaced
@@ -242,7 +268,15 @@ class MainWindow(QMainWindow):
         # IMU rolling buffer (server transport only)
         self._imu_last_seq = 0
         self._imu_rows = np.empty((0, 9), dtype=np.float32)
+        self._imu_t = np.empty(0)
         self._last_status_t = 0.0
+        # the IMU window follows the Line window's time range (and drives it)
+        self._line_view.timeWindowChanged.connect(self._on_line_time_window)
+        self._line_view.closed.connect(lambda: self._imu_view.set_time_window(None))
+        self._imu_view.timeWindowChanged.connect(self._line_view.set_time_window)
+        # replay: playback state drives the Pause buttons
+        self._replay.stateChanged.connect(self._on_replay_state)
+        self._replay.seeked.connect(lambda _t: self._line_view.go_live())
 
         # main-thread timer that drains the bus
         self._timer = QTimer(self)
@@ -254,6 +288,7 @@ class MainWindow(QMainWindow):
         self._fs = float(fs)
         self._ns_tot = max(int(round(self._fs * FFT_WINDOWS_S[-1])), int(self._t_buffer_s * self._fs))
         self._sig = np.full((self._ns_tot, self._nch), np.nan, dtype=np.float32)
+        self._sig_t = np.full(self._ns_tot, np.nan)      # the samples' times (session s)
         self._size_spectral()
         # Track how many real samples are sitting in `_sig` since the last
         # connect/reset. Used to feed only the populated portion to the line
@@ -338,10 +373,13 @@ class MainWindow(QMainWindow):
         rows = QVBoxLayout(box)
         h = QHBoxLayout()
         rows.addLayout(h)
+        # replay: play / pause, speed, time, go to (shown with the Replay transport)
+        self._replay_controls = ReplayControls(self._replay)
+        rows.addWidget(self._replay_controls)
         rows.addLayout(self._build_scan_mode_row())
 
         self._transport_combo = QComboBox()
-        self._transport_combo.addItems(["Server", "ESP32", "Sim", "TCP", "Serial"])
+        self._transport_combo.addItems(["Server", "ESP32", "Sim", "TCP", "Serial", "Replay"])
         names = [self._transport_combo.itemText(i).lower()
                  for i in range(self._transport_combo.count())]
         if self._initial_transport.lower() in names:
@@ -358,6 +396,13 @@ class MainWindow(QMainWindow):
         self._serial_port_edit = QLineEdit(self._initial_serial_port or "")
         self._serial_port_edit.setPlaceholderText("COM3 or /dev/ttyACM0")
 
+        self._file_edit = QLineEdit(self._initial_replay_path)
+        self._file_edit.setPlaceholderText("recording (.jsonl)")
+        self._file_edit.setToolTip("A daq_server recording: the Pi's whisker_rec/*.jsonl, or the\n"
+                                   "local copy next to a .dat (also the ESP32 / Sim tees)")
+        self._browse_btn = QPushButton("Browse...")
+        self._browse_btn.clicked.connect(self._choose_recording)
+
         self._connect_btn = QPushButton("Connect")
         self._connect_btn.clicked.connect(self._on_connect_clicked)
 
@@ -367,14 +412,15 @@ class MainWindow(QMainWindow):
         self._sim_btn.toggled.connect(lambda on: self._toggle_window(self._sim_panel, on))
         self._sim_panel.closed.connect(lambda: self._sim_btn.setChecked(False))
 
+        self._live_inputs = [QLabel("Host:"), self._host_edit, QLabel("Port:"), self._port_spin,
+                             QLabel("Serial:"), self._serial_port_edit]
+        self._replay_inputs = [QLabel("File:"), self._file_edit, self._browse_btn]
         h.addWidget(QLabel("Transport:"))
         h.addWidget(self._transport_combo)
-        h.addWidget(QLabel("Host:"))
-        h.addWidget(self._host_edit, stretch=2)
-        h.addWidget(QLabel("Port:"))
-        h.addWidget(self._port_spin)
-        h.addWidget(QLabel("Serial:"))
-        h.addWidget(self._serial_port_edit, stretch=1)
+        for w, stretch in zip(self._live_inputs, (0, 2, 0, 0, 0, 1)):
+            h.addWidget(w, stretch=stretch)
+        for w, stretch in zip(self._replay_inputs, (0, 3, 0)):
+            h.addWidget(w, stretch=stretch)
         h.addWidget(self._connect_btn)
         h.addWidget(self._sim_btn)
 
@@ -447,7 +493,7 @@ class MainWindow(QMainWindow):
         self._show_mode_note()
 
     def _send_esp32(self, data: Optional[str]) -> None:
-        if data and self._client is not None:
+        if data and self._client is not None and not self._replaying:
             print(f"[MainWindow] to the ESP32: {data}")
             self._client.send_command({"cmd": "esp32", "data": data})
 
@@ -486,14 +532,15 @@ class MainWindow(QMainWindow):
     def _show_mode_note(self) -> None:
         """The keeper's note (or the reported mode) next to the dropdown and in the
         stream status line."""
-        note = self._keeper.note
+        note = self._keeper.note if not self._replaying else ""
         if not note and self._esp32_cfg is not None:
-            note = f"ESP32 reports {describe_cfg(self._esp32_cfg)}"
+            note = (f"{'recorded' if self._replaying else 'ESP32 reports'} "
+                    f"{describe_cfg(self._esp32_cfg)}")
         if note == self._mode_label.text():
             return
         self._mode_label.setText(note)
         self._mode_label.setToolTip(note)
-        bad = self._keeper.state == "failed"
+        bad = self._keeper.state == "failed" and not self._replaying
         self._mode_label.setStyleSheet("QLabel { color: #c00; }" if bad else "QLabel { color: #555; }")
         if self._last_status_rec and self._client is not None:
             self._show_status(self._last_status_rec)
@@ -619,6 +666,14 @@ class MainWindow(QMainWindow):
 
     def _on_transport_changed(self, kind: str) -> None:
         kind = kind.upper()
+        replay = kind == "REPLAY"
+        for w in self._live_inputs:
+            w.setVisible(not replay)
+        for w in self._replay_inputs:
+            w.setVisible(replay)
+        self._replay_controls.setVisible(replay)
+        if self._client is None:
+            self._connect_btn.setText("Open" if replay else "Connect")
         self._host_edit.setEnabled(kind in ("TCP", "SERVER"))
         self._port_spin.setEnabled(kind in ("TCP", "SERVER"))
         self._serial_port_edit.setEnabled(kind in ("SERIAL", "ESP32"))
@@ -632,12 +687,74 @@ class MainWindow(QMainWindow):
     def _on_connect_clicked(self) -> None:
         if self._client is not None and self._client.is_running:
             self._disconnect()
+        elif self._index_job is not None:
+            return                                   # still indexing
+        elif self._transport_combo.currentText().lower() == "replay":
+            self.open_replay(self._file_edit.text().strip())
         else:
             self._connect()
 
-    def _connect(self) -> None:
+    # ----- replay: index the file in the background, then connect to it
+
+    def _choose_recording(self) -> None:
+        cur = self._file_edit.text().strip()
+        start = str(Path(cur).parent) if cur else str(self._outpath)
+        path, _ = QFileDialog.getOpenFileName(self, "Open a recording", start,
+                                              "Recordings (*.jsonl);;All files (*)")
+        if path:
+            self._file_edit.setText(path)
+            if self._client is None and self._index_job is None:
+                self.open_replay(path)
+
+    def open_replay(self, path: str) -> None:
+        """Index ``path`` (a thread; the progress bar shows it), then play it paused
+        at the start (or ``--start`` the first time)."""
+        if not path or not Path(path).is_file():
+            QMessageBox.critical(self, "Open failed", f"No such recording: {path or '(none)'}")
+            return
+        i = self._transport_combo.findText("Replay")
+        if self._transport_combo.currentIndex() != i:
+            self._transport_combo.setCurrentIndex(i)
+        self._file_edit.setText(path)
+        job: dict = {"path": path, "frac": 0.0, "index": None, "error": None}
+
+        def run() -> None:
+            try:
+                job["index"] = RecordingIndex.open(
+                    path, progress=lambda f: job.__setitem__("frac", f))
+            except Exception as exc:  # noqa: BLE001 — not a recording, unreadable
+                job["error"] = str(exc) or type(exc).__name__
+        self._index_job = job
+        self._set_transport_inputs_enabled(False)
+        self._connect_btn.setEnabled(False)
+        self._path_label.setText(f"Indexing {Path(path).name}...")
+        threading.Thread(target=run, name="wavi-index", daemon=True).start()
+        QTimer.singleShot(50, self._poll_index_job)
+
+    def _poll_index_job(self) -> None:
+        job = self._index_job
+        if job is None:
+            return
+        if job["index"] is None and job["error"] is None:
+            self._progress.setValue(int(job["frac"] * 1000))
+            QTimer.singleShot(50, self._poll_index_job)
+            return
+        self._index_job = None
+        self._progress.setValue(0)
+        self._connect_btn.setEnabled(True)
+        self._set_transport_inputs_enabled(True)
+        if job["error"] is not None:
+            QMessageBox.critical(self, "Open failed", f"{job['path']}: {job['error']}")
+            self._path_label.setText(f"Could not open {job['path']}")
+            return
+        self._index = job["index"]
+        self._connect(index=self._index)
+
+    def _connect(self, index: Optional[RecordingIndex] = None) -> None:
         try:
             kind = self._transport_combo.currentText().lower()
+            if kind == "replay" and index is not None and index.fs > 0:
+                self._set_rate(index.fs)             # the scan rate measured from the file
             client = WaviClient(
                 transport=kind,
                 host=self._host_edit.text().strip() or DEFAULT_TCP_HOST,
@@ -648,11 +765,16 @@ class MainWindow(QMainWindow):
                 ns_read=self._ns_read,
                 t_buffer_s=self._t_buffer_s,
                 sim=self._sim,
+                index=index,
+                replay_speed=self._replay_speed,
+                replay_start_s=self._replay_start_s,
+                replay_playing=False,
             )
             client.start()
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "Connect failed", str(exc))
             return
+        self._replay_start_s = 0.0                   # --start: the first open only
 
         self._client = client
         self._last_seq = 0
@@ -668,6 +790,9 @@ class MainWindow(QMainWindow):
         self._last_v0_version = 0
         self._imu_last_seq = 0
         self._imu_rows = np.empty((0, 9), dtype=np.float32)
+        self._imu_t = np.empty(0)
+        self._sig_t.fill(np.nan)
+        self._replay_gen, self._replay_seek_at = 0, None
         self._anchor_idx, self._anchor_t = 0, 0.0
         self._esp32_cfg, self._cfg_key = None, None
         self._info_seen = self._txt_seen = 0
@@ -676,11 +801,11 @@ class MainWindow(QMainWindow):
         self._fault_marks_seen = 0
         self._beat_uptime, self._reboot_note = None, ""
         self._set_fault_state({})
-        if client.is_event_stream:
+        if client.is_event_stream and not self._replaying:
             self._keeper.connected()
         self._show_mode_note()
 
-        self._connect_btn.setText("Disconnect")
+        self._connect_btn.setText("Close" if self._replaying else "Disconnect")
         self._set_stream_buttons_enabled(True)
         # server / esp32 samples are mV at the ADC; a railed (open) gauge reads ~ full scale
         if client.is_event_stream:
@@ -691,9 +816,19 @@ class MainWindow(QMainWindow):
             self._line_view.set_value_format("", None)
             for v in (self._spectrum_view, self._fft_view, self._spec_view):
                 v.set_units("")
-        self._record_btn.setEnabled(True)
+        # a replay records nothing (the file is the recording)
+        self._record_btn.setEnabled(not self._replaying)
         self._set_transport_inputs_enabled(False)
-        self._path_label.setText(f"Connected to {client.endpoint_str} — output dir: {self._outpath}")
+        if self._replaying:
+            assert index is not None
+            self._replay.attach(client.replay, index)
+            self.setWindowTitle(f"Wavi (Python) - replay {index.path.name}")
+            self._path_label.setText(f"Replaying {index.summary()}")
+            self._fault_log.append(f"---- replay of {index.path.name} "
+                                   f"({datetime.fromtimestamp(index.unix0):%Y-%m-%d %H:%M:%S}, "
+                                   f"{fmt_t(index.duration)}) ----")
+        else:
+            self._path_label.setText(f"Connected to {client.endpoint_str} — output dir: {self._outpath}")
         for v in self._stream_views:
             v.set_stream_status(f"Connected to {client.endpoint_str}")
         self._last_status_t = 0.0
@@ -710,12 +845,16 @@ class MainWindow(QMainWindow):
             self._client = None
         if self._dome_view is not None:
             self._dome_view.set_bus(None)
+        if self._replay.active:
+            self._replay.detach()
+            self.setWindowTitle("Wavi (Python)")
 
         self._keeper.set_wanted(self._keeper.want, connected=False)
         self._esp32_cfg = None
         self._set_fault_state({})
         self._show_mode_note()
-        self._connect_btn.setText("Connect")
+        self._connect_btn.setText(
+            "Open" if self._transport_combo.currentText().upper() == "REPLAY" else "Connect")
         self._pause_btn.setChecked(False)
         self._set_stream_buttons_enabled(False)
         self._record_btn.setEnabled(False)
@@ -737,7 +876,13 @@ class MainWindow(QMainWindow):
             msg += " The local recording was saved; the ROV-side recording may still be running."
         self._path_label.setText(msg)
 
+    @property
+    def _replaying(self) -> bool:
+        return self._client is not None and self._client.transport_kind == "replay"
+
     def _set_transport_inputs_enabled(self, enabled: bool) -> None:
+        self._file_edit.setEnabled(enabled)
+        self._browse_btn.setEnabled(enabled)
         self._transport_combo.setEnabled(enabled)
         kind = self._transport_combo.currentText().upper()
         self._host_edit.setEnabled(enabled and kind in ("TCP", "SERVER"))
@@ -817,22 +962,94 @@ class MainWindow(QMainWindow):
         self._pause_btn.setEnabled(on)
         self._reset_btn.setEnabled(on)
         self._esp32_reset_btn.setEnabled(
-            on and self._client is not None and self._client.is_event_stream)
+            on and self._client is not None and self._client.is_event_stream
+            and not self._replaying)
+        array = self._transport_combo.currentText().upper() in ("SERVER", "ESP32", "SIM")
+        self._mode_combo.setEnabled(array)
+        self._selects_edit.setEnabled(array)
         if not on:
             self._reset_sent_at = None
         for v in self._stream_views:
             v.set_stream_controls_enabled(on)
 
     def _on_pause_toggled(self, on: bool) -> None:
-        self._is_paused = on
         self._pause_btn.setText("Resume" if on else "Pause")
         for v in self._stream_views:
             v.set_paused(on)
+        if self._replay.active:
+            # replay: Pause pauses playback; the views keep drawing (a seek while
+            # paused shows the new position)
+            self._is_paused = False
+            if on:
+                self._replay.pause()
+            elif self._replay.state != "playing":
+                self._replay.play()
+            return
+        self._is_paused = on
         if self._dome_view is not None:
             self._dome_view.set_paused(on)
 
+    def _on_line_time_window(self, x0: float, x1: float) -> None:
+        """The Line window's visible time range: the IMU window follows it."""
+        if self._line_view.isVisible():
+            self._imu_view.set_time_window((x0, x1))
+
+    def _on_replay_state(self, state: str) -> None:
+        """Playback started / stopped (any control, or the end): the Pause buttons."""
+        if state in ("playing", "paused", "eof"):
+            paused = state != "playing"
+            if self._pause_btn.isChecked() != paused:
+                self._pause_btn.setChecked(paused)
+        if state == "eof":
+            self._path_label.setText("End of the recording (Play starts over).")
+
+    def zero_at(self, t: Optional[float] = None, window_s: float = 0.25) -> bool:
+        """Re-zero (V0, and the Dome's tare) from the buffered samples: the mean over
+        ``window_s`` centred on time ``t`` (session seconds; None = the newest
+        ``window_s``). Local only, so it works while paused, live or in replay.
+        Returns False if there is no data there."""
+        n = self._samples_since_clear
+        if n <= 0:
+            return False
+        ts, sig = self._sig_t[-n:], self._sig[-n:]
+        if t is None:
+            sel = ts >= ts[-1] - window_s
+        else:
+            sel = np.abs(ts - t) <= window_s / 2
+        if not sel.any():
+            return False
+        with np.errstate(invalid="ignore"):
+            v0 = np.nanmean(sig[sel], axis=0)
+        self._v0 = np.where(np.isfinite(v0), v0, self._v0).astype(np.float32)
+        if self._dome_view is not None:
+            self._dome_view.set_zero(self._v0)
+        where = "the newest samples" if t is None else f"t = {t:.2f} s"
+        self._path_label.setText(f"Re-zeroed at {where} ({int(sel.sum())} samples).")
+        self._fault_log.append(f"{self._now():%Y-%m-%d %H:%M:%S}  info   re-zero at {where}")
+        self._request_redraw()
+        return True
+
+    def _request_redraw(self) -> None:
+        """Redraw the Line window from the buffer (e.g. a new V0 while paused)."""
+        n = self._samples_since_clear
+        if n > 0:
+            latest = float(self._sig_t[-1])
+            self._line_view.update_view(self._sig_t[-n:], self._sig[-n:], self._v0, self._scale,
+                                        x_range=(latest - self._t_buffer_s, latest))
+
+    def _now(self) -> datetime:
+        """Wall clock: the recording's at the playhead in replay, else now."""
+        if self._replay.active:
+            wall = self._replay.wall_clock(self._replay.position)
+            if wall is not None:
+                return wall
+        return datetime.now()
+
     def _on_reset_clicked(self) -> None:
         if self._client is None or not self._client.is_running:
+            return
+        if self._replaying:
+            self.zero_at(None)        # from the buffer: works while playback is paused
             return
         self._client.reset()  # DAQ thread will recompute V0 on its next tick
         if self._dome_view is not None:
@@ -863,7 +1080,7 @@ class MainWindow(QMainWindow):
             self._start_recording()
 
     def _start_recording(self) -> None:
-        if self._client is None:
+        if self._client is None or self._replaying:
             return
         tag = self._tag_edit.text().strip()
         start_dt = datetime.now()
@@ -925,7 +1142,7 @@ class MainWindow(QMainWindow):
         if self._client.is_event_stream:
             self._tick_server_extras()
 
-        samples, new_seq = self._client.bus.read_since(self._last_seq, block=False)
+        samples, times, new_seq = self._client.bus.read_since_t(self._last_seq, block=False)
         if samples is None:
             return
         n_new_published = new_seq - self._last_seq
@@ -951,24 +1168,26 @@ class MainWindow(QMainWindow):
 
         # A scan-mode switch inside this block: the samples before it go into the old
         # buffers, then the buffers start over at the new rate.
+        # A scan-mode switch (or a replay seek) inside this block: the samples before
+        # it go into the old buffers, then the buffers start over (at the new rate).
         first = new_seq - n_new
         pos = 0
         while self._pending_switches and self._pending_switches[0][0] < new_seq:
             at, fs = self._pending_switches.pop(0)
             cut = min(max(at - first, pos), n_new)
             if cut > pos:
-                self._ingest(samples[pos:cut], first + pos)
+                self._ingest(samples[pos:cut], first + pos, times[pos:cut])
                 pos = cut
             self._switch_rate(fs, at)
         if pos < n_new:
-            self._ingest(samples[pos:], first + pos)
+            self._ingest(samples[pos:], first + pos, times[pos:])
         if self._is_recording:
             self._maybe_auto_stop()
 
-        # Time axis: the most recent sample is at t_of(new_seq - 1) since the stream start.
-        # We render the whole buffer with x = (i - (ns_tot-1)) / fs + latest_time.
-        latest_t = self._t_of(new_seq - 1)
-        t_axis = latest_t + np.arange(-(self._ns_tot - 1), 1) / self._fs
+        # Time axis: each buffered sample's time (session seconds; from the stream's
+        # clocks, else the sample index since the stream start / fs).
+        latest_t = float(self._sig_t[-1])
+        t_axis = self._sig_t
 
         # Plot updates (skipped while paused, but data still buffered + recorded).
         if not self._is_paused:
@@ -994,19 +1213,25 @@ class MainWindow(QMainWindow):
             if self._samples_since_spec_update >= self._spec_hop:
                 self._update_fft_and_spec()
 
-    def _ingest(self, samples: np.ndarray, first_idx: int) -> None:
-        """Samples ``first_idx``... (all at the current rate) into the rolling buffer
-        and the recording."""
+    def _ingest(self, samples: np.ndarray, first_idx: int,
+                times: Optional[np.ndarray] = None) -> None:
+        """Samples ``first_idx``... (all at the current rate; their times, NaN where
+        the stream has none) into the rolling buffer and the recording."""
         n_new = samples.shape[0]
         # Outlier removal on the trailing block, mirroring wavi.m's remove_outliers.
         cleaned = fill_outliers_linear(samples)
+        t_idx = self._t_of(first_idx) + np.arange(n_new) / self._fs
+        t = t_idx if times is None else np.where(np.isfinite(times), times, t_idx)
 
         # Shift the rolling buffer and append cleaned samples.
         if n_new >= self._ns_tot:
             self._sig[:] = cleaned[-self._ns_tot:]
+            self._sig_t[:] = t[-self._ns_tot:]
         else:
             self._sig[:-n_new] = self._sig[n_new:]
             self._sig[-n_new:] = cleaned
+            self._sig_t[:-n_new] = self._sig_t[n_new:]
+            self._sig_t[-n_new:] = t
         self._samples_since_clear = min(self._samples_since_clear + n_new, self._ns_tot)
         self._samples_since_spec_update += n_new
 
@@ -1038,19 +1263,25 @@ class MainWindow(QMainWindow):
                     print(f"[MainWindow] ESP32 scan config {describe_cfg(cfg)}: "
                           f"{fs:.3f} Hz from sample {at}")
             self._cfg_key = key
-            self._send_esp32(self._keeper.on_info(cfg))
+            if not self._replaying:              # a recording is not kept in a mode
+                self._send_esp32(self._keeper.on_info(cfg))
         n_txt, msg = meta.get("esp32_txt") or (0, "")
         if n_txt > self._txt_seen:
             self._txt_seen = n_txt
-            self._keeper.on_text(msg)
-        self._send_esp32(self._keeper.tick())
+            if not self._replaying:
+                self._keeper.on_text(msg)
+        if not self._replaying:
+            self._send_esp32(self._keeper.tick())
         self._show_mode_note()
 
     def _tick_server_extras(self) -> None:
         """IMU view + a one-line server status (rates, vehicle-side recording)."""
         assert self._client is not None
-        rows, seq = self._client.imu_bus.read_since(self._imu_last_seq, block=False)
         meta = self._client.bus.get_metadata()
+        if self._replay.active:
+            self._replay.poll()
+            self._tick_replay(meta)
+        rows, t, seq = self._client.imu_bus.read_since_t(self._imu_last_seq, block=False)
         self._tick_esp32_mode(meta)
         self._tick_esp32_reset(meta)
         self._tick_faults(meta)
@@ -1058,20 +1289,54 @@ class MainWindow(QMainWindow):
         st = meta.get("server_status") or {}
         if rows is not None:
             self._imu_last_seq = seq
-            # the IMU's own rate and span (the whisker rate doesn't matter here);
-            # the bus holds up to 400 Hz
+            # the IMU's own times (session seconds, as the Line window's); the newest
+            # t_buffer_s of them. Rows without a time: the RAW_IMU rate.
             hz = min(float(st.get("hz", {}).get("RAW_IMU", 0)) or 100.0, 400.0)
-            keep = max(2, int(self._t_buffer_s * hz))
-            self._imu_rows = np.vstack([self._imu_rows, rows])[-keep:]
-            n = len(self._imu_rows)
+            if not np.isfinite(t).all():
+                last = self._imu_t[-1] if len(self._imu_t) else 0.0
+                t = np.where(np.isfinite(t), t, last + np.arange(1, len(rows) + 1) / hz)
+            self._imu_rows = np.vstack([self._imu_rows, rows])
+            self._imu_t = np.concatenate([self._imu_t, t])
+            keep = int(np.searchsorted(self._imu_t, self._imu_t[-1] - self._t_buffer_s))
+            keep = max(keep, len(self._imu_t) - int(self._t_buffer_s * 400))   # 400 Hz at most
+            if keep:
+                self._imu_rows, self._imu_t = self._imu_rows[keep:], self._imu_t[keep:]
             if not self._is_paused and self._imu_view.isVisible():
-                self._imu_view.update_view(np.arange(-n + 1, 1) / hz, self._imu_rows)
+                self._imu_view.update_view(self._imu_t, self._imu_rows)
         if st and st.get("t", 0) != self._last_status_t:
             self._last_status_t = st.get("t", 0)
             self._last_status_rec = st
             self._set_fault_state(st.get("esp32", {}).get("fault") or {})
             self._note_beat(st.get("esp32", {}).get("beat"))
             self._show_status(st)
+        elif (self._replay.active and self._last_status_rec
+              and time.monotonic() - self._status_shown_t > 0.25):
+            self._show_status(self._last_status_rec)        # the REPLAY position moves
+
+    def _tick_replay(self, meta: dict) -> None:
+        """Replay seeks (``replay_marks``): the buffers start over at the marked bus
+        index, the IMU rows at the marked IMU index; the ESP32 state is forgotten
+        (a backward seek is not a reboot); the Dome reads on from the trail's worth
+        before the new position."""
+        for gen, op, at, imu_at, pos in meta.get("replay_marks") or ():
+            if op == "seek" and gen > self._replay_gen:
+                self._replay_gen, self._replay_seek_at = gen, at
+                self._pending_switches.append((int(at), self._fs))
+                self._pending_switches.sort(key=lambda x: x[0])
+                self._imu_rows = np.empty((0, 9), dtype=np.float32)
+                self._imu_t = np.empty(0)
+                self._imu_last_seq = max(self._imu_last_seq, int(imu_at))
+                self._beat_uptime, self._reboot_note = None, ""
+                self._last_status_t, self._last_status_rec = 0.0, {}
+                self._set_fault_state({})
+                if gen > 1:
+                    wall = self._replay.wall_clock(pos)
+                    self._fault_log.append(f"{wall or datetime.now():%Y-%m-%d %H:%M:%S}  "
+                                           f"----   seek to {fmt_t(pos)}")
+            elif op == "live" and gen == self._replay_gen and self._replay_seek_at is not None:
+                if self._dome_view is not None:
+                    self._dome_view.discontinuity(max(self._replay_seek_at, int(at)))
+                self._replay_seek_at = None
 
     # ------------------------------------------------------------------
     # ESP32 / ADC faults
@@ -1154,13 +1419,14 @@ class MainWindow(QMainWindow):
         up = beat.get("uptime_ms", 0)
         prev, self._beat_uptime = self._beat_uptime, up
         if (prev is None and up < REBOOT_NOTE_S * 1000) or (prev is not None and up + 1000 < prev):
-            t = datetime.now() - timedelta(milliseconds=up)
+            t = self._now() - timedelta(milliseconds=up)
             self._reboot_note = (f"ESP32 {'booted' if prev is None else 'rebooted'} {t:%H:%M:%S}"
                                  f" (reset: {beat.get('reset_name', '?')})")
             self._reboot_note_until = time.monotonic() + REBOOT_NOTE_S
             self._fault_log.append(f"{t:%Y-%m-%d %H:%M:%S}  info   {self._reboot_note}")
 
     def _show_status(self, st: dict) -> None:
+        self._status_shown_t = time.monotonic()
         link, adc = self._format_status(st)
         text = f"{link} | {adc}"
         beat = st.get("esp32", {}).get("beat")
@@ -1183,7 +1449,7 @@ class MainWindow(QMainWindow):
         assert self._client is not None
         hz = st.get("hz", {})
         rec = st.get("rec", {})
-        if self._client.transport_kind == "server":
+        if self._client.has_vehicle:
             pi_rec = f"ROV rec {rec.get('secs', 0):.0f}s" if rec.get("on") else "ROV rec off"
         else:
             pi_rec = "streaming" if st.get("esp32", {}).get("streaming") else "NOT streaming"
@@ -1203,7 +1469,7 @@ class MainWindow(QMainWindow):
                                     f" ovr {h['overrun']}" if h else "")
             if e.get("adc_sync"):
                 errs += f" sync {e['adc_sync']}"
-        if self._keeper.want is not None and self._keeper.note:
+        if self._keeper.want is not None and self._keeper.note and not self._replaying:
             errs += f" | mode: {self._keeper.note}"
         # the heartbeat and a recent reboot go last: the line is cut from the left
         b = e.get("beat")
@@ -1215,9 +1481,14 @@ class MainWindow(QMainWindow):
         f = e.get("fault") or {}
         fault = f" | FAULT {f.get('code')}" if f.get("level") == "fault" else ""
         imu = (f"IMU {hz.get('RAW_IMU', 0):g} Hz | att {hz.get('ATTITUDE', 0):g} Hz | "
-               if self._client.transport_kind == "server" else "")
-        return (f"{self._client.endpoint_str} | whisker {self._fs:.2f} Hz | {imu}{pi_rec}{fault}",
-                errs)
+               if self._client.has_vehicle else "")
+        where = self._client.endpoint_str
+        if self._replay.active:
+            # so a screenshot can't pass for live
+            sp = self._replay.speed
+            where = (f"REPLAY {'max' if sp is None else f'{sp:g}x'} "
+                     f"{self._replay.position:.1f}/{self._replay.duration:.1f} s | {where}")
+        return (f"{where} | whisker {self._fs:.2f} Hz | {imu}{pi_rec}{fault}", errs)
 
     def _update_spectrum(self) -> None:
         """Amplitude spectra of the newest ``window_s`` seconds: mean removed, Hann

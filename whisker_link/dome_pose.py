@@ -140,6 +140,13 @@ class Tare:
         self._cnt[:] = 0
         self._pending = True
 
+    def set(self, baseline: np.ndarray) -> None:
+        """Use ``baseline`` (mV per channel; railed ones are ignored) now, e.g. a
+        re-zero at a chosen time; ends a pending tare."""
+        b = np.asarray(baseline, dtype=np.float64)
+        self.baseline = np.where(np.isfinite(b) & (np.abs(b) < RAIL_MV), b, np.nan)
+        self._pending = False
+
     def update(self, mv: np.ndarray, fs: float) -> np.ndarray:
         """Feed a block (N, nch) of mV; returns the deltas (N, nch), NaN while
         a tare is collecting and for railed channels."""

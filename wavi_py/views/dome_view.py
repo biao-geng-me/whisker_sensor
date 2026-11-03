@@ -1218,6 +1218,22 @@ class DomeView(ViewWindow):
     def tare(self) -> None:
         self.pose.request_tare()
 
+    def set_zero(self, v0: np.ndarray) -> None:
+        """Tare to this baseline (mV per channel; a re-zero at a chosen time)."""
+        self.pose.tare.set(v0)
+        self.pose.smoother.reset()
+        self._render_pose()
+
+    def discontinuity(self, at: int) -> None:
+        """A replay seek: the stream jumps. Read on from bus index ``at`` (the new
+        position: the preroll before it would only be chewed through in one frame;
+        the trails are drawn in wall time), and restart the trails and the
+        smoothing; the tare stays."""
+        if self._bus is not None:
+            self._cursor = max(self._cursor, int(at))
+        self.pose.smoother.reset()
+        self._restart_trail()
+
     def set_target_fps(self, fps: float) -> None:
         self._timer.setInterval(max(1, int(round(1000.0 / float(fps)))))
 

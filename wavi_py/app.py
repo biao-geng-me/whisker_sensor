@@ -37,15 +37,42 @@ def _arg(parse):
     return f
 
 
+def _speed(s: str):
+    if s.strip().lower() == "max":
+        return None
+    v = float(s)
+    if not v > 0:
+        raise ValueError(f"speed must be > 0 or 'max', got {s!r}")
+    return v
+
+
+def _start(s: str) -> float:
+    from wavi_py.views.replay_bar import parse_t
+
+    t = parse_t(s)
+    if t is None:
+        raise ValueError(f"start: seconds or m:ss, got {s!r}")
+    return t
+
+
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         prog="wavi_py",
         description="Python whisker-sensor DAQ client (GUI).",
     )
-    p.add_argument("--transport", choices=["server", "esp32", "sim", "tcp", "serial"], default="tcp",
+    p.add_argument("--transport", choices=["server", "esp32", "sim", "tcp", "serial", "replay"],
+                   default=None,
                    help="server = rpi/daq_server.py (ESP32 whisker array + ROV IMU); "
                         "esp32 = the ESP32 DAQ on a local serial port (no IMU); "
-                        "sim = a simulated array with a signal panel (no hardware)")
+                        "sim = a simulated array with a signal panel (no hardware); "
+                        "replay = a recording (.jsonl, see --replay); default tcp")
+    p.add_argument("--replay", metavar="FILE.jsonl", default=None,
+                   help="open this recording (a daq_server .jsonl: the Pi's whisker_rec, or the "
+                        "local copy next to a .dat) and replay it; implies --transport replay")
+    p.add_argument("--speed", type=_arg(_speed), default=1.0,
+                   help="replay speed (0.25 .. 8, or max; default 1)")
+    p.add_argument("--start", type=_arg(_start), default=0.0,
+                   help="replay: start (paused) at this time, seconds or m:ss (default 0)")
     p.add_argument("--host", default=DEFAULT_TCP_HOST, help="TCP host (Pi IP or hostname)")
     p.add_argument("--port", type=int, default=None,
                    help=f"TCP port (default {DEFAULT_TCP_PORT}; {SERVER_PORT} for server)")
@@ -79,6 +106,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         f"{DEFAULT_MAP.relative_to(DEFAULT_MAP.parents[3])}; 'none' = plain "
                         "W1 .. W16 and the placeholder dome holes (also the Map button)")
     a = p.parse_args(argv)
+    if a.transport is None:
+        a.transport = "replay" if a.replay else "tcp"
+    elif a.replay and a.transport != "replay":
+        p.error("--replay plays a recording: it goes with --transport replay (or none)")
     if a.dome_map.strip().lower() == "none":
         a.dome_map = None
     else:
@@ -87,7 +118,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         except ValueError as exc:
             p.error(f"--dome-map: {exc}")
     server = a.transport == "server"
-    array = a.transport in ("server", "esp32", "sim")
+    array = a.transport in ("server", "esp32", "sim", "replay")
     if a.port is None:
         a.port = SERVER_PORT if server else DEFAULT_TCP_PORT
     if a.nsensor is None:
@@ -128,8 +159,13 @@ def main(argv: list[str] | None = None) -> int:
         scan_mode=args.mode,
         selects=args.selects,
         dome_map=args.dome_map,
+        replay_path=args.replay,
+        replay_speed=args.speed,
+        replay_start_s=args.start,
     )
     win.show()
+    if args.replay:
+        win.open_replay(args.replay)
     return app.exec()
 
 

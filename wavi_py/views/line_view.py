@@ -29,6 +29,7 @@ grid lines are drawn. These dominate the paint time with 30 s of 32 channels.
 from __future__ import annotations
 
 import numpy as np
+from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtGui import QAction, QKeySequence
 
 import pyqtgraph as pg
@@ -85,6 +86,9 @@ def _peak_decimate(t: np.ndarray, y: np.ndarray, k: int) -> tuple[np.ndarray, np
 
 
 class LineView(WhiskerPlotsView):
+    # the visible time range changed (any layout); the IMU window follows it
+    timeWindowChanged = pyqtSignal(float, float)
+
     TITLE = "Wavi - Line"
     X_LABEL = ("Time", "s")
     KEYS_HELP = _KEYS_HELP
@@ -107,6 +111,9 @@ class LineView(WhiskerPlotsView):
         self._set_box(self._y_top, self.DEFAULT_FIXED, 1e-3, 1e6, 3, prefix="±")
         self._y_top.setToolTip("Y fixed: every plot shows +- this around the channel's V0 baseline")
         self.set_value_format("", None)
+        for p in (self._stacked.getPlotItem(), self._tiles[0], self._single_plot.getPlotItem()):
+            p.getViewBox().sigXRangeChanged.connect(
+                lambda vb, r, p=p: self._emit_time_window(p, r))
         self._act_grid.setChecked(True)            # grid by default (this also resets the view)
 
     # ------------------------------------------------------------------
@@ -140,6 +147,25 @@ class LineView(WhiskerPlotsView):
 
     def _on_resumed(self) -> None:
         self._go_live()
+
+    def go_live(self) -> None:
+        """Follow the newest data (keeping the zoom), e.g. after a replay seek."""
+        if not self._follow:
+            self._go_live()
+
+    def set_time_window(self, x0: float, x1: float) -> None:
+        """Show times x0..x1 (another window's zoom, e.g. the IMU's): leaves live."""
+        if (x0, x1) == tuple(self._visible_x_range()):
+            return
+        if self._follow:
+            self._follow = False
+            self.statusBar().showMessage(_NOT_LIVE)
+        WhiskerPlotsView._show_x(self, (x0, x1))
+        self._request_render()
+
+    def _emit_time_window(self, plot, rng) -> None:
+        if plot is self._current_x_plot():
+            self.timeWindowChanged.emit(float(rng[0]), float(rng[1]))
 
     def _full_span(self) -> float | None:
         return None if self._x_range is None else self._x_range[1] - self._x_range[0]

@@ -139,8 +139,11 @@ def write_recording(path, compact_hello: bool = False, truncated: bool = True,
                                     "chunk_seq": 0}})
         add(t_first + 5.5, {"k": "mav", "type": "STATUSTEXT", "src": [1, 1],
                             "d": {"severity": 6, "text": "#Gain is 50%", "id": 0, "chunk_seq": 0}})
-    cfg = {"proto": 4, "nch": 32, "osr": 128, "settle_us": 200, "sel_mask": 191, "mode": 2,
-           "scan_hz": 250.0}
+    # the pilot2 hello's INFO (wide 250 Hz, OSR 128, selects 0123457)
+    cfg = {"proto": 4, "nch": 32, "device_id": 9221, "clock_rb": 3842, "clkin_hz": 8000000,
+           "fdata_sps": 31250, "baud": 921600, "osr": 128, "settle_us": 200,
+           "discard_samples": 9, "sel_mask": 191, "mode": 2, "spi_hz": 11428571, "n_conv": 125,
+           "avg_per_sel": [9, 9, 9, 9, 9, 9, 0, 8]}
     add(t_first + 3.5, {"k": "info", **cfg})
     add(t_first + 6.5, {"k": "mark", "text": "ADC fault: test",
                         "fault": {"event": "fault", "code": "adc_down", "msg": "test",
