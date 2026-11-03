@@ -24,6 +24,12 @@ Typical headless usage::
         if samples is not None:
             do_something(samples)
     client.stop()
+
+Replay a recording through the same pipeline (``speed=None``: as fast as it
+is read; the GUI paces it and drives ``client.replay``)::
+
+    client = WaviClient(transport="replay", path="st_..._pilot2.jsonl",
+                        replay_speed=None)
 """
 
 from __future__ import annotations
@@ -44,8 +50,10 @@ from wavi_py.config import (
 from wavi_py.daq.bus import SampleBus
 from wavi_py.daq.reader import Reader
 from wavi_py.daq.server_reader import IMU_CHANNELS, ServerReader
+from wavi_py.replay.index import RecordingIndex
 from wavi_py.transports.base import Transport
 from wavi_py.transports.esp32_transport import Esp32SerialTransport
+from wavi_py.transports.replay_transport import ReplayTransport
 from wavi_py.transports.serial_transport import SerialTransport
 from wavi_py.transports.sim_transport import SimSignals, SimTransport
 from wavi_py.transports.tcp_transport import TcpTransport
@@ -69,17 +77,25 @@ class WaviClient:
         port: int = DEFAULT_TCP_PORT,
         serial_port: Optional[str] = None,
         baudrate: int = DEFAULT_BAUDRATE,
-        nsensor: int = DEFAULT_NSENSOR,
+        nsensor: Optional[int] = None,
         fs: float = DEFAULT_FS_HZ,
         ns_read: int = DEFAULT_NS_READ,
         t_buffer_s: float = DEFAULT_T_BUFFER_S,
         sim: Optional[SimSignals] = None,
+        path: Optional[str] = None,
+        index: Optional[RecordingIndex] = None,
+        replay_speed: Optional[float] = 1.0,
+        replay_start_s: float = 0.0,
+        replay_playing: bool = True,
     ):
         transport = transport.lower()
-        if transport not in ("tcp", "serial", "server", "esp32", "sim"):
-            raise ValueError("transport must be 'tcp', 'serial', 'server', 'esp32' or 'sim', "
-                             f"got {transport!r}")
-        if transport in ("server", "esp32", "sim") and int(nsensor) != NUM_WHISKER:
+        if transport not in ("tcp", "serial", "server", "esp32", "sim", "replay"):
+            raise ValueError("transport must be 'tcp', 'serial', 'server', 'esp32', 'sim' or "
+                             f"'replay', got {transport!r}")
+        array = transport in ("server", "esp32", "sim", "replay")
+        if nsensor is None:
+            nsensor = NUM_WHISKER if array else DEFAULT_NSENSOR
+        if array and int(nsensor) != NUM_WHISKER:
             raise ValueError(f"{transport} transport is the {NUM_WHISKER}-whisker array: "
                              f"nsensor must be {NUM_WHISKER}, got {nsensor}")
         if transport in ("serial", "esp32") and not serial_port:
@@ -93,6 +109,19 @@ class WaviClient:
         self._baudrate = int(baudrate)
         # sim: what the simulated array sends; editable while streaming
         self.sim = sim if sim is not None else (SimSignals() if transport == "sim" else None)
+        # replay: the recording's index (built here if only the path is given; that
+        # reads the file, or its cached index)
+        if transport == "replay":
+            if index is None:
+                if not path:
+                    raise ValueError("replay transport requires path (a .jsonl recording)")
+                index = RecordingIndex.open(path)
+            if index.fs > 0:
+                fs = index.fs
+        self.index = index
+        self._replay_speed = replay_speed
+        self._replay_start_s = float(replay_start_s)
+        self._replay_playing = bool(replay_playing)
 
         # acquisition params
         self.nsensor = int(nsensor)
@@ -102,10 +131,14 @@ class WaviClient:
         self.t_buffer_s = float(t_buffer_s)
 
         capacity = max(self.ns_read * 2, int(round(self.t_buffer_s * self.fs)))
-        self.bus = SampleBus(capacity=capacity, nch=self.nch)
+        if transport == "replay":
+            # a seek publishes t_buffer_s of preroll at once: room for it and the next tick
+            capacity = max(capacity, int(round(1.5 * self.t_buffer_s * self.fs)))
+        # event streams carry each sample's time (daq/clock.py)
+        self.bus = SampleBus(capacity=capacity, nch=self.nch, timed=self.is_event_stream)
         # IMU rows from the server transport (RAW_IMU rate, ~100 Hz); unused otherwise.
         self.imu_bus = SampleBus(capacity=max(16, int(round(self.t_buffer_s * 400))),
-                                 nch=len(IMU_CHANNELS))
+                                 nch=len(IMU_CHANNELS), timed=self.is_event_stream)
 
         self._transport: Optional[Transport] = None
         self._reader: Optional[Reader | ServerReader] = None
@@ -124,8 +157,9 @@ class WaviClient:
         self._transport = self._build_transport()
 
         if self.is_event_stream:
+            clock = self.index.clock() if self.index is not None else None
             self._reader = ServerReader(self._transport, self.bus, self.imu_bus,
-                                        fs=self.fs, nch=self.nch)
+                                        fs=self.fs, nch=self.nch, clock=clock)
             self._reader.start()
             return
 
@@ -188,6 +222,8 @@ class WaviClient:
         recording on the vehicle, and if ``local_copy`` is given also tee the
         raw stream to that local .jsonl path. ESP32: only the local tee.
         """
+        if self._transport_kind == "replay":
+            return False                      # a recording: nothing to record at the source
         if self.is_event_stream:
             if local_copy and isinstance(self._reader, ServerReader):
                 self._reader.start_tee(local_copy)
@@ -196,6 +232,8 @@ class WaviClient:
 
     def send_record_stop(self) -> bool:
         """Stop recording at the source (Arduino: 'E'). Returns True if sent."""
+        if self._transport_kind == "replay":
+            return False
         if self.is_event_stream:
             if isinstance(self._reader, ServerReader):
                 self._reader.stop_tee()
@@ -233,9 +271,23 @@ class WaviClient:
         return self._transport_kind
 
     @property
+    def replay(self) -> Optional[ReplayTransport]:
+        """The replay transport (play / pause / seek / speed / loop), while started."""
+        t = self._transport
+        return t if isinstance(t, ReplayTransport) else None
+
+    @property
+    def has_vehicle(self) -> bool:
+        """The stream has the ROV's MAVLink side (IMU, the Pi's recording): the server
+        transport, or a replay of a daq_server recording."""
+        if self._transport_kind == "replay":
+            return self.index is not None and self.index.has_vehicle
+        return self._transport_kind == "server"
+
+    @property
     def is_event_stream(self) -> bool:
         """The source sends daq_server's JSON events (server, the ESP32 decoded locally, sim)."""
-        return self._transport_kind in ("server", "esp32", "sim")
+        return self._transport_kind in ("server", "esp32", "sim", "replay")
 
     @property
     def endpoint_str(self) -> str:
@@ -245,6 +297,8 @@ class WaviClient:
             return f"esp32://{self._serial_port}"
         if self._transport_kind == "sim":
             return "sim://"
+        if self._transport_kind == "replay":
+            return f"replay://{self.index.path.name if self.index is not None else ''}"
         return f"serial://{self._serial_port}@{self._baudrate}"
 
     # ----- internals
@@ -258,6 +312,11 @@ class WaviClient:
         if self._transport_kind == "sim":
             assert self.sim is not None
             return SimTransport(self.sim)
+        if self._transport_kind == "replay":
+            assert self.index is not None
+            return ReplayTransport(self.index, speed=self._replay_speed,
+                                   start_s=self._replay_start_s, playing=self._replay_playing,
+                                   preroll_s=self.t_buffer_s)
         assert self._serial_port is not None
         if self._transport_kind == "esp32":
             return Esp32SerialTransport(self._serial_port)

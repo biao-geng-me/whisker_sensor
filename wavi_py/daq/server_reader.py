@@ -27,6 +27,18 @@ spectrogram views work unchanged. Differences:
   (``server_status["esp32"]["fault"]``).
 - ``start_tee(path)`` copies the raw stream to a local .jsonl — the same
   format as the recording on the Pi, so ``whisker_link.convert`` reads both.
+- Sample times: a timed bus (``SampleBus(timed=True)``) gets each scan's and
+  each IMU row's time in session seconds (zero at the hello), from the device
+  clocks mapped onto the receive clock (``daq/clock.py``): ``LiveClock`` by
+  default, the recording's ``FittedClock`` in replay.
+- Replay (``transports/replay_transport.py``) adds ``replay`` events:
+  ``{"k":"replay","op":"seek"|"live"|"eof","gen":n,"pos":T,...}`` (T in session
+  seconds). Each one flushes
+  and is kept in ``bus`` metadata as ``replay_marks``: the newest few as
+  ``(gen, op, bus index, imu_bus index, T)``, so the GUI can start its buffers
+  over at a seek. The first seek also carries the session zero ``t0`` and the
+  wall clock ``unix0`` (``t0_unix`` is then the recording's, not now) and the
+  V0 of the file's first scans, which is kept across seeks.
 """
 
 from __future__ import annotations
@@ -41,6 +53,7 @@ from typing import Optional
 import numpy as np
 
 from wavi_py.daq.bus import SampleBus
+from wavi_py.daq.clock import LiveClock
 from wavi_py.transports.base import Transport
 from whisker_link.esp32_frame import MV_PER_CODE
 
@@ -56,7 +69,7 @@ IMU_CHANNELS = [
 
 class ServerReader:
     def __init__(self, transport: Transport, bus: SampleBus, imu_bus: SampleBus, *,
-                 fs: float, nch: int):
+                 fs: float, nch: int, clock=None):
         self._transport = transport
         self._bus = bus
         self._imu_bus = imu_bus
@@ -84,6 +97,11 @@ class ServerReader:
         self._n_fault_marks = 0
         self._n_acks = 0
         self._acks: dict = {}                     # cmd -> (n, the latest ack for it)
+        self._clock = clock if clock is not None else LiveClock()
+        self._t_ref: Optional[float] = None       # session zero (receive clock)
+        self._row_t: list[float] = []             # session times of the pending rows
+        self._imu_t: list[float] = []
+        self._marks: collections.deque = collections.deque(maxlen=16)
 
     # ----- lifecycle (same surface as Reader)
 
@@ -148,21 +166,21 @@ class ServerReader:
             while not self._stop.is_set():
                 buf += self._transport.read_some(65536)
                 end = buf.rfind(b"\n")
-                if end < 0:
-                    continue
-                chunk = bytes(buf[:end + 1])
-                del buf[:end + 1]
-                with self._tee_lock:
-                    if self._tee is not None:
-                        self._tee.write(chunk)
-                for line in chunk.splitlines():
-                    if not line:
-                        continue
-                    try:
-                        ev = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    self._handle(ev, rows, imu_rows)
+                if end >= 0:
+                    chunk = bytes(buf[:end + 1])
+                    del buf[:end + 1]
+                    with self._tee_lock:
+                        if self._tee is not None:
+                            self._tee.write(chunk)
+                    for line in chunk.splitlines():
+                        if not line:
+                            continue
+                        try:
+                            ev = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        self._handle(ev, rows, imu_rows)
+                # also with nothing new (a paused replay): the last rows go out
                 now = time.monotonic()
                 if now - last_flush >= 0.02:
                     self._flush(rows, imu_rows)
@@ -182,8 +200,12 @@ class ServerReader:
         self._last_t = ev.get("t", self._last_t)
         if k == "wsk":
             rows.append(np.asarray(ev["raw"], dtype=np.float32) * self._mv_per_code)
+            t_rx = float(ev.get("t", 0.0))
             if "seq" in ev and "tus" in ev:
                 self._note_scan_clock(int(ev["seq"]), int(ev["tus"]))
+                self._row_t.append(self._clock.wsk(t_rx, int(ev["tus"])) - self._ref(t_rx))
+            else:
+                self._row_t.append(t_rx - self._ref(t_rx))
         elif k == "mav":
             mtype = ev.get("type")
             d = ev.get("d", {})
@@ -193,6 +215,10 @@ class ServerReader:
                 imu_rows.append(np.array(
                     [d.get(f, 0) for f in ("xacc", "yacc", "zacc", "xgyro", "ygyro", "zgyro")]
                     + list(self._attitude), dtype=np.float32))
+                t_rx = float(ev.get("t", 0.0))
+                us = d.get("time_usec")
+                t = self._clock.imu(t_rx, int(us)) if isinstance(us, (int, float)) else t_rx
+                self._imu_t.append(t - self._ref(t_rx))
         elif k == "status":
             self._bus.set_metadata(server_status=ev)
         elif k == "info":
@@ -201,7 +227,10 @@ class ServerReader:
         elif k == "hello":
             self.hello = ev
             self._mv_per_code = float(ev.get("mv_per_code", MV_PER_CODE))
-            self._bus.set_metadata(server_hello=ev, t0_unix=time.time())
+            if self._t_ref is None:               # live: zero at the hello, now
+                self._t_ref = float(ev.get("t", 0.0))
+                self._bus.set_metadata(t0_unix=time.time())
+            self._bus.set_metadata(server_hello=ev)
             if isinstance(ev.get("esp32"), dict):  # daq_server: the INFO it has so far
                 self._note_info(ev["esp32"])
         elif k == "txt":
@@ -214,12 +243,42 @@ class ServerReader:
             self._n_fault_marks += 1
             self._fault_marks.append((self._n_fault_marks, ev))
             self._bus.set_metadata(fault_marks=list(self._fault_marks))
+        elif k == "replay":
+            self._on_replay(ev, rows, imu_rows)
         elif k == "ack":
             self._n_acks += 1
             self._acks[str(ev.get("cmd"))] = (self._n_acks, ev)
             self._bus.set_metadata(server_ack=ev, server_acks=dict(self._acks))
             if not ev.get("ok", True):
                 print(f"[ServerReader] command failed: {ev}")
+
+    def _ref(self, t_rx: float) -> float:
+        if self._t_ref is None:
+            self._t_ref = t_rx
+        return self._t_ref
+
+    def _on_replay(self, ev: dict, rows: list, imu_rows: list) -> None:
+        """A replay marker: what came before belongs to the old position."""
+        self._flush(rows, imu_rows)
+        op = str(ev.get("op", ""))
+        if "t0" in ev:
+            self._t_ref = float(ev["t0"])
+        if "unix0" in ev:
+            self._bus.set_metadata(t0_unix=float(ev["unix0"]))
+        if op == "seek":
+            self._scan_clock.clear()          # the scan counters jump
+            self._last_fs_report = 0.0
+            self._clock.restart()
+            v0 = ev.get("v0")
+            if v0 is not None and not self._ready.is_set() and len(v0) == self._nch:
+                self._v0_version += 1
+                self._bus.set_metadata(V0=np.asarray(v0, dtype=np.float32),
+                                       v0_version=self._v0_version, fs=self._fs, nch=self._nch)
+                self._v0_rows = []
+                self._ready.set()
+        self._marks.append((int(ev.get("gen", 0)), op, self._bus.total_published,
+                            self._imu_bus.total_published, float(ev.get("pos", 0.0))))
+        self._bus.set_metadata(replay_marks=list(self._marks))
 
     def _note_info(self, info: dict) -> None:
         self._n_info += 1
@@ -248,12 +307,15 @@ class ServerReader:
 
     def _flush(self, rows: list, imu_rows: list) -> None:
         if imu_rows:
-            self._imu_bus.publish(np.vstack(imu_rows))
+            self._imu_bus.publish(np.vstack(imu_rows), np.asarray(self._imu_t))
             imu_rows.clear()
+            self._imu_t.clear()
         if not rows:
             return
         block = np.vstack(rows)
+        times = np.asarray(self._row_t)
         rows.clear()
+        self._row_t.clear()
         if self._reset_pending.is_set():
             self._reset_pending.clear()
             self._v0_rows = []
@@ -270,4 +332,4 @@ class ServerReader:
                 self._v0_rows = []
                 self._ready.set()
             return
-        self._bus.publish(block)
+        self._bus.publish(block, times)
