@@ -242,8 +242,9 @@ class MainWindow(QMainWindow):
             self._nch, self._nfreq, self._fs, self._spec_hop, self._t_spec_s, self._t_fft_s
         )
         self._imu_view = ImuView(self._t_buffer_s)
-        # the Dome view needs PyOpenGL and a GL context: built on first use
+        # the Dome and ROV views need PyOpenGL and a GL context: built on first use
         self._dome_view = None
+        self._rov_view = None
         # whisker positions / sensors / calibration (None: W1 .. W16, placeholder dome holes)
         self._dome_map: Optional[DomeMap] = None
         self.set_dome_map(dome_map)
@@ -598,6 +599,11 @@ class MainWindow(QMainWindow):
         self._toggle_dome.setToolTip("3D whiskers bending on the dome (placeholder mapping and"
                                      " calibration; needs PyOpenGL)")
         self._toggle_dome.toggled.connect(self._toggle_dome_view)
+        self._toggle_rov = QPushButton("ROV")
+        self._toggle_rov.setCheckable(True)
+        self._toggle_rov.setToolTip("The ROV's attitude and translational acceleration from the"
+                                    " IMU, on a BlueROV2 model (Server / Replay; needs PyOpenGL)")
+        self._toggle_rov.toggled.connect(self._toggle_rov_view)
 
         self._map_btn = QToolButton()
         self._map_btn.setText("Map")
@@ -610,6 +616,7 @@ class MainWindow(QMainWindow):
 
         h.addWidget(self._toggle_imu)
         h.addWidget(self._toggle_dome)
+        h.addWidget(self._toggle_rov)
         h.addWidget(self._map_btn)
         h.addStretch(1)
         h.addWidget(self._pause_btn)
@@ -798,6 +805,8 @@ class MainWindow(QMainWindow):
         self._imu_last_seq = 0
         self._imu_rows = np.empty((0, 9), dtype=np.float32)
         self._imu_t = np.empty(0)
+        if self._rov_view is not None:
+            self._rov_view.clear()
         self._sig_t.fill(np.nan)
         self._replay_gen, self._replay_seek_at = 0, None
         self._anchor_idx, self._anchor_t = 0, 0.0
@@ -914,6 +923,7 @@ class MainWindow(QMainWindow):
             try:
                 if QGuiApplication.platformName() in ("offscreen", "minimal"):
                     raise RuntimeError(f"no OpenGL on the Qt platform '{QGuiApplication.platformName()}'")
+                self._check_gl_sharing(self._rov_view)
                 from wavi_py.views.dome_view import DomeView
                 self._dome_view = DomeView(self._fs, dome_map=self._dome_map)
             except Exception as exc:  # noqa: BLE001 — no PyOpenGL / GL context
@@ -929,6 +939,35 @@ class MainWindow(QMainWindow):
                 self._dome_view.set_bus(self._client.bus, self._fs)
         if self._dome_view is not None:
             self._toggle_window(self._dome_view, show)
+
+    @staticmethod
+    def _check_gl_sharing(other) -> None:
+        """A second GL window draws pyqtgraph's shaders compiled in the first one's
+        context: only valid with shared contexts (app.py sets the attribute)."""
+        if other is not None and not QGuiApplication.testAttribute(
+                Qt.ApplicationAttribute.AA_ShareOpenGLContexts):
+            raise RuntimeError("a second OpenGL window needs Qt.AA_ShareOpenGLContexts set"
+                               " before the QApplication is made (as wavi_py.app does)")
+
+    def _toggle_rov_view(self, show: bool) -> None:
+        if show and self._rov_view is None:
+            try:
+                if QGuiApplication.platformName() in ("offscreen", "minimal"):
+                    raise RuntimeError(f"no OpenGL on the Qt platform '{QGuiApplication.platformName()}'")
+                self._check_gl_sharing(self._dome_view)
+                from wavi_py.views.rov_view import RovView
+                self._rov_view = RovView()
+            except Exception as exc:  # noqa: BLE001 — no PyOpenGL / GL context / mesh
+                QMessageBox.warning(self, "ROV view", f"Cannot open the ROV view: {exc}\n"
+                                    "(pip install PyOpenGL)")
+                self._toggle_rov.setChecked(False)
+                return
+            self._rov_view.closed.connect(lambda: self._toggle_rov.setChecked(False))
+            self._timeline_docks.append(self._rov_view.add_timeline(TimelineBar(self._replay)))
+            self._timeline_docks[-1].setVisible(self._replay.source is not None)
+            self._rov_view.update_view(self._imu_t, self._imu_rows)
+        if self._rov_view is not None:
+            self._toggle_window(self._rov_view, show)
 
     # ----- dome map: whisker position labels, the Dome view's holes and calibration
     def set_dome_map(self, dome_map: Optional[DomeMap]) -> None:
@@ -967,7 +1006,7 @@ class MainWindow(QMainWindow):
 
     def _side_views(self) -> tuple:
         """The views besides the stream views that show the status line and alarm."""
-        return (self._imu_view,) if self._dome_view is None else (self._imu_view, self._dome_view)
+        return tuple(v for v in (self._imu_view, self._dome_view, self._rov_view) if v is not None)
 
     def _set_stream_buttons_enabled(self, on: bool) -> None:
         self._pause_btn.setEnabled(on)
@@ -1037,6 +1076,8 @@ class MainWindow(QMainWindow):
         x0, x1 = self._line_view._visible_x_range()
         span = min(x1 - x0, self._t_buffer_s)
         self._line_view.set_time_window(t - span / 2, t + span / 2)
+        if self._rov_view is not None:
+            self._rov_view.show_at(t)
 
     def _on_line_time_window(self, x0: float, x1: float) -> None:
         """The Line window's visible time range: the IMU window follows it."""
@@ -1357,6 +1398,8 @@ class MainWindow(QMainWindow):
                 self._imu_rows, self._imu_t = self._imu_rows[keep:], self._imu_t[keep:]
             if not self._is_paused and self._imu_view.isVisible():
                 self._imu_view.update_view(self._imu_t, self._imu_rows)
+            if not self._is_paused and self._rov_view is not None and self._rov_view.isVisible():
+                self._rov_view.update_view(self._imu_t, self._imu_rows)
         if st and st.get("t", 0) != self._last_status_t:
             self._last_status_t = st.get("t", 0)
             self._last_status_rec = st
@@ -1613,6 +1656,7 @@ class MainWindow(QMainWindow):
             for v in (self._line_view, self._spectrum_view, self._fft_view, self._spec_view,
                       self._imu_view, self._sim_panel, self._fault_log):
                 v.close()
-            if self._dome_view is not None:
-                self._dome_view.close()
+            for v in (self._dome_view, self._rov_view):
+                if v is not None:
+                    v.close()
         super().closeEvent(event)

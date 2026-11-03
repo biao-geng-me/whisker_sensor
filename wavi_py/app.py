@@ -133,6 +133,7 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
 
     # Qt imports are deferred so help / parsing errors don't pull in PyQt6.
+    from PyQt6.QtCore import Qt
     from PyQt6.QtWidgets import QApplication
 
     from wavi_py.main_window import MainWindow
@@ -142,6 +143,9 @@ def main(argv: list[str] | None = None) -> int:
         # path on software GL (llvmpipe); try it on a real GPU with tools/viz_bench --opengl
         import pyqtgraph as pg
         pg.setConfigOptions(useOpenGL=True)
+    # one GL context family: pyqtgraph compiles each shader once, so the Dome and ROV
+    # windows (and GL plot viewports) must share contexts; set before the app exists
+    QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
     app = QApplication(sys.argv)
     win = MainWindow(
         transport=args.transport,

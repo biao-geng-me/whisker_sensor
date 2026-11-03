@@ -41,6 +41,8 @@ current tip, along the tip's way (an arc on the shell). Marks at "roots" moves
 the dots, arrows, trails, grid and surface onto the dome's own surface
 (``dome_shell``, lifted MARK_LIFT_MM): the bend mapped about the dome centre
 as in centre mode, but at the dome's radius. Whiskers: tube, line or off.
+ROV puts the BlueROV2 silhouette (``rov_mesh_items``, assets/rov, shared with
+the ROV view) behind the dome, in the same frame, and zooms out to it.
 
 Show "plane map": every whisker at once, flat (``dome_pose.PlaneMap``), as a
 pilot inside the ROV sees the arrays: port on the left, starboard on the
@@ -72,6 +74,7 @@ and of the whole process (all threads: DAQ reader, software GL if any).
 from __future__ import annotations
 
 import ctypes
+import json
 import math
 import os
 import sys
@@ -131,6 +134,7 @@ from whisker_link.dome_pose import (PLACEHOLDER_HOLE_OF, DomeLayout, DomePose,  
                                     nice_grid_step, tip_path)
 
 ASSET_DIR = Path(__file__).resolve().parents[1] / "assets" / "dome"
+ROV_ASSET = Path(__file__).resolve().parents[1] / "assets" / "rov" / "rov_mesh.npz"
 TUBE_SIDES = 8
 TUBE_RADIUS_MM = 1.5
 N_ROOT, N_SHAFT = 6, 8                 # polyline: 15 points per whisker
@@ -169,7 +173,9 @@ def _flat_gl() -> dict:
 
 # A headlight: lit from the camera, two-sided (the CAD mesh's winding is not
 # consistent everywhere). pyqtgraph's own "shaded" lights from behind-below,
-# which leaves everything facing the camera dark.
+# which leaves everything facing the camera dark. (pyqtgraph compiles a program
+# once, in the first context that draws it: with more than one GL window, the
+# contexts must be shared, Qt.AA_ShareOpenGLContexts, as app.py sets.)
 _HEADLIGHT = shaders.ShaderProgram("wavi_headlight", [
     shaders.VertexShader("""
         uniform mat4 u_mvp;
@@ -251,6 +257,32 @@ def shell_surface(shell: Shell, n_az: int = 72, n_pol: int = 24, n_z: int = 6) -
     f = np.concatenate([np.stack([a, b, b + n_az], -1).reshape(-1, 3),
                         np.stack([a, b + n_az, a + n_az], -1).reshape(-1, 3)])
     return MeshData(vertexes=rows.reshape(-1, 3).astype(np.float32), faces=f.astype(np.uint32))
+
+
+def rov_mesh_items(path: Path = ROV_ASSET, dome_dir: Optional[Path] = None) -> list:
+    """Flat-shaded mesh items of the BlueROV2 silhouette (export_rov_mesh.py: one
+    per group, in the collar frame) and, with ``dome_dir``, the whisker dome on
+    its nose; for the ROV view and the Dome view's ROV toggle."""
+    z = np.load(path)
+    items = []
+    for g in json.loads(str(z["groups"])):
+        md = MeshData(vertexes=z[f"v_{g}"].astype(np.float32),
+                      faces=z[f"f_{g}"].astype(np.uint32))
+        rgb = tuple(float(x) for x in z[f"rgb_{g}"])
+        it = gl.GLMeshItem(meshdata=md, smooth=False, shader=_HEADLIGHT, color=rgb + (1.0,),
+                           glOptions="opaque")
+        it.group = g
+        items.append(it)
+    if dome_dir is not None:
+        d = np.load(Path(dome_dir) / "dome_mesh.npz")
+        md = _MeshData(vertexes=d["vertices"].astype(np.float32),
+                       faces=d["faces"].astype(np.uint32))
+        md.set_normals(d["normals"])
+        it = gl.GLMeshItem(meshdata=md, smooth=True, shader=_HEADLIGHT, color=_DOME_COLOR,
+                           glOptions="opaque")
+        it.group = "dome"
+        items.append(it)
+    return items
 
 
 class _TranslucentMesh(gl.GLMeshItem):
@@ -565,6 +597,8 @@ class DomeView(ViewWindow):
         self._trail_s = 2.0
         self._grid_bend_deg = 0.0              # 0: auto
         self._shell_radius = 0.0               # 0: auto (rest tips' reach)
+        self._show_rov = False
+        self._rov_items: Optional[list] = None
 
         self._asset_layout = DomeLayout.load(asset_dir / "whiskers.json")
         self.dome_map = dome_map
@@ -751,6 +785,11 @@ class DomeView(ViewWindow):
         R = 1.6 * self.dome_shell.radius if dome else self.shell.radius
         cam.center = self.layout_.center - [0.0, 0.0, 0.2 * R]
         cam.distance = 4.4 * R
+        if self._show_rov and self._rov_items:
+            lo, hi = self._rov_bbox()
+            cam.center = (np.minimum(lo, self.layout_.center - R)
+                          + np.maximum(hi, self.layout_.center + R)) / 2
+            cam.distance = 1.6 * float(np.linalg.norm(hi - lo))
         cam.snap_to("home")
         self._glw.moved()
 
@@ -780,8 +819,16 @@ class DomeView(ViewWindow):
         whiskers = (np.linalg.norm(lay.root - lay.center, axis=1) + lay.length).max()
         off = float(np.linalg.norm(self.shell.center - lay.center))
         shell = math.hypot(self.shell.radius, off + self.shell.cyl_len)
-        self._glw.cam.set_bounds(lay.center, max(self._dome_reach, whiskers, shell,
-                                                 off + 1.5 * self.shell.radius))
+        reach = max(self._dome_reach, whiskers, shell, off + 1.5 * self.shell.radius)
+        if self._show_rov and self._rov_items:
+            lo, hi = self._rov_bbox()
+            reach = max(reach, float(np.linalg.norm(np.maximum(abs(lo - lay.center),
+                                                               abs(hi - lay.center)))))
+        self._glw.cam.set_bounds(lay.center, reach)
+
+    def _rov_bbox(self) -> tuple[np.ndarray, np.ndarray]:
+        V = np.concatenate([it.opts["meshdata"].vertexes() for it in self._rov_items])
+        return V.min(axis=0).astype(float), V.max(axis=0).astype(float)
 
     def _place_marks(self) -> None:
         marks = list(self._marks.values())
@@ -850,6 +897,11 @@ class DomeView(ViewWindow):
         self._persp_box.setToolTip("Perspective projection (fov 60 deg); off: orthographic")
         self._persp_box.toggled.connect(self.set_perspective)
         tb.addWidget(self._persp_box)
+        self._rov_box = QCheckBox("ROV")
+        self._rov_box.setToolTip("The BlueROV2 (frame, thrusters, enclosures; a decimated"
+                                 " silhouette of Blue Robotics' CAD) behind the dome")
+        self._rov_box.toggled.connect(self.set_rov_visible)
+        tb.addWidget(self._rov_box)
         tb.addSeparator()
         tb.addWidget(QLabel(" fps "))
         self._fps_box = QSpinBox()
@@ -1007,6 +1059,24 @@ class DomeView(ViewWindow):
         grown = [sh.uncover() for sh in (self.shell, self.dome_shell)]
         if any(grown):
             self._shell_changed()
+
+    def set_rov_visible(self, on: bool) -> None:
+        """Show the ROV mesh behind the dome (loaded on first use); the view zooms
+        out to the whole vehicle, or back to the dome."""
+        if on and self._rov_items is None:
+            try:
+                self._rov_items = rov_mesh_items(ROV_ASSET)
+            except (OSError, KeyError, ValueError) as exc:
+                self._stats_label.setText(f"no ROV mesh: {exc}")
+                self._rov_box.setChecked(False)
+                return
+            for it in self._rov_items:
+                self._glw.addItem(it)
+        for it in self._rov_items or ():
+            it.setVisible(on)
+        self._show_rov = bool(on)
+        self._update_bounds()
+        self.reset_camera()
 
     def set_grid_visible(self, on: bool) -> None:
         self._show_grid = bool(on)

@@ -76,6 +76,26 @@ Dome view camera: **left drag tumbles freely in every direction** (a trackball, 
 
 Each plot also shows the current absolute value of both gauges (raw mV at the ADC, before the V0 subtraction and the `--scale`; mean of the last 0.1 s, refreshed ~7 times a second) in its corner, or on the right of each row in the stacked layout; a railed gauge (nothing plugged in) reads **open**. With the TCP / Serial (Arduino) transports the values are shown without a unit and never as open. Curves are min/max decimated to about two points per pixel column and drawn with 1 px pens, so the redraw cost does not grow with the sample rate. All plot windows are redrawn by one render scheduler (`views/render_sched.py`): new data only marks a window dirty; Line redraws at most 30 times a second, Spectrum / FFT / Spec at most 10, IMU 20, one window per event-loop pass (so the Dome view's frames and input get in between), nothing while hidden or minimised, and when all windows together take more than half the GUI thread the spectra slow down first while Line keeps 20 fps. Y auto is fitted by the window and only re-ranges on a real change, the grid tiles share their axis pictures, and the spectrogram history is a ring the windows read when they redraw. `python -m wavi_py.tools.viz_bench --windows line,spectrum,fft,spec,imu,dome` measures any set of windows on the Sim transport (fps, redraw / paint ms, GUI-thread CPU, worst stall). On the cluster (250 Hz, 16 whiskers, software GL) the Line grid went from 78 % to 32 % of a core, the Spectrogram from 97 % to 12 %, and with every window open from Line 4 / Dome 4 fps to Line 18 / Dome 29 fps (the software-GL Dome blocks the GUI thread; a real GPU does not). `WAVI_PG_OPENGL=1` draws the plots through OpenGL viewports instead (slower on software GL; try it on a real GPU with `viz_bench --opengl`).
 
+**ROV** (Server and Replay transports; needs PyOpenGL) shows the vehicle's attitude and translational acceleration from the IMU on a BlueROV2 model (`views/rov_view.py`): a decimated silhouette of Blue Robotics' public BlueROV2 R4 CAD (frame, thrusters, enclosures, buoyancy; CC BY 4.0, see `assets/rov/SOURCE.md`, rebuilt by `tools/export_rov_mesh.py` from rov-cad's `render/tessellate_bluerov2.py` output) with the whisker dome on its nose, turned by the ATTITUDE roll and pitch over a level grid (**Heading** adds the yaw, relative to the heading at the last Tare). Arrows from its centre, drawn over the hull, give the translational acceleration (`daq/imu_pose.py`: RAW_IMU specific force + gravity from the attitude, minus the at-rest bias, averaged over **Smooth** seconds): the resultant in orange and, with **Components**, surge (blue), sway (red) and heave (green, down +) along the body axes, at **Scale** mm per 100 mg; the readout in the corner gives the numbers. **Tare** takes the second round the shown time as rest (zero acceleration, straight ahead); the first second after a connect is taken automatically. The bias matters: on pilot2 the accelerometer and the EKF's level disagree by ~1.5 deg of pitch, ~30 mg. It draws whatever IMU buffer the panel holds, so it follows live data, a replay, or (paused live) the time picked on the timeline. The Dome view's **ROV** box puts the same model behind the dome. With more than one GL window the GL contexts must be shared (`Qt.AA_ShareOpenGLContexts`, which `python -m wavi_py` sets before the app starts; a script that builds `MainWindow` in its own QApplication must set it too).
+
+## Replay
+
+A daq_server recording (`.jsonl`: the Pi's `whisker_rec/*.jsonl`, or the local copy Rec writes next to a `.dat`) plays back through the live pipeline, so every window works on it as on the vehicle:
+
+```bash
+python -m wavi_py --replay D:\data\st_2026-11-02_1644_57.91_in_water_pilot2.jsonl --speed 2 --start 6:40
+```
+
+or pick **Replay** in the transport list, **Browse...** for the file and **Open**. Opening builds an index of the file (byte offsets, kinds, the fitted device clocks, the V0, the events and the depth; ~1.5 s for a 13 min dive, with a progress bar) and caches it as `FILE.jsonl.idx.npz` next to the file, or under `%LOCALAPPDATA%\wavi_py` (`~/.cache/wavi_py`) if that folder is not writable; a changed file is re-indexed. The recording opens paused at `--start` (default 0); **Space** (or Pause / Play) plays, `--speed` / the speed box sets 0.25x .. 8x or max.
+
+Times: every sample is placed on its device's clock (the ESP32's `tus`, the autopilot's RAW_IMU `time_usec`) fitted onto the Pi's receive clock when the index is built (`daq/clock.py`, as `whisker_link/convert.py`), so the whisker and IMU time axes are smooth and agree with each other; pacing follows the receive time. Live, the same mapping runs as a sliding-window fit. The V0 is the file's first 0.25 s of scans wherever playback starts.
+
+The **timeline** (a dock at the bottom of the panel and of every view window, all on one model) has the controls row (back / forward 5 s, play, speed, the position, the recording's wall clock and the depth at the playhead, and a **go to** box: seconds, `m:ss`, `40cm` for the next time the depth crosses 40 cm either way, `-40cm` for the previous one, `max` for the deepest point) over a strip with the depth (cm, from SCALED_PRESSURE2 against the surface pressure, the median over the disarmed start; fresh water, `WATER_DENSITY` in `replay/events.py` for sea water), the armed spans (green) and the events as ticks (hover for the text). Click the strip to go there, drag the red playhead to scrub, wheel / drag to zoom / pan time, double-click for all of it. **Loop** repeats 5 s either side of the playhead (drag the blue range's edges). The event list and **event** buttons go to 2 s before an event. Keys (panel): Space play / pause, Left / Right 5 s (Shift: 1 s), `,` / `.` previous / next event, `[` / `]` slower / faster.
+
+Events: arm / disarm (HEARTBEAT from the autopilot, `[1,1]`, only), flight mode changes, every STATUSTEXT coloured by severity (the same text again within 10 s is one entry with a count), fault marks, whisker `seq` gaps, and ADC error counter increments from the server status (grouped per 10 s). A seek writes a line in the Fault log (it is not cleared). Live (Server transport), the timeline shows the same events and depth for the stream so far; a click there shows that time from the plot buffers (the last `t_buffer_s`; pause first to hold them).
+
+Read-only: in replay the ESP32 commands, Scan mode, Reset ESP32 and Rec are disabled (the replay transport refuses commands with an error ack), Pause / Play drive playback, and **Reset** re-zeros at the newest samples. **Zero at...** (Line window, Q, then click a time) re-zeros the V0 and the Dome's tare from the 0.25 s round any buffered time, live, paused or in replay. Headless: `WaviClient(transport="replay", path="rec.jsonl", replay_speed=None)` plays a file as fast as it is read; `client.replay` is the transport (`seek`, `play`, `pause`, `speed`, `position`, `state`), `client.index` the index (events, `depth_at`, `depth_crossing`, `max_depth`).
+
 ## Run (library / headless)
 
 ```python
@@ -117,13 +137,21 @@ wavi_py/
   scan_mode.py       ESP32 scan modes: presets, --mode, INFO check, re-apply (no Qt)
   (whisker_link/esp32_fault.py: the ADC / ESP32 fault model, shared with daq_server)
   daq/
-    bus.py             SampleBus — single-writer/many-readers ring buffer
+    bus.py             SampleBus — single-writer/many-readers ring buffer (optionally timed)
     reader.py          DAQ thread: bytes → parse → bus.publish
+    server_reader.py   DAQ thread for daq_server's event stream (whisker + IMU buses, events)
+    clock.py           device clocks onto the receive clock: fitted (replay), sliding (live)
+    imu_pose.py        attitude, gravity removal, translational acceleration (no Qt)
     sig_filter.py      port of wavi/SigFilter.m (scipy.signal.butter + lfilter)
     outliers.py        port of filloutliers('linear')
     spectra.py         amplitude spectra (batched rfft), the spectrogram ring (SpecHistory)
+  replay/
+    index.py           RecordingIndex: byte offsets, clock fits, V0, events, depth; cached
+    events.py          EventTracker (index and live), depth, TimelineQueries
   transports/
     base.py            abstract Transport
+    replay_transport.py
+                       a recording served as the live byte stream: paced, seek, loop
     tcp_transport.py   socket-based, TCP_NODELAY, mirrors connection_manager.py
     serial_transport.py
                        pyserial-based, reuses hx711_array/arduino_reader.py defaults
@@ -135,6 +163,10 @@ wavi_py/
     line_view.py       per-whisker time series
     spectrum_view.py   per-whisker live amplitude spectrum
     sim_panel.py       signal panel for the sim transport
+    imu_view.py        IMU accel / gyro / attitude, linked to the Line window's time
+    dome_view.py       3D whiskers on the dome (pyqtgraph.opengl); dome_camera.py: trackball
+    rov_view.py        the ROV's attitude and acceleration arrows on a BlueROV2 model
+    replay_bar.py      ReplayModel + the timeline (controls, depth / events strip)
     fft_view.py        FFT heatmap + per-channel bar
     spectrogram_view.py
                        frequency-stacked-by-channel ImageItem
@@ -145,9 +177,15 @@ wavi_py/
   tools/
     viz_bench.py       stress benchmark: the GUI on the Sim transport, any set of windows
     export_dome_assets.py
+    export_rov_mesh.py the BlueROV2 silhouette (assets/rov) from rov-cad's tessellation
+  assets/
+    dome/              dome mesh, whisker holes, default map / calibration
+    rov/               rov_mesh.npz + SOURCE.md (Blue Robotics CAD, CC BY 4.0)
   tests/
     test_scan_mode.py  scan-mode logic and the Sim transport's firmware emulation
     test_viz_perf.py   the redraw machinery (spectra, spectrogram ring, scheduler, axes)
+    test_replay_*.py   index / clocks / events, the replay transport, the GUI in replay
+    test_rov_view.py   IMU pose math, the ROV view, the ROV mesh asset
 ```
 
 ## Architecture (one diagram)

@@ -153,6 +153,9 @@ def main() -> None:
         sys.setswitchinterval(args.switch)
     if args.opengl:
         pg.setConfigOptions(useOpenGL=True)
+    # one GL context family: pyqtgraph compiles each shader once, so the Dome and ROV
+    # windows (and GL plot viewports) must share contexts; set before the app exists
+    QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
     app = QApplication(sys.argv[:1])
     instrument()
     from wavi_py.main_window import MainWindow
