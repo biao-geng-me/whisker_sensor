@@ -812,6 +812,8 @@ class MainWindow(QMainWindow):
         self._imu_t = np.empty(0)
         if self._rov_view is not None:
             self._rov_view.clear()
+        if self._dome_view is not None:
+            self._dome_view.clear_imu()
         self._sig_t.fill(np.nan)
         self._replay_gen, self._replay_seek_at = 0, None
         self._anchor_idx, self._anchor_t = 0, 0.0
@@ -940,6 +942,7 @@ class MainWindow(QMainWindow):
             self._timeline_docks.append(self._dome_view.add_timeline(TimelineBar(self._replay)))
             self._timeline_docks[-1].setVisible(self._replay.source is not None)
             self._dome_view.set_paused(self._is_paused)
+            self._dome_view.update_imu(self._imu_t, self._imu_rows)
             if self._client is not None:
                 self._dome_view.set_bus(self._client.bus, self._fs)
         if self._dome_view is not None:
@@ -1083,6 +1086,8 @@ class MainWindow(QMainWindow):
         self._line_view.set_time_window(t - span / 2, t + span / 2)
         if self._rov_view is not None:
             self._rov_view.show_at(t)
+        if self._dome_view is not None:
+            self._dome_view.show_imu_at(t)
 
     def export_range(self, path: Optional[str] = None,
                      rng: Optional[tuple[float, float]] = None) -> Optional[Path]:
@@ -1441,6 +1446,8 @@ class MainWindow(QMainWindow):
                 self._imu_view.update_view(self._imu_t, self._imu_rows)
             if not self._is_paused and self._rov_view is not None and self._rov_view.isVisible():
                 self._rov_view.update_view(self._imu_t, self._imu_rows)
+            if not self._is_paused and self._dome_view is not None and self._dome_view.isVisible():
+                self._dome_view.update_imu(self._imu_t, self._imu_rows)
         if st and st.get("t", 0) != self._last_status_t:
             self._last_status_t = st.get("t", 0)
             self._last_status_rec = st

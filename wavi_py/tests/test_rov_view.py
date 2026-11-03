@@ -175,3 +175,49 @@ def test_dome_view_rov_toggle(app):
         assert np.isclose(v._glw.cam.bounds[1], r0) and np.isclose(v._glw.cam.distance, d0)
     finally:
         v.close()
+
+
+def test_dome_view_inertia(app):
+    from wavi_py.views import dome_view as dvm
+
+    v = dvm.DomeView(fs=250.0)
+    try:
+        def tilt(it):
+            return np.array(it.transform().data()).reshape(4, 4).T     # column-major
+        t = np.arange(200) / 100.0
+        rows = imu_rows(200, roll=0.2, pitch=-0.3)
+        v.update_imu(t, rows)
+        v._apply_attitude()
+        assert np.allclose(tilt(v._dome_item), np.eye(4))           # Inertia off: level
+        v.set_inertia(True)
+        assert v._level_item.visible()
+        R = scene_rotation(0.2, -0.3)
+        c = np.asarray(v.layout_.center, float)
+        for it in (v._dome_item, v._tube_item, v._arrow_item, v._up_item):
+            m = tilt(it)
+            assert np.allclose(m[:3, :3], R, atol=1e-6)
+            assert np.allclose(m[:3, :3] @ c + m[:3, 3], c, atol=1e-3)   # about the centre
+        assert np.allclose(tilt(v._level_item), np.eye(4))          # the horizon stays level
+        ring = v._level_item.pos
+        assert np.allclose(ring[:, 1], c[1], atol=1e-3)
+        # the ROV joins the tilt, about its own centre
+        v._rov_box.setChecked(True)
+        lo, hi = v._rov_bbox()
+        c = (lo + hi) / 2
+        for it in (v._dome_item, *v._rov_items):
+            m = tilt(it)
+            assert np.allclose(m[:3, :3], R, atol=1e-6)
+            assert np.allclose(m[:3, :3] @ c + m[:3, 3], c, atol=1e-2)
+        # a picked time; no row there: level
+        v.update_imu(t, np.concatenate([imu_rows(100), rows[100:]]))
+        v.show_imu_at(0.5)
+        assert np.allclose(tilt(v._dome_item)[:3, :3], np.eye(3), atol=1e-9) and v._att == (0, 0)
+        v.show_imu_at(1.5)
+        assert np.allclose(tilt(v._dome_item)[:3, :3], R, atol=1e-6)
+        v.clear_imu()
+        assert v._att is None and np.allclose(tilt(v._dome_item), np.eye(4))
+        v.update_imu(t, rows)
+        v.set_inertia(False)
+        assert not v._level_item.visible() and np.allclose(tilt(v._dome_item), np.eye(4))
+    finally:
+        v.close()

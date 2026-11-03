@@ -43,6 +43,11 @@ the dots, arrows, trails, grid and surface onto the dome's own surface
 as in centre mode, but at the dome's radius. Whiskers: tube, line or off.
 ROV puts the BlueROV2 silhouette (``rov_mesh_items``, assets/rov, shared with
 the ROV view) behind the dome, in the same frame, and zooms out to it.
+Inertia tilts the whole scene (dome, whiskers, marks, ROV) by the IMU's roll
+and pitch (``update_imu``: the control panel's IMU buffer, live or replayed;
+``daq/imu_pose.py``), about the dome centre or, with the ROV shown, the
+vehicle's centre, with a grey ring in the level plane as the horizon; the
+camera stays put, so a nose-down ROV is drawn nose-down.
 
 Show "plane map": every whisker at once, flat (``dome_pose.PlaneMap``), as a
 pilot inside the ROV sees the arrays: port on the left, starboard on the
@@ -123,6 +128,7 @@ import pyqtgraph.opengl as gl                            # noqa: E402
 from pyqtgraph.opengl import shaders                    # noqa: E402
 from pyqtgraph.opengl.MeshData import MeshData          # noqa: E402
 
+from wavi_py.daq.imu_pose import ImuPose, scene_rotation  # noqa: E402
 from wavi_py.views.base import ViewWindow               # noqa: E402
 from wavi_py.views.dome_camera import (FORWARD, SNAP_KEYS, SNAP_VIEWS, STARBOARD, UP,  # noqa: E402
                                        TrackballCamera, look_rotation)
@@ -159,6 +165,7 @@ _AXES = (("Up", UP, QColor(30, 150, 50)), ("Fwd", FORWARD, QColor(40, 90, 220)),
          ("Stbd", STARBOARD, QColor(210, 50, 40)))
 _FACE_LABEL = {"front": "FRONT", "back": "BACK", "top": "TOP", "bottom": "BOTTOM",
                "starboard": "STBD", "port": "PORT"}
+_LEVEL_COLOR = (0.45, 0.45, 0.5, 0.8)       # Inertia's horizon ring
 _CMAP = pg.colormap.get("viridis")    # bend magnitude: purple straight .. yellow full
 
 
@@ -599,6 +606,13 @@ class DomeView(ViewWindow):
         self._shell_radius = 0.0               # 0: auto (rest tips' reach)
         self._show_rov = False
         self._rov_items: Optional[list] = None
+        self._inertia = False                  # tilt the scene by the IMU attitude
+        self._imu_pose = ImuPose()
+        self._imu_t = np.empty(0)
+        self._imu_rows = np.empty((0, 9), np.float32)
+        self._imu_t_at: Optional[float] = None  # None: the newest row
+        self._att: Optional[tuple[float, float]] = None     # (roll, pitch) drawn
+        self._att_T = np.eye(4)                # scene -> drawn (the tilt about the pivot)
 
         self._asset_layout = DomeLayout.load(asset_dir / "whiskers.json")
         self.dome_map = dome_map
@@ -648,6 +662,12 @@ class DomeView(ViewWindow):
         for it in (self._grid_item, self._trail_item, self._surface_item, self._neutral_item,
                    self._arrow_item, self._up_item):
             self._glw.addItem(it)
+        # Inertia: the level plane (a horizon ring), the one item not tilted
+        self._level_item = gl.GLLinePlotItem(mode="line_strip", width=1.5, antialias=True,
+                                             color=_LEVEL_COLOR, glOptions="translucent")
+        self._level_item.setDepthValue(15)
+        self._level_item.setVisible(False)
+        self._glw.addItem(self._level_item)
         # their labels: plain Qt labels over the GL view, moved only when the camera moves
         # (pyqtgraph's GLTextItem paints nothing here under Mesa / EGL)
         self._marks: dict[str, tuple[QLabel, np.ndarray]] = {}
@@ -824,6 +844,9 @@ class DomeView(ViewWindow):
             lo, hi = self._rov_bbox()
             reach = max(reach, float(np.linalg.norm(np.maximum(abs(lo - lay.center),
                                                                abs(hi - lay.center)))))
+        if self._inertia:                      # tilted about the pivot: anything can swing
+            off = float(np.linalg.norm(self._pivot() - lay.center))
+            reach = max(reach + 2 * off, off + self._level_radius())
         self._glw.cam.set_bounds(lay.center, reach)
 
     def _rov_bbox(self) -> tuple[np.ndarray, np.ndarray]:
@@ -838,6 +861,7 @@ class DomeView(ViewWindow):
             out = neutral - self.layout_.center
             out /= np.maximum(np.linalg.norm(out, axis=1, keepdims=True), 1e-9)
             at = neutral + max(0.08 * self.grid_shell().radius, 6.0) * out
+            out = out @ self._att_T[:3, :3].T              # Inertia's tilt
             facing = self._glw.cam.to_view(out)[:, 2] > -0.15      # not on the far side
             for lab, p, f in zip(self._hole_labels, at, facing):
                 if self._show_labels and f:
@@ -845,7 +869,7 @@ class DomeView(ViewWindow):
                 else:
                     lab.setVisible(False)
         for lab, at in marks:
-            xy = self._glw.project(at)
+            xy = self._glw.project(self._tilted(at))
             lab.setVisible(xy is not None)
             if xy is not None:
                 lab.move(int(xy[0] - lab.width() / 2), int(xy[1] - lab.height() / 2))
@@ -902,6 +926,13 @@ class DomeView(ViewWindow):
                                  " silhouette of Blue Robotics' CAD) behind the dome")
         self._rov_box.toggled.connect(self.set_rov_visible)
         tb.addWidget(self._rov_box)
+        self._inertia_box = QCheckBox("Inertia")
+        self._inertia_box.setToolTip(
+            "Tilt the scene by the IMU's roll and pitch (live or replayed), so the dome and"
+            " the ROV are drawn in their attitude against the level plane (grey ring)."
+            " Heading is not applied.")
+        self._inertia_box.toggled.connect(self.set_inertia)
+        tb.addWidget(self._inertia_box)
         tb.addSeparator()
         tb.addWidget(QLabel(" fps "))
         self._fps_box = QSpinBox()
@@ -1077,6 +1108,83 @@ class DomeView(ViewWindow):
         self._show_rov = bool(on)
         self._update_bounds()
         self.reset_camera()
+        self._apply_attitude(force=True)        # the pivot moved
+
+    # ----- Inertia: the scene tilted by the IMU attitude
+    def set_inertia(self, on: bool) -> None:
+        self._inertia = bool(on)
+        if self._inertia_box.isChecked() != self._inertia:
+            self._inertia_box.setChecked(self._inertia)
+        self._level_item.setVisible(self._inertia)
+        self._update_level()
+        self._update_bounds()
+        self._apply_attitude(force=True)
+
+    def update_imu(self, t: np.ndarray, rows: np.ndarray) -> None:
+        """The IMU buffer (times, IMU_CHANNELS rows, as the ROV view takes it);
+        Inertia shows the newest row."""
+        if rows.ndim != 2 or len(t) != len(rows):
+            return
+        self._imu_t, self._imu_rows, self._imu_t_at = t, rows, None
+        if self._paused:                       # no frames: tilt now
+            self._apply_attitude()
+
+    def show_imu_at(self, t_at: Optional[float]) -> None:
+        """Inertia at the buffered row at session time ``t_at`` (None: the newest)."""
+        self._imu_t_at = None if t_at is None else float(t_at)
+        self._apply_attitude()
+
+    def clear_imu(self) -> None:
+        self._imu_t, self._imu_rows = np.empty(0), np.empty((0, 9), np.float32)
+        self._imu_t_at = None
+        self._apply_attitude()
+
+    def _pivot(self) -> np.ndarray:
+        """What Inertia turns about: the dome centre, or the ROV's centre with it shown."""
+        if self._show_rov and self._rov_items:
+            lo, hi = self._rov_bbox()
+            return (lo + hi) / 2
+        return np.asarray(self.layout_.center, float)
+
+    def _level_radius(self) -> float:
+        if self._show_rov and self._rov_items:
+            lo, hi = self._rov_bbox()
+            return 0.6 * float(np.linalg.norm(hi - lo))
+        return 1.25 * self.shell.radius
+
+    def _update_level(self) -> None:
+        a = np.linspace(0.0, 2 * np.pi, 97)
+        ring = self._pivot() + self._level_radius() * np.stack(
+            [np.cos(a), np.zeros_like(a), np.sin(a)], axis=1)      # the xz plane: level
+        self._level_item.setData(pos=ring.astype(np.float32))
+
+    def _tilted(self, p: np.ndarray) -> np.ndarray:
+        return np.asarray(p, float) @ self._att_T[:3, :3].T + self._att_T[:3, 3]
+
+    def _apply_attitude(self, force: bool = False) -> None:
+        """Set every 3D item's transform from the attitude to draw (identity with
+        Inertia off or no IMU row); only when it changed."""
+        s = None
+        if self._inertia:
+            s = self._imu_pose.at(self._imu_t, self._imu_rows, self._imu_t_at)
+        att = None if s is None else (s.roll, s.pitch)
+        if att == self._att and not force:
+            return
+        self._att = att
+        T = np.eye(4)
+        if att is not None:
+            R = scene_rotation(*att)
+            c = self._pivot()
+            T[:3, :3] = R
+            T[:3, 3] = c - R @ c
+        self._att_T = T
+        m = QMatrix4x4(*T.ravel().tolist())
+        for it in self._glw.items:
+            if it is not self._level_item:
+                it.setTransform(m)
+        self._update_level()
+        self._place_marks()
+        self._glw.update()
 
     def set_grid_visible(self, on: bool) -> None:
         self._show_grid = bool(on)
@@ -1235,7 +1343,7 @@ class DomeView(ViewWindow):
             self._scene_box.setCurrentIndex(int(self._plane))
         self._stack.setCurrentWidget(self._plw if self._plane else self._glw)
         for w in (self._whisker_box, self._persp_box, self._views_button, self._surface_box,
-                  self._marks_box, self._pivot_box, self._radius_box):
+                  self._marks_box, self._pivot_box, self._radius_box, self._inertia_box):
             w.setEnabled(not self._plane)
         self._restart_trail()
         self._update_grid()
@@ -1362,6 +1470,7 @@ class DomeView(ViewWindow):
                 self.pose.feed(samples, self._fs)
         if self._paused:
             return
+        self._apply_attitude()
         self._render_pose(t0)
 
     def _colors(self, mag: np.ndarray) -> np.ndarray:
