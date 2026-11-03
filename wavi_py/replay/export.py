@@ -13,9 +13,11 @@ same depth as the full recording (its own first 0.25 s, or its own disarmed
 start, need not be at rest or at the surface).
 
 ``export_dat``: the whisker scans in the range in the GUI recorder's ``.dat``
-format (``io/dat_writer.py``): mV, outliers filled per block of a 20 Hz tick
-as the control panel does, each row's wall clock from the fitted scan time
-(more exact than the recorder's sample counting).
+format (``io/dat_writer.py``): mV as replay shows them, raw or (``despike``)
+with the index's spikes replaced (``daq/despike.py``, centred over the whole
+file, so the clip's edges are judged as in the full recording), each row's
+wall clock from the fitted scan time (more exact than the recorder's sample
+counting). The clip (``export_jsonl``) is always the raw bytes.
 """
 
 from __future__ import annotations
@@ -26,12 +28,9 @@ from pathlib import Path
 
 import numpy as np
 
-from wavi_py.daq.outliers import fill_outliers_linear
 from wavi_py.io.dat_writer import DatWriter
 from wavi_py.replay.index import K, RecordingIndex
 from whisker_link.esp32_frame import MV_PER_CODE
-
-TICK_HZ = 20.0                     # the control panel's tick: the outlier fill's block
 
 
 def _range(index: RecordingIndex, t_start: float, t_end: float) -> tuple[int, int]:
@@ -73,7 +72,8 @@ def export_jsonl(index: RecordingIndex, t_start: float, t_end: float, out_path) 
     return i1 - i0
 
 
-def export_dat(index: RecordingIndex, t_start: float, t_end: float, out_path) -> int:
+def export_dat(index: RecordingIndex, t_start: float, t_end: float, out_path,
+               despike: bool = False) -> int:
     """Write the range's scans as a ``.dat``; returns the rows written."""
     i0, i1 = _range(index, t_start, t_end)
     sel = np.nonzero(index.kind[i0:i1] == K["wsk"])[0] + i0
@@ -87,16 +87,13 @@ def export_dat(index: RecordingIndex, t_start: float, t_end: float, out_path) ->
     base = int(index.off[i0])
     for i in sel:
         ev = json.loads(data[int(index.off[i]) - base:int(index.off[i + 1]) - base])
-        raw.append(ev["raw"])
+        raw.append(index.despiked_scan(int(i), ev["raw"]) if despike else ev["raw"])
         if "tus" in ev:
             t.append(clock.wsk(float(ev["t"]), int(ev["tus"])))
         else:
             t.append(float(ev["t"]))
     x = np.asarray(raw, dtype=np.float32) * np.float32(mv)
     unix = index.unix0 + (np.asarray(t) - index.t0)
-    blk = max(1, int(round((index.fs or 250.0) / TICK_HZ)))
     with DatWriter(out_path, x.shape[1]) as w:
-        for k in range(0, len(x), blk):
-            w.write_batch([datetime.fromtimestamp(u) for u in unix[k:k + blk]],
-                          fill_outliers_linear(x[k:k + blk]))
+        w.write_batch([datetime.fromtimestamp(u) for u in unix], x)
         return w.n_written

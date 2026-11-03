@@ -40,6 +40,9 @@ MAX_DEPTH_CM = 40.0
 RAILED = (4, 5, 14, 15)          # channel indices that read railed
 BACKSTEP_AT = 3.0                # the late MAVLink block
 HPA_SURF = 1001.7
+# spikes=True: (scan index, channel, codes added); a 3-scan run on channel 9
+SPIKES = ((300, 0, 300_000), (301, 7, -250_000), (1200, 20, 400_000),
+          (2000, 9, 300_000), (2001, 9, 310_000), (2002, 9, 290_000))
 
 
 def depth_profile(t: float) -> float:
@@ -58,7 +61,7 @@ def raw_of(seq: int) -> list[int]:
 
 
 def write_recording(path, compact_hello: bool = False, truncated: bool = True,
-                    vehicle: bool = True) -> dict:
+                    vehicle: bool = True, spikes: bool = False) -> dict:
     """Write the recording; returns the ground truth for the tests."""
     rng = np.random.default_rng(1)
     lines: list[tuple[float, bytes]] = []          # (sort key, line)
@@ -91,8 +94,12 @@ def write_recording(path, compact_hello: bool = False, truncated: bool = True,
         t_rx = burst + 0.001 + 0.002 * rng.random() ** 6    # mostly ~1 ms, up to 3
         t_rx = prev_rx = max(t_rx, prev_rx + 1e-6)     # one reader thread: in order
         flg = 2 if abs(s_dev - CRC_AT) < 0.01 else 0
+        raw = raw_of(seq)
+        for at, c, d in (SPIKES if spikes else ()):
+            if at == i:
+                raw[c] += d
         add(t_rx, {"k": "wsk", "seq": seq, "tus": tus0 + int(round(s_dev * 1e6)), "dur": 4000,
-                   "rail": 0, "flg": flg, "raw": raw_of(seq)})
+                   "rail": 0, "flg": flg, "raw": raw})
         true_t.append(t_dev)
         seqs.append(seq)
     truth = {"wsk_t_dev": np.asarray(true_t), "wsk_seq": np.asarray(seqs), "n_wsk": len(seqs),

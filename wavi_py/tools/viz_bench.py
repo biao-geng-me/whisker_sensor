@@ -7,7 +7,7 @@ windows, runs for ``--secs`` after ``--warmup`` and prints one JSON line:
 - per window: frames painted per second (its busiest plot widget), the
   Python-side redraw (setData & co.) and the paint (Qt rasterising the scene)
   per call, the worst redraw + paint, and their share of wall and CPU time;
-- the main tick's cost broken down (bus read + outlier fill + ring append,
+- the main tick's cost broken down (bus read + despike + ring append,
   the Line copy, the spectra);
 - the GUI thread's and the process's CPU share, and the longest event-loop
   stall (how late a 4 ms timer fired): what the user sees as a hitch.

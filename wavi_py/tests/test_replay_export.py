@@ -19,7 +19,6 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
-from wavi_py.daq.outliers import fill_outliers_linear  # noqa: E402
 from wavi_py.replay.export import export_dat, export_jsonl  # noqa: E402
 from wavi_py.replay.index import K, RecordingIndex  # noqa: E402
 from wavi_py.tests import replay_fixture as fx  # noqa: E402
@@ -103,15 +102,33 @@ def test_dat(src, tmp_path):
     assert np.all(dt >= 0) and abs(np.median(dt) - 1 / fx.FS) < 1.5e-3
     # the wall clock of the first row: the fitted scan time, ~3 s in
     assert abs(stamps[0] - (src.unix0 + 3.0)) < 0.01
-    # values: raw x mv_per_code as the bus has them, outliers filled per 20 Hz tick's block
-    # as the recorder does (which does move ~1.5 % of this sine's samples)
+    # values: raw x mv_per_code as the bus has them, untouched (no block fill any more)
     with open(src.path, "rb") as f:
         evs = [json.loads(x) for x in src.read_lines(f, int(i0), int(i1)).splitlines()]
     mv = np.array([e["raw"] for e in evs if e["k"] == "wsk"], dtype=np.float32) * np.float32(fx.MV)
-    blk = int(round(fx.FS / 20))
-    ref = np.concatenate([fill_outliers_linear(mv[k:k + blk]) for k in range(0, len(mv), blk)])
-    assert np.allclose(vals, ref, atol=2e-5)                     # float32, 6 decimals
-    assert 0 < np.count_nonzero(np.abs(vals - mv) > 1e-3) < 0.03 * mv.size
+    assert np.allclose(vals, mv, atol=2e-5)                      # float32, 6 decimals
+    # the smooth sine has no spikes: despiked is the same
+    assert src.n_spikes == 0
+    export_dat(src, 3.0, 7.0, tmp_path / "d.dat", despike=True)
+    assert (tmp_path / "d.dat").read_text() == out.read_text()
+
+
+def test_dat_despiked(tmp_path):
+    p = tmp_path / "spk.jsonl"
+    fx.write_recording(p, spikes=True)
+    idx = RecordingIndex.build(p)
+    raw_out, dsp_out = tmp_path / "raw.dat", tmp_path / "dsp.dat"
+    export_dat(idx, 0.0, 9.0, raw_out)
+    export_dat(idx, 0.0, 9.0, dsp_out, despike=True)
+    raw = np.array([[float(x) for x in r[23:].split()] for r in raw_out.read_text().splitlines()])
+    dsp = np.array([[float(x) for x in r[23:].split()] for r in dsp_out.read_text().splitlines()])
+    gap = int(fx.SEQ_GAP_AT * fx.FS)
+    row = {i: i - 5 * (i >= gap) for i, _, _ in fx.SPIKES}          # 5 scans lost at the gap
+    changed = {(int(i), int(c)) for i, c in zip(*np.nonzero(np.abs(raw - dsp) > 1e-3))}
+    assert changed == {(row[i], c) for i, c, _ in fx.SPIKES}
+    for i, c, _ in fx.SPIKES:                     # back on the sine (the median of 7)
+        ref = [fx.raw_of(5000 + j)[c] * fx.MV for j in range(i - 3, i + 4)]
+        assert min(ref) - 0.01 <= dsp[row[i], c] <= max(ref) + 0.01
 
 
 def test_panel_export(tmp_path):

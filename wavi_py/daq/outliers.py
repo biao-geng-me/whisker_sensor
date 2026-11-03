@@ -4,10 +4,11 @@ MATLAB's default detection is MAD-based (3 * 1.4826 * MAD ≈ 3-sigma assuming
 normal distribution), per column. Outliers are replaced with linear
 interpolation from neighboring non-outlier samples.
 
-Used by ``main_window.py`` (the GUI subscriber) to clean signals before
-plotting and recording — mirrors ``wavi.m:remove_outliers`` ([wavi.m:870-877](wavi/wavi.m#L870-L877)).
-The DAQ thread does NOT call this; it's per-subscriber to keep raw samples on
-the bus.
+It mirrors ``wavi.m:remove_outliers`` ([wavi.m:870-877](wavi/wavi.m#L870-L877)) and
+was the control panel's per-tick fill. On real recordings it changed ~2 % of
+the samples of every ~12-sample block (almost all plain noise) and missed most
+spikes, so the panel now uses ``despike.py``; only the readers' startup V0
+(a mean, ``reader.py``) still calls this.
 """
 
 from __future__ import annotations

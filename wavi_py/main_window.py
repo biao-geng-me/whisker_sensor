@@ -4,7 +4,12 @@ This is one subscriber on the SampleBus among many. It owns:
 
 - The control panel (transport selector, record, pause, view toggles, tag, auto-stop).
 - The view windows (line, spectrum, fft, spectrogram, imu, dome).
-- The local processing chain: outlier removal → recording → (optional) filter → plot updates.
+- The local processing chain: despike → recording → (optional) filter → plot updates.
+  Despike (``daq/despike.py``, the panel's **Despike**): live, the same centred
+  test judged 28 samples late (112 ms at 250 Hz), so the newest samples are
+  shown raw and patched over the next ticks, and the .dat gets them that late;
+  replay, the transport serves the scans with the spikes the index found over
+  the whole file (off by default: replay shows the recording as it is).
 - Replay of a recording (.jsonl, transport "Replay"): the file is indexed in the
   background, then played through the same pipeline as live
   (``transports/replay_transport.py``). Pause pauses playback; a seek is a
@@ -35,6 +40,7 @@ import numpy as np
 from PyQt6.QtCore import QRegularExpression, QTimer, Qt
 from PyQt6.QtGui import QGuiApplication, QKeySequence, QRegularExpressionValidator, QShortcut
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
@@ -66,7 +72,7 @@ from wavi_py.config import (
     DEFAULT_TCP_PORT,
     MIN_REC_LEN_S,
 )
-from wavi_py.daq.outliers import fill_outliers_linear
+from wavi_py.daq.despike import Despiker
 from wavi_py.daq.spectra import SPEC_COL_HZ, SpecHistory, amp_spectra, amp_spectrum
 from wavi_py.io.dat_writer import DatWriter, build_datalog_filename
 from wavi_py.replay.index import RecordingIndex
@@ -226,6 +232,11 @@ class MainWindow(QMainWindow):
         self._record_start_dt: Optional[datetime] = None
         self._auto_stop_s = 0.0
         self._t0_unix: Optional[float] = None    # stream start in unix time
+        # live despike: the newest `pending` samples are provisional (raw) until judged,
+        # 28 samples later; the .dat gets each sample once final, from index _rec_from on
+        self._despiker: Optional[Despiker] = Despiker()
+        self._next_idx = 0                       # index of the next sample to ingest
+        self._rec_from = 0
 
         # client (None until Connect pressed)
         self._client: Optional[WaviClient] = None
@@ -348,6 +359,7 @@ class MainWindow(QMainWindow):
     def _switch_rate(self, fs: float, at: int) -> None:
         """From sample index ``at`` on the rate is ``fs``: move the time anchor
         there and start the buffers over (no window mixes two rates)."""
+        self._flush_despike()
         at = max(at, self._anchor_idx)
         self._anchor_t = self._t_of(at)
         self._anchor_idx = at
@@ -595,6 +607,16 @@ class MainWindow(QMainWindow):
         self._reset_btn.clicked.connect(self._on_reset_clicked)
         self._reset_btn.setEnabled(False)
 
+        self._despike_chk = QCheckBox("Despike")
+        self._despike_chk.setChecked(True)
+        self._despike_chk.setToolTip(
+            "Replace isolated spikes (1-3 samples, > 8x the local noise) by the median of\n"
+            "the 7 samples around them (daq/despike.py). Live: on by default, judged 28\n"
+            "samples late (the newest ~0.1 s is patched as it comes); off: raw samples.\n"
+            "Replay: off by default (the recording as it is); on uses the spikes found\n"
+            "over the whole file, and the .dat export follows it.")
+        self._despike_chk.toggled.connect(self._on_despike_toggled)
+
         h.addWidget(self._toggle_line)
         h.addWidget(self._toggle_spectrum)
         h.addWidget(self._toggle_fft)
@@ -624,6 +646,7 @@ class MainWindow(QMainWindow):
         h.addWidget(self._toggle_rov)
         h.addWidget(self._map_btn)
         h.addStretch(1)
+        h.addWidget(self._despike_chk)
         h.addWidget(self._pause_btn)
         h.addWidget(self._reset_btn)
         return box
@@ -797,6 +820,11 @@ class MainWindow(QMainWindow):
 
         self._client = client
         self._last_seq = 0
+        self._next_idx = 0
+        self._despike_chk.blockSignals(True)
+        self._despike_chk.setChecked(not self._replaying)   # live on, replay raw
+        self._despike_chk.blockSignals(False)
+        self._despiker = None if self._replaying else Despiker()
         self._samples_since_spec_update = 0
         self._samples_since_clear = 0
         self._sig.fill(np.nan)
@@ -1027,6 +1055,34 @@ class MainWindow(QMainWindow):
         for v in self._stream_views:
             v.set_stream_controls_enabled(on)
 
+    def _on_despike_toggled(self, on: bool) -> None:
+        if self._replaying:
+            assert self._client is not None and self._client.replay is not None
+            self._client.replay.despike = on          # re-serves from the playhead
+            return
+        if on:
+            self._despiker = Despiker()
+        else:
+            self._flush_despike()
+            self._despiker = None
+
+    def _flush_despike(self) -> None:
+        """A discontinuity (or Despike off): the provisional samples stay as they are
+        (raw); the .dat gets them now. The next sample starts a new stream."""
+        d = self._despiker
+        if d is None:
+            return
+        if d.pending and self._is_recording and self._dat_writer is not None:
+            self._record_final(self._sig[-d.pending:], self._next_idx - d.pending)
+        d.reset()
+
+    def _record_final(self, rows: np.ndarray, first_idx: int) -> None:
+        """Final samples ``first_idx``... into the .dat, from ``_rec_from`` on."""
+        skip = max(0, self._rec_from - first_idx)
+        if skip < len(rows):
+            self._write_record(rows[skip:], first_idx + skip)
+            self._rec_from = first_idx + len(rows)
+
     def _on_pause_toggled(self, on: bool) -> None:
         self._pause_btn.setText("Resume" if on else "Pause")
         for v in self._stream_views:
@@ -1111,7 +1167,9 @@ class MainWindow(QMainWindow):
         out = Path(path)
         try:
             if out.suffix.lower() == ".dat":
-                what = f"{export_dat(idx, t0, t1, out)} scans"
+                despike = bool(self._client and self._client.replay and self._client.replay.despike)
+                what = f"{export_dat(idx, t0, t1, out, despike)} scans" + (
+                    " despiked" if despike else "")
             else:
                 what = f"{export_jsonl(idx, t0, t1, out)} lines"
         except (OSError, ValueError) as exc:
@@ -1189,6 +1247,7 @@ class MainWindow(QMainWindow):
         # collected under the old V0 and would briefly render with a jump
         # before the new V0 lands.
         self._last_seq = self._client.bus.total_published
+        self._flush_despike()                      # before the buffer it reads is cleared
         self._sig.fill(np.nan)
         self._spec_hist.clear()
         self._fft_map.fill(0)
@@ -1224,6 +1283,8 @@ class MainWindow(QMainWindow):
             return
         self._record_start_dt = start_dt
         self._is_recording = True
+        # from the oldest sample not yet final (the provisional ones come later)
+        self._rec_from = self._next_idx - (self._despiker.pending if self._despiker else 0)
         # Server transport: also starts the recording on the vehicle, and tees
         # the full whisker+IMU stream to a local .jsonl next to the .dat.
         self._client.send_record_start(tag, local_copy=str(fullpath.with_suffix(".jsonl")))
@@ -1242,6 +1303,9 @@ class MainWindow(QMainWindow):
                                       f" {f.get('msg')} (since {since})")
 
     def _stop_recording(self) -> None:
+        d = self._despiker
+        if d is not None and d.pending and self._dat_writer is not None:
+            self._record_final(self._sig[-d.pending:], self._next_idx - d.pending)
         self._is_recording = False
         if self._fault_sidecar is not None:
             self._fault_sidecar.close()
@@ -1354,8 +1418,16 @@ class MainWindow(QMainWindow):
         """Samples ``first_idx``... (all at the current rate; their times, NaN where
         the stream has none) into the rolling buffer and the recording."""
         n_new = samples.shape[0]
-        # Outlier removal on the trailing block, mirroring wavi.m's remove_outliers.
-        cleaned = fill_outliers_linear(samples)
+        if first_idx != self._next_idx:                # skipped / dropped samples: a gap
+            self._flush_despike()
+        # Despike (live): `out` also re-gives earlier provisional samples, now final
+        if self._despiker is not None:
+            out = self._despiker.push(samples).astype(np.float32)
+            n_final = len(out) - self._despiker.pending
+        else:
+            out, n_final = samples, n_new
+        n_back = len(out) - n_new
+        cleaned = out[n_back:]
         t_idx = self._t_of(first_idx) + np.arange(n_new) / self._fs
         t = t_idx if times is None else np.where(np.isfinite(times), times, t_idx)
 
@@ -1368,12 +1440,17 @@ class MainWindow(QMainWindow):
             self._sig[-n_new:] = cleaned
             self._sig_t[:-n_new] = self._sig_t[n_new:]
             self._sig_t[-n_new:] = t
+        if n_back:                                   # the provisional ones, patched
+            m = min(n_back, self._ns_tot - n_new)
+            if m > 0:
+                self._sig[-n_new - m:-n_new] = out[n_back - m:n_back]
+        self._next_idx = first_idx + n_new
         self._samples_since_clear = min(self._samples_since_clear + n_new, self._ns_tot)
         self._samples_since_spec_update += n_new
 
-        # Recording path: write the cleaned samples with their wall-clock timestamps.
+        # Recording path: the samples final now, with their wall-clock timestamps.
         if self._is_recording and self._dat_writer is not None:
-            self._write_record(cleaned, first_idx)
+            self._record_final(out[:n_final], first_idx - n_back)
 
     def _tick_esp32_mode(self, meta: dict) -> None:
         """New INFO frames: the reported scan config, a rate switch at the sample
