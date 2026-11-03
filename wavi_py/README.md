@@ -60,7 +60,7 @@ Against an Arduino plugged directly into the PC:
 python -m wavi_py --transport serial --serial-port COM3 --nsensor 9 --fs 80
 ```
 
-Click **Connect**. Toggle **Line / FFT / Spec** to bring up plot windows. **Pause** freezes plot updates while data keeps flowing (and recording continues). **Rec** writes a `.dat` file using the exact MATLAB filename / line format, so existing tools under [`data_processing/`](../data_processing/) keep working unchanged.
+Click **Connect**. Toggle **Line / FFT / Spec** to bring up plot windows. **Pause** freezes plot updates while data keeps flowing (and recording continues). **Rec** writes a `.dat` file using the exact MATLAB filename / line format, so existing tools under [`data_processing/`](../data_processing/) keep working unchanged. **Auto-stop** (Record row) is a toggle and a box of whole seconds (5 s to 10 h, arrows step 5 s): with the toggle on, each recording stops after the box's time and the progress bar fills meanwhile. The box keeps its time while the toggle is off, and typing a time (Enter or leaving the box) or an arrow step turns the toggle on, as typing a colour range switches the FFT / Spec Auto off. With daq_server the time goes to the server with the start, so both controls are fixed until that recording ends.
 
 The **Line** window has its own **Pause** and **Re-zero** buttons, which are the control panel's Pause and Reset (re-capture the V0 baseline) and stay in sync with them. It opens in the **Grid** layout (one tile per whisker); untick Grid for the stacked layout (all whiskers on one axis). Double-click a tile (or, in the stacked layout, near a whisker's trace) to show that whisker alone, and double-click again, press Esc or click **All whiskers** to go back.
 

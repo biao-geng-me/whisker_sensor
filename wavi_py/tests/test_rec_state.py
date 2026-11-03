@@ -11,6 +11,7 @@ Run: QT_QPA_PLATFORM=offscreen python -m pytest wavi_py/tests/test_rec_state.py
 from __future__ import annotations
 
 import json
+import math
 import os
 import signal
 import socket
@@ -217,3 +218,53 @@ def test_old_client_path_without_a_server_ack(app, tmp_path):
     finally:
         mw._disconnect()
         mw.deleteLater()
+
+
+def test_auto_stop_toggle_and_seconds_box(app, tmp_path):
+    """Auto-stop is a toggle plus a whole-seconds box: the box keeps its time while
+    off, typing a time (or an arrow step) turns it on, as with the FFT colour range."""
+    from wavi_py.config import MIN_REC_LEN_S
+    from wavi_py.main_window import MainWindow
+    from PyQt6.QtWidgets import QSpinBox
+    mw = MainWindow(transport="sim", nsensor=16, outpath=tmp_path)
+    try:
+        chk, box = mw._auto_stop_chk, mw._auto_stop_spin
+        assert isinstance(box, QSpinBox) and box.suffix() == " s" and box.singleStep() == 5
+        assert box.minimum() == math.ceil(MIN_REC_LEN_S) and not box.keyboardTracking()
+        assert not chk.isChecked() and box.value() == 60 and mw._auto_stop_s == 0
+        chk.setChecked(True)
+        assert mw._auto_stop_s == 60
+        chk.setChecked(False)
+        assert mw._auto_stop_s == 0 and box.value() == 60          # the box keeps its time
+        box.setValue(90)                                           # typed + Enter / arrows
+        assert chk.isChecked() and mw._auto_stop_s == 90
+        box.stepUp()
+        assert mw._auto_stop_s == 95
+        box.setValue(1)                                            # below the minimum
+        assert box.value() == math.ceil(MIN_REC_LEN_S) and mw._auto_stop_s == box.value()
+        mw._set_auto_stop(0)
+        assert not chk.isChecked() and mw._auto_stop_s == 0 and box.value() == 5
+        mw._set_auto_stop(12.5)
+        assert chk.isChecked() and box.value() == 13 and mw._auto_stop_s == 13
+        # Sim: no server duration, so the controls stay editable while recording
+        mw._connect()
+        assert _pump(app, lambda: mw._client.bus.total_published > 20, 5)
+        mw._start_recording()
+        assert mw._is_recording and box.isEnabled() and chk.isEnabled()
+        mw._stop_recording()
+    finally:
+        mw._disconnect()
+        mw.deleteLater()
+
+
+def test_auto_stop_is_fixed_while_the_server_holds_it(app, rig):
+    port, tmp_path, window = rig
+    mw = window()
+    mw._set_auto_stop(30)
+    mw._record_btn.click()
+    assert _pump(app, lambda: mw._is_recording, 4)
+    assert not mw._auto_stop_spin.isEnabled() and not mw._auto_stop_chk.isEnabled()
+    assert "Fixed while" in mw._auto_stop_chk.toolTip()
+    mw._record_btn.click()
+    assert _pump(app, lambda: not mw._is_recording and mw._rec_cmd is None, 4)
+    assert mw._auto_stop_spin.isEnabled() and mw._auto_stop_spin.value() == 30

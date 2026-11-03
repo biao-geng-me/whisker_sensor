@@ -43,7 +43,6 @@ from PyQt6.QtGui import QGuiApplication, QKeySequence, QRegularExpressionValidat
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
-    QDoubleSpinBox,
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
@@ -677,22 +676,35 @@ class MainWindow(QMainWindow):
         self._tag_edit = QLineEdit()
         self._tag_edit.setPlaceholderText("tag (alphanumerics, _ -)")
 
-        self._auto_stop_spin = QDoubleSpinBox()
-        self._auto_stop_spin.setRange(0.0, 36000.0)
+        # Auto-stop: the toggle says whether, the box how long (whole seconds); the box
+        # keeps its value while the toggle is off, and typing a time (or the arrows)
+        # turns it on, as the FFT / Spec colour range's Auto + min / max do
+        self._auto_stop_chk = QCheckBox("Auto-stop")
+        self._auto_stop_chk.setToolTip(
+            "Stop each recording after the time in the box. With daq_server the server\n"
+            "stops it itself, so it also stops if this window is gone.")
+        self._auto_stop_chk.toggled.connect(self._on_auto_stop_toggled)
+        self._auto_stop_spin = QSpinBox()
+        self._auto_stop_spin.setRange(math.ceil(MIN_REC_LEN_S), 36000)
         self._auto_stop_spin.setSuffix(" s")
-        self._auto_stop_spin.setSpecialValueText("off")
-        self._auto_stop_spin.setDecimals(1)
-        self._auto_stop_spin.setSingleStep(5.0)
-        self._auto_stop_spin.valueChanged.connect(self._on_auto_stop_changed)
+        self._auto_stop_spin.setSingleStep(5)
+        self._auto_stop_spin.setValue(60)
+        self._auto_stop_spin.setKeyboardTracking(False)    # one value when typed, not per digit
+        self._auto_stop_spin.setToolTip(f"Auto-stop time, {math.ceil(MIN_REC_LEN_S)} s to 10 h;"
+                                        " typing a time turns Auto-stop on")
+        self._auto_stop_spin.valueChanged.connect(self._on_auto_stop_edited)
 
         self._record_btn = QPushButton("● Rec")
         self._record_btn.setStyleSheet("QPushButton { color: #c00; font-weight: bold; }")
         self._record_btn.clicked.connect(self._on_record_clicked)
         self._record_btn.setEnabled(False)
+        # wide enough for "Stop ROV rec <secs>", so the row doesn't shift as it counts
+        self._record_btn.setMinimumWidth(
+            self._record_btn.fontMetrics().horizontalAdvance("■ Stop ROV rec 99999s") + 24)
 
         h.addWidget(QLabel("Tag:"))
         h.addWidget(self._tag_edit, stretch=2)
-        h.addWidget(QLabel("Auto-stop:"))
+        h.addWidget(self._auto_stop_chk)
         h.addWidget(self._auto_stop_spin)
         h.addWidget(self._record_btn)
         return box
@@ -1298,16 +1310,25 @@ class MainWindow(QMainWindow):
         self._path_label.setText("Resetting V0...")
 
     def _set_auto_stop(self, secs: float) -> None:
-        """Auto-stop after ``secs`` (0: off), as if typed into the panel."""
-        self._auto_stop_spin.setValue(float(secs))
+        """Auto-stop after ``secs`` (0: off, the box keeps its time)."""
+        if secs > 0:
+            self._auto_stop_spin.setValue(int(math.ceil(secs)))      # turns it on
+            self._auto_stop_chk.setChecked(True)
+        else:
+            self._auto_stop_chk.setChecked(False)
 
-    def _on_auto_stop_changed(self, v: float) -> None:
-        if 0 < v < MIN_REC_LEN_S:
-            self._auto_stop_spin.blockSignals(True)
-            self._auto_stop_spin.setValue(MIN_REC_LEN_S)
-            self._auto_stop_spin.blockSignals(False)
-            v = MIN_REC_LEN_S
-        self._auto_stop_s = float(v)
+    def _on_auto_stop_edited(self, _v: int) -> None:
+        self._auto_stop_chk.setChecked(True)          # typing a time means: use it
+        self._apply_auto_stop()
+
+    def _on_auto_stop_toggled(self, _on: bool) -> None:
+        self._apply_auto_stop()
+
+    def _apply_auto_stop(self) -> None:
+        self._auto_stop_s = (float(self._auto_stop_spin.value())
+                             if self._auto_stop_chk.isChecked() else 0.0)
+        if self._auto_stop_s <= 0:
+            self._progress.setValue(0)
 
     def _on_record_clicked(self) -> None:
         if self._is_recording:
@@ -1563,6 +1584,16 @@ class MainWindow(QMainWindow):
             b.setStyleSheet("QPushButton { color: #c00; font-weight: bold; }")
             b.setToolTip("")
         b.setEnabled(self._client is not None and not self._replaying and self._rec_cmd is None)
+        # the server took the duration at rec_start: changing it here would only move
+        # the client's fallback, so it is fixed until that recording ends
+        locked = self._is_recording and self._rov_duration
+        for w in (self._auto_stop_chk, self._auto_stop_spin):
+            w.setEnabled(not locked)
+        self._auto_stop_chk.setToolTip(
+            "Fixed while this recording runs: the ROV stops it at the time it was started with."
+            if locked else
+            "Stop each recording after the time in the box. With daq_server the server\n"
+            "stops it itself, so it also stops if this window is gone.")
 
     # ------------------------------------------------------------------
     # the data tick
