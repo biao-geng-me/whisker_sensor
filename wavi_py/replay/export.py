@@ -86,7 +86,9 @@ def export_dat(index: RecordingIndex, t_start: float, t_end: float, out_path,
         data = index.read_lines(f, i0, i1)
     base = int(index.off[i0])
     for i in sel:
-        ev = json.loads(data[int(index.off[i]) - base:int(index.off[i + 1]) - base])
+        a = int(index.off[i]) - base
+        e = data.find(b"\n", a, int(index.off[i + 1]) - base)
+        ev = json.loads(data[a:e if e >= 0 else int(index.off[i + 1]) - base])   # the line only
         raw.append(index.despiked_scan(int(i), ev["raw"]) if despike else ev["raw"])
         if "tus" in ev:
             t.append(clock.wsk(float(ev["t"]), int(ev["tus"])))

@@ -1161,15 +1161,25 @@ class MainWindow(QMainWindow):
         if rng is None:
             rng = (self._replay.position - 10.0, self._replay.position)
         t0, t1 = max(0.0, float(rng[0])), min(idx.duration, float(rng[1]))
+        # the file opened (a .dat replays from its converted copy in the cache)
+        opened = Path(self._file_edit.text().strip() or idx.path)
         if path is None:
-            stem = f"{idx.path.stem}_{int(t0)}-{int(math.ceil(t1))}s"
+            stem = f"{opened.stem}_{int(t0)}-{int(math.ceil(t1))}s"
             path, _ = QFileDialog.getSaveFileName(
-                self, f"Export {fmt_t(t0)} .. {fmt_t(t1)}", str(idx.path.with_name(stem + ".jsonl")),
+                self, f"Export {fmt_t(t0)} .. {fmt_t(t1)}", str(opened.with_name(stem + ".jsonl")),
                 "Recording clip (*.jsonl);;Whisker .dat (*.dat)")
             if not path:
                 return None
         from wavi_py.replay.export import export_dat, export_jsonl
         out = Path(path)
+        try:
+            same = any(out.resolve() == p.resolve() for p in (idx.path, opened))
+        except OSError:
+            same = False
+        if same:
+            QMessageBox.critical(self, "Export failed",
+                                 f"{out} is the recording being replayed; choose another file.")
+            return None
         try:
             if out.suffix.lower() == ".dat":
                 despike = bool(self._client and self._client.replay and self._client.replay.despike)
@@ -1339,10 +1349,12 @@ class MainWindow(QMainWindow):
         if not self._client.is_running:
             self._on_link_lost()
             return
+        # the buses before the metadata: a replay seek mark published after a bus read
+        # then refers to an index at or after what was read (pending, cut later),
+        # never to samples already ingested into the old buffers
+        samples, times, new_seq = self._client.bus.read_since_t(self._last_seq, block=False)
         if self._client.is_event_stream:
             self._tick_server_extras()
-
-        samples, times, new_seq = self._client.bus.read_since_t(self._last_seq, block=False)
         if samples is None:
             return
         n_new_published = new_seq - self._last_seq
@@ -1495,18 +1507,24 @@ class MainWindow(QMainWindow):
     def _tick_server_extras(self) -> None:
         """IMU view + a one-line server status (rates, vehicle-side recording)."""
         assert self._client is not None
-        meta = self._client.bus.get_metadata()
+        rows, t, seq = self._client.imu_bus.read_since_t(self._imu_last_seq, block=False)
+        meta = self._client.bus.get_metadata()                  # after the reads (_on_tick)
         if self._replay.active:
             self._replay.poll()
             self._tick_replay(meta)
-        rows, t, seq = self._client.imu_bus.read_since_t(self._imu_last_seq, block=False)
+            if rows is not None:                # rows before a seek just seen: dropped
+                drop = min(len(rows), max(0, self._imu_last_seq - (seq - len(rows))))
+                rows, t = rows[drop:], t[drop:]
+                if not len(rows):
+                    rows = None
+                    self._imu_last_seq = max(self._imu_last_seq, seq)
         self._tick_esp32_mode(meta)
         self._tick_esp32_reset(meta)
         self._tick_faults(meta)
         self._maybe_apply_measured_rate(meta.get("fs_measured"))
         st = meta.get("server_status") or {}
         if rows is not None:
-            self._imu_last_seq = seq
+            self._imu_last_seq = max(self._imu_last_seq, seq)
             # the IMU's own times (session seconds, as the Line window's); the newest
             # t_buffer_s of them. Rows without a time: the RAW_IMU rate.
             hz = min(float(st.get("hz", {}).get("RAW_IMU", 0)) or 100.0, 400.0)
@@ -1743,6 +1761,10 @@ class MainWindow(QMainWindow):
         self._samples_since_spec_update -= k * hop
         # column j ends this many samples before the newest one
         back = self._samples_since_spec_update + hop * np.arange(min(k, self._spec_cols) - 1, -1, -1)
+        # live Despike: the newest `pending` samples are still raw (provisional); the
+        # columns end before them, so a spike fixed later is not kept in a column or in
+        # the FFT's Box over time history (the spectral views run Despike's lag behind)
+        back = back + (self._despiker.pending if self._despiker is not None else 0)
         back = back[back + n <= self._samples_since_clear]          # whole window buffered
         if back.size == 0:
             return

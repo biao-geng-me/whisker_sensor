@@ -169,7 +169,10 @@ class ReplayTransport(Transport):
         """Loop over [t0_s, t1_s) (session seconds); None clears it. Seeks into the
         loop if the playhead is outside."""
         with self._cv:
-            if t0_s is None or t1_s is None or t1_s <= t0_s:
+            if (t0_s is None or t1_s is None or t1_s <= t0_s
+                    or self.index.line_at(t1_s) <= self.index.line_at(t0_s)):
+                # no loop (also over a span with no line in it, e.g. inside a stall gap:
+                # each wrap would seek and serve nothing, a hot loop)
                 self._loop = None
                 self._end_line = self.index.n_lines
             else:

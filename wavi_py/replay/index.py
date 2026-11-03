@@ -406,7 +406,9 @@ class RecordingIndex(TimelineQueries):
         lines, chs, vals = self.spk_line[s0:s1], self.spk_ch[s0:s1], self.spk_val[s0:s1]
         for ln in np.unique(lines):
             a, b = int(self.off[ln]) - base, int(self.off[ln + 1]) - base
-            ev = json.loads(data[a:b])
+            e = data.find(b"\n", a, b)
+            b = b if e < 0 else e + 1          # the line only: lines the index skipped
+            ev = json.loads(data[a:b])         # (no "k", blank) ride in the span after it
             raw = ev["raw"]
             is_int = isinstance(raw[0], int)
             for c, v in zip(chs[lines == ln], vals[lines == ln]):

@@ -205,15 +205,19 @@ class SpectralWindow(ViewWindow):
 
     def _show_levels(self, lo_hi: tuple[float, float] | None = None) -> None:
         """Put the range in use into the min / max boxes (without editing it). A box
-        being typed into is left alone: Auto redraws call this every frame, and would
-        otherwise overwrite the text under the caret."""
+        being typed into (focused, its text no longer what was last put there) is left
+        alone: Auto redraws call this every frame, and would otherwise overwrite the
+        text under the caret. A focused box nobody typed into is still updated (a dB
+        switch with the caret parked there must not leave the other scale's value)."""
         lo, hi = lo_hi if lo_hi is not None else self._levels_saved[self.db]
         for box, v in ((self._lo, lo), (self._hi, hi)):
-            if box.hasFocus() or box.lineEdit().hasFocus():
+            focused = box.hasFocus() or box.lineEdit().hasFocus()
+            if focused and box.text() != box.property("shown_text"):
                 continue
             box.blockSignals(True)
             box.setValue(v)
             box.blockSignals(False)
+            box.setProperty("shown_text", box.text())
 
     def _on_levels_edited(self, _v: float) -> None:
         self._act_auto.setChecked(False)          # typing a range means: use it

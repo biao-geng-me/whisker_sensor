@@ -154,6 +154,10 @@ def test_loop(idx):
     tr.set_loop(None)
     tr.speed = None
     assert drain(tr)[-1]["op"] == "eof"
+    # a loop with no line in it (inside a stall gap): refused, not a hot re-seek loop
+    t_a = float(idx.t_play[idx.line_at(4.0)] - idx.t0)
+    tr.set_loop(t_a + 1e-7, t_a + 2e-7)
+    assert tr._loop is None and tr._end_line == idx.n_lines
 
 
 def test_commands_refused(idx, tmp_path):

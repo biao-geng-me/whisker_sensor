@@ -246,3 +246,44 @@ def test_link_y_a_button_refits(app):
     assert tuple(vb.viewRange()[1]) == pytest.approx(fitted, rel=0.05)
     assert tuple(v._tiles[0].getViewBox().viewRange()[1]) == pytest.approx(fitted, rel=0.05)
     v.close()
+
+
+def test_level_box_follows_db_with_caret_parked(app, sim):
+    """A focused box nobody typed into still shows the range in use: with Auto off,
+    switching dB while the caret sits in the min box must not leave the linear value
+    there (the heatmap reads the boxes)."""
+    _w, views = sim
+    v = views["spec"]
+    v._act_auto.setChecked(False)
+    _pump(app, 0.2)
+    _click_into(app, v, v._lo)
+    db0 = v._act_db.isChecked()
+    v._act_db.setChecked(not db0)
+    _pump(app, 0.2)
+    lo, hi = v._levels_saved[v.db]
+    assert v._lo.value() == pytest.approx(lo, abs=10 ** -v._lo.decimals())
+    assert v._hi.value() == pytest.approx(hi, abs=10 ** -v._hi.decimals())
+    v._act_db.setChecked(db0)
+    v.centralWidget().setFocus()
+    v._act_auto.setChecked(True)
+
+
+def test_spectral_columns_wait_for_despike(app, sim):
+    """Live Despike: the spectrogram / FFT columns end before the provisional
+    (still raw) samples, so a spike fixed later never reaches them."""
+    w, _views = sim
+    assert w._despiker is not None and w._despiker.pending > 0
+    seen = []
+    orig = w._fft_view.update_view
+
+    def spy(fft_map, fs, frames=None, t=None):
+        if t is not None and len(t):
+            seen.append((float(t[-1]), float(w._sig_t[-1])))
+        return orig(fft_map, fs, frames, t)
+    w._fft_view.update_view = spy
+    try:
+        _pump(app, 1.0, lambda: len(seen) > 3)
+    finally:
+        w._fft_view.update_view = orig
+    lag = w._despiker.pending / w._fs
+    assert seen and all(newest - last >= lag - 1.5 / w._fs for last, newest in seen)

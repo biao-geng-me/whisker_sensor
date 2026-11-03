@@ -262,3 +262,32 @@ def test_gui_live_patch_and_record(app, tmp_path):
         w._dat_writer = None
         w._is_recording = False
         w.close()
+
+
+def test_despike_with_skipped_line(tmp_path):
+    """A line the index skips (no "k") right after a spike's scan rides in that scan's
+    byte span; serving it despiked decodes the scan's line only."""
+    p = tmp_path / "skip.jsonl"
+    fx.write_recording(p, spikes=True, truncated=False)
+    i0 = fx.SPIKES[0][0]
+    out = []
+    for line in p.read_bytes().splitlines(keepends=True):
+        out.append(line)
+        if line.startswith(b'{"k":"wsk"') and json.loads(line)["seq"] == 5000 + i0:
+            out.append(b'{"note":"no kind"}\n')
+    p.write_bytes(b"".join(out))
+    idx = RecordingIndex.build(p)
+    tr = ReplayTransport(idx, speed=None, playing=True, preroll_s=0.0, despike=True)
+    try:
+        buf = b""
+        for _ in range(100000):
+            b = tr.read_some(65536)
+            if not b:
+                break
+            buf += b
+    finally:
+        tr.close()
+    assert b'{"note":"no kind"}' in buf                       # passed on as it was
+    dsp = {e["seq"]: e["raw"] for e in map(json.loads, buf.splitlines()) if e.get("k") == "wsk"}
+    for i, c, _ in fx.SPIKES:
+        assert near_sine(dsp[5000 + i][c] * fx.MV, i, c)

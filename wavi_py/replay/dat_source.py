@@ -32,7 +32,7 @@ import numpy as np
 
 DAT_SERVER = "wavi_py-dat"
 N_GAUGES = 32
-CONVERT_VERSION = 1
+CONVERT_VERSION = 2                # 2: rows with "60.000" s no longer end the file
 
 
 def converted_path(dat: Path) -> Path:
@@ -65,6 +65,15 @@ def ensure_jsonl(dat, progress: Optional[Callable[[float], None]] = None) -> Pat
     return out
 
 
+def _stamp(day: bytes, clock: bytes) -> float:
+    """Unix seconds of a .dat row's "YYYY-MM-DD HH:MM:SS.fff". Older writers
+    rounded the seconds, so "60.000" occurs: taken as the next minute."""
+    hms = clock.decode()
+    h, m, sec = hms.split(":")
+    base = datetime.fromisoformat(f"{day.decode()} {h}:{m}:00")
+    return base.timestamp() + float(sec)
+
+
 def read_dat(dat, progress: Optional[Callable[[float], None]] = None
              ) -> tuple[np.ndarray, np.ndarray]:
     """(unix seconds (N,), mV (N, C)) of a ``.dat``; a torn last row is dropped."""
@@ -85,22 +94,28 @@ def read_dat(dat, progress: Optional[Callable[[float], None]] = None
             if len(parts) < 3:
                 continue
             try:
-                stamps.append(datetime.fromisoformat(
-                    (parts[0] + b" " + parts[1]).decode()).timestamp())
+                stamps.append(_stamp(parts[0], parts[1]))
                 rows.append(parts[2:])
             except ValueError:
                 if not stamps:
                     raise NotARecording(f"{dat}: not a wavi .dat (row 1: {line[:60]!r})")
-                break
+                continue                          # one unreadable row: skipped, not the end
     if not rows:
         raise NotARecording(f"{dat}: no rows")
     nch = len(rows[0])
     if nch != N_GAUGES:
         raise NotARecording(f"{dat}: {nch} columns; only the whisker array's {N_GAUGES}-gauge"
                             " .dat can be replayed")
-    n = next((i for i, r in enumerate(rows) if len(r) != nch), len(rows))
-    x = np.array([[float(v) for v in r] for r in rows[:n]], dtype=np.float64)
-    return np.asarray(stamps[:n]), x
+    keep, vals = [], []
+    for i, r in enumerate(rows):                  # a short or garbled row: skipped
+        if len(r) != nch:
+            continue
+        try:
+            vals.append([float(v) for v in r])
+        except ValueError:
+            continue
+        keep.append(i)
+    return np.asarray(stamps)[keep], np.array(vals, dtype=np.float64)
 
 
 def dat_to_jsonl(dat, out, progress: Optional[Callable[[float], None]] = None) -> int:

@@ -49,10 +49,11 @@ def build_datalog_filename(start_time: datetime, tag: str = "") -> str:
 
 
 def _format_dt(t: datetime) -> str:
-    sec = t.second + t.microsecond / 1_000_000.0
+    # milliseconds truncated, not rounded: rounding wrote xx:59.9995+ as "60.000",
+    # which no datetime parser takes
     return (
         f"{t.year:04d}-{t.month:02d}-{t.day:02d} "
-        f"{t.hour:02d}:{t.minute:02d}:{sec:06.3f}"
+        f"{t.hour:02d}:{t.minute:02d}:{t.second:02d}.{t.microsecond // 1000:03d}"
     )
 
 

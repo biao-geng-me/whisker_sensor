@@ -159,6 +159,9 @@ def test_panel_export(tmp_path):
         out = w.export_range(str(tmp_path / "loop.dat"))
         assert out is not None and out.read_text().count("\n") > 400
         assert w.export_range(str(tmp_path / "bad.jsonl"), rng=(6.0, 6.0)) is None and errors
+        n_err, size = len(errors), p.stat().st_size
+        assert w.export_range(str(p)) is None and len(errors) == n_err + 1   # not onto itself
+        assert p.stat().st_size == size
         # the timeline button asks the panel
         called = []
         w.export_range = lambda *a, **k: called.append(1)
@@ -205,7 +208,7 @@ def test_dat_replay(src, tmp_path, monkeypatch):
     assert not idx.from_cache and idx.path.name == "st_x.dat.jsonl"
     assert str(tmp_path / "cache") in str(idx.path)              # not next to the .dat
     assert idx.n_wsk == n and not idx.has_vehicle and idx.n_raw_imu == 0
-    assert abs(idx.fs - fx.FS) < 0.5                             # ms stamps: ~0.1 %
+    assert abs(idx.fs - fx.FS) < 0.75     # count / span: the 5 lost scans alone are 0.5 Hz
     assert abs(idx.unix0 - stamps[0]) < 1e-3 and abs(idx.duration - 10.0) < 0.05
     vals = np.array([[float(v) for v in r[23:].split()] for r in
                      dat.read_text().splitlines()[:int(fx.FS / 4)]])
@@ -251,3 +254,22 @@ def test_real_dat(tmp_path, monkeypatch):
     assert abs(d.fs - j.fs) < 0.5
     # the same zero, within the outlier fill and the few samples' head start
     assert np.allclose(d.v0, j.v0, atol=0.5)
+
+
+def test_dat_second_sixty(tmp_path):
+    """Old writers rounded xx:59.9996 to "60.000": read as the next minute, not the
+    end of the file; a garbled row in the middle is skipped. The writer truncates."""
+    from datetime import datetime as dt
+
+    from wavi_py.io.dat_writer import _format_dt
+    from wavi_py.replay.dat_source import read_dat
+
+    assert _format_dt(dt(2026, 1, 1, 10, 0, 59, 999700)) == "2026-01-01 10:00:59.999"
+    vals = "   1.000000" * 32
+    rows = ["2026-01-01 10:00:59.992", "2026-01-01 10:00:59.996", "2026-01-01 10:00:60.000",
+            "2026-01-01 10:01:00.004", "2026-01-01 10:01:0x.008", "2026-01-01 10:01:00.012"]
+    p = tmp_path / "st_sixty.dat"
+    p.write_text("".join(r + vals + "\n" for r in rows))
+    t, x = read_dat(p)
+    assert len(t) == 5 and x.shape == (5, 32)
+    assert np.allclose(np.diff(t), [0.004, 0.004, 0.004, 0.008], atol=1e-6)

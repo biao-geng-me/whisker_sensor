@@ -109,8 +109,10 @@ def test_spectrogram_columns_follow_the_hop(app):
             n_tot += n
             if mw._samples_since_spec_update >= hop:
                 mw._update_fft_and_spec()
-        # columns only once a whole FFT window (250 samples) was buffered
-        expected = sum(1 for e in range(hop, n_tot + 1, hop) if e >= mw._n_fft_window)
+        # columns only once a whole FFT window (250 samples) was buffered, and (live
+        # Despike) ending before the provisional samples
+        lag = mw._despiker.pending if mw._despiker is not None else 0
+        expected = sum(1 for e in range(hop, n_tot + 1, hop) if e >= mw._n_fft_window + lag)
         assert mw._spec_hist.version - version == pytest.approx(expected, abs=1)
         f = np.fft.rfftfreq(mw._n_fft_window, 1 / fs)
         assert f[np.argmax(mw._fft_map[:, 0])] == pytest.approx(20.0)
