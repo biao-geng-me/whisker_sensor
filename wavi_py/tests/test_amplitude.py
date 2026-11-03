@@ -51,6 +51,7 @@ def line_data(amps):
 def line(app):
     v = LineView(NS, NCH, t_buffer_s=2.0)
     v.show()
+    v._act_link_y.setChecked(False)          # per-tile Y (Link Y is on by default)
     t, sig, v0 = line_data(1.0 + np.arange(NCH))           # 1..8 mV
     v.set_value_format("mV", None)
     v.update_view(t, sig, v0, 1.0, x_range=(0.0, t[-1]))
@@ -133,6 +134,7 @@ def test_line_typing_into_the_box_is_not_a_zoom_key(line):
 def spectrum(app):
     v = SpectrumView(NS, NCH)
     v.show()
+    v._act_link_y.setChecked(False)          # per-tile Y (Link Y is on by default)
     f = np.linspace(0, FS / 2, 51)
     amp = np.full((51, NCH), 1e-3)
     amp[10] = 0.5 * (1 + np.arange(NCH))                     # peaks 0.5..4
@@ -206,6 +208,7 @@ def test_fft_lower_plot_follows_the_colour_range(fft):
     assert yrange(lp) == pytest.approx((0, 10))
     fft._act_db.setChecked(True)                              # dB has its own fixed range
     assert yrange(lp) == pytest.approx((-60, 20))
+    fft._mode.setCurrentIndex(0)                              # Peak bars (not the default)
     bars = fft._boxes.opts
     assert np.all(np.asarray(bars["y0"]) == -60)              # peak bars rise from the min
     fft._act_auto.setChecked(True)

@@ -4,7 +4,7 @@ Each sensor uses two channels, gauge A then gauge B (red / blue, with a legend).
 Three pages:
 
 - Grid (the default): one tile per sensor (4x4 for 16 whiskers), X linked,
-  Y per tile unless Link Y gives all tiles one Y range.
+  and Y linked too (Link Y, on by default: all tiles one Y range; off: Y per tile).
 - Stacked: one axis, the two channels of sensor ``i`` drawn around Y-offset
   ``i``; the Y keys change a trace gain instead of the axis range.
 - Single: one sensor filling the window. Double-click a tile (grid) or near a
@@ -429,9 +429,10 @@ class WhiskerPlotsView(ViewWindow):
 
         for p in self._all_plots():
             p.getViewBox().sigRangeChangedManually.connect(self._on_manual_range)
-            p.getViewBox().on_auto = self._request_render
+            p.getViewBox().on_auto = lambda p=p: self._on_plot_auto(p)
 
         self._build_toolbar()
+        self._act_link_y.setChecked(True)          # Link Y on by default (kept across layouts)
         self._stream_status = _ElidedLabel()
         self._stream_status.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.statusBar().addPermanentWidget(self._stream_status)
@@ -824,6 +825,15 @@ class WhiskerPlotsView(ViewWindow):
                 shift(p, False, True)
         if dx:
             self._on_manual_range()
+
+    def _on_plot_auto(self, p: pg.PlotItem) -> None:
+        """A plot's auto-range was turned on (its A button, Reset view): fit again. A
+        Link Y grid tile hands Y to the window's one fit over all tiles instead of
+        pyqtgraph's per-tile auto (which the linked tiles would fight over)."""
+        if p in self._tiles and self._act_link_y.isChecked() and not self.fixed_y:
+            self._link_auto = True
+            p.disableAutoRange(axis="y")
+        self._request_render()
 
     def _on_link_y(self, on: bool) -> None:
         for p in self._tiles[1:]:

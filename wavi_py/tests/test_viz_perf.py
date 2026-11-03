@@ -208,6 +208,7 @@ def line(app):
     v = LineView(NS, NCH, t_buffer_s=2.0)
     v.resize(800, 600)
     v.show()
+    v._act_link_y.setChecked(False)          # per-tile Y (Link Y is on by default)
     t = np.arange(int(2 * FS)) / FS
     amps = 1.0 + np.arange(NCH)
     sig = (250 + amps[None, :] * np.sin(2 * np.pi * 2 * t)[:, None]).astype(np.float32)
