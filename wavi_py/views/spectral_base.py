@@ -42,6 +42,37 @@ def to_db(a: np.ndarray) -> np.ndarray:
         return np.where(a > 0, np.maximum(20 * np.log10(a), DB_FLOOR), np.nan)
 
 
+def auto_levels(v: np.ndarray, db: bool, fallback: tuple[float, float]) -> tuple[float, float]:
+    """The auto colour range of values ``v`` (in dB if ``db``): their 1st to 99.5th
+    percentile, from at most ``_LEVEL_SAMPLES`` of them; ``fallback`` if none is finite."""
+    v = np.asarray(v).ravel()
+    if v.size > _LEVEL_SAMPLES:
+        v = v[np.linspace(0, v.size - 1, _LEVEL_SAMPLES).astype(np.intp)]
+    finite = v[np.isfinite(v)]
+    if finite.size == 0:
+        return fallback
+    lo, hi = np.percentile(finite, (1, 99.5))
+    if hi <= lo:
+        hi = lo + (1.0 if db else 1e-3)
+    return float(lo), float(hi)
+
+
+def show_level_boxes(boxes, lo_hi: tuple[float, float]) -> None:
+    """Put the range in use into the min / max ``boxes`` (without emitting). A box
+    being typed into (focused, its text no longer what was last put there) is left
+    alone: Auto redraws call this every frame, and would otherwise overwrite the
+    text under the caret. A focused box nobody typed into is still updated (a dB
+    switch with the caret parked there must not leave the other scale's value)."""
+    for box, v in zip(boxes, lo_hi):
+        focused = box.hasFocus() or box.lineEdit().hasFocus()
+        if focused and box.text() != box.property("shown_text"):
+            continue
+        box.blockSignals(True)
+        box.setValue(v)
+        box.blockSignals(False)
+        box.setProperty("shown_text", box.text())
+
+
 class SpectralWindow(ViewWindow):
     pauseToggled = pyqtSignal(bool)
     fftWindowChanged = pyqtSignal(float)
@@ -192,32 +223,12 @@ class SpectralWindow(ViewWindow):
         """Colour range for values ``v`` (already in dB if dB is on)."""
         if not self._act_auto.isChecked():
             return self._lo.value(), self._hi.value()
-        v = v.ravel()
-        if v.size > _LEVEL_SAMPLES:
-            v = v[np.linspace(0, v.size - 1, _LEVEL_SAMPLES).astype(np.intp)]
-        finite = v[np.isfinite(v)]
-        if finite.size == 0:
-            return self._levels_saved[self.db]
-        lo, hi = np.percentile(finite, (1, 99.5))
-        if hi <= lo:
-            hi = lo + (1.0 if self.db else 1e-3)
-        return float(lo), float(hi)
+        return auto_levels(v, self.db, self._levels_saved[self.db])
 
     def _show_levels(self, lo_hi: tuple[float, float] | None = None) -> None:
-        """Put the range in use into the min / max boxes (without editing it). A box
-        being typed into (focused, its text no longer what was last put there) is left
-        alone: Auto redraws call this every frame, and would otherwise overwrite the
-        text under the caret. A focused box nobody typed into is still updated (a dB
-        switch with the caret parked there must not leave the other scale's value)."""
-        lo, hi = lo_hi if lo_hi is not None else self._levels_saved[self.db]
-        for box, v in ((self._lo, lo), (self._hi, hi)):
-            focused = box.hasFocus() or box.lineEdit().hasFocus()
-            if focused and box.text() != box.property("shown_text"):
-                continue
-            box.blockSignals(True)
-            box.setValue(v)
-            box.blockSignals(False)
-            box.setProperty("shown_text", box.text())
+        """Put the range in use into the min / max boxes (``show_level_boxes``)."""
+        show_level_boxes((self._lo, self._hi),
+                         lo_hi if lo_hi is not None else self._levels_saved[self.db])
 
     def _on_levels_edited(self, _v: float) -> None:
         self._act_auto.setChecked(False)          # typing a range means: use it

@@ -10,19 +10,10 @@ A side panel with two lists shared by the tabs:
   depth). Also this window's own.
 
 Tabs read one ``daq/analysis.Dataset`` (the included selections x the checked
-variables, with the panel's Despike / V0 / scale), made per redraw:
-
-- Compare: stacked rows, one per unit group (mV, mg, mrad/s, deg, cm: the IMU
-  window's units), X linked; X is the time from each selection's start, so the
-  selections overlay at t = 0. Colour is the selection (its region's colour), and
-  the variables in a row are told apart by the shade of it, dark to light in the
-  order they are listed (``shade_levels``). The legends: each row's variables in
-  their shade (grey), the top row's also the selections in their colour. The curves are min / max
-  decimated to the plot's width (``Dataset.traces``), from the store's pyramid in
-  replay, so a long selection redraws as cheaply as a short one. X follows the
-  longest selection and Y fits the data until a mouse zoom; R (Reset view) goes
-  back to that.
-- Spectrum, Spectrogram: phase C2 (empty tabs here).
+variables, with the panel's Despike / V0 / scale and this window's Compare
+sub-range), made per redraw; they are in ``views/analysis_tabs.py`` (Compare,
+Spectrum, Spectrogram). Only the shown tab is drawn. Toolbar: Select (S, in
+Compare: a drag makes the sub-range), Clear sub-range (Esc), Reset view (R).
 
 Several Analysis windows may be open, each with its own included selections,
 variables and tab (the control panel keeps them; the newest focused one takes a
@@ -40,152 +31,25 @@ from typing import Callable, Optional, Sequence
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QAction, QColor, QIcon, QKeySequence, QPixmap
 from PyQt6.QtWidgets import (QAbstractSpinBox, QDoubleSpinBox, QHeaderView, QLabel, QSplitter,
-                             QStackedWidget, QTabWidget, QToolBar, QToolButton, QTreeWidget,
+                             QTabWidget, QToolBar, QToolButton, QTreeWidget,
                              QTreeWidgetItem, QVBoxLayout, QWidget)
 
-import pyqtgraph as pg
 
-from wavi_py.daq.analysis import DEPTH, UNIT_GROUPS, Dataset, Selection, Variable
+from wavi_py.daq.analysis import DEPTH, Dataset, Selection, Variable
 from wavi_py.daq.series import IMU, WSK
+from wavi_py.views.analysis_tabs import CompareTab, SpectrogramTab, SpectrumTab, shades_of
 from wavi_py.views.base import ViewWindow
-from wavi_py.views.render_sched import GraphicsLayoutWidget, scheduler
+from wavi_py.views.render_sched import scheduler
 from wavi_py.views.selections import SelectionModel, sel_color
-from wavi_py.views.whisker_plots import _show_grid
 
-# a row's variables: HSL lightness of the selection's colour, dark to light (one
-# variable keeps the colour itself); the light end stays readable as a 1 px line on white
-_L_DARK, _L_LIGHT = 0.18, 0.66
 TABS = ("Compare", "Spectrum", "Spectrogram")
 _KEY = Qt.ItemDataRole.UserRole
-
-
-def shade_levels(n: int) -> list[Optional[float]]:
-    """Lightness of each of ``n`` variables in a row (None: the colour as it is)."""
-    if n <= 1:
-        return [None] * n
-    return [_L_DARK + (_L_LIGHT - _L_DARK) * i / (n - 1) for i in range(n)]
-
-
-def shade(color: QColor, lightness: Optional[float]) -> QColor:
-    """``color`` at HSL ``lightness`` (hue and saturation kept)."""
-    if lightness is None:
-        return QColor(color)
-    h, s_, _l, _a = color.getHslF()
-    return QColor.fromHslF(max(h, 0.0), s_, lightness)
 
 
 def _swatch(color: QColor) -> QIcon:
     pm = QPixmap(12, 12)
     pm.fill(color)
     return QIcon(pm)
-
-
-class CompareTab(QWidget):
-    """Stacked rows by unit, relative time (see the module doc)."""
-
-    def __init__(self, parent: Optional[QWidget] = None):
-        super().__init__(parent)
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        self._pages = QStackedWidget()
-        lay.addWidget(self._pages)
-        self._hint = QLabel()
-        self._hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._hint.setWordWrap(True)
-        self.glw = GraphicsLayoutWidget()
-        self.glw.setBackground("w")
-        self._pages.addWidget(self._hint)
-        self._pages.addWidget(self.glw)
-        self.rows: dict[str, pg.PlotItem] = {}           # unit -> plot
-        self.curves: dict[tuple, pg.PlotCurveItem] = {}  # (selection number, var key) -> curve
-        self._legend_key: tuple = ()
-        self._auto = True                                # X follows the longest selection
-
-    def reset_view(self) -> None:
-        self._auto = True
-        for p in self.rows.values():
-            p.enableAutoRange(y=True)
-
-    def _rebuild_rows(self, units: list[str]) -> None:
-        self.glw.clear()
-        self.rows, self.curves, self._legend_key = {}, {}, ()
-        first = None
-        for i, u in enumerate(units):
-            p = self.glw.addPlot(row=i, col=0)
-            p.setLabel("left", u)
-            _show_grid(p)
-            p.getAxis("left").enableAutoSIPrefix(False)
-            p.getAxis("left").setWidth(56)                # the rows' plots line up
-            p.setMenuEnabled(False)
-            if first is None:
-                first = p
-            else:
-                p.setXLink(first)
-            p.getViewBox().sigRangeChangedManually.connect(self._on_manual)
-            self.rows[u] = p
-        if units:
-            self.rows[units[-1]].setLabel("bottom", "Time from the selection's start", units="s")
-
-    def _on_manual(self, *_a) -> None:
-        self._auto = False
-
-    def show_hint(self, text: str) -> None:
-        self._hint.setText(text)
-        self._pages.setCurrentIndex(0)
-
-    def render(self, ds: Dataset, shades: dict) -> None:
-        """``shades``: the lightness of each variable (``shade_levels`` per row)."""
-        units = [u for u in UNIT_GROUPS if any(v.unit == u for v in ds.variables)]
-        if units != list(self.rows):
-            self._rebuild_rows(units)
-        self._pages.setCurrentIndex(1)
-        first = self.rows[units[0]]
-        n_px = max(50, int(first.getViewBox().width()) or 600)
-        seen = set()
-        for tr in ds.traces(n_px):
-            key = (tr.sel.number, tr.var.key)
-            seen.add(key)
-            c = self.curves.get(key)
-            if c is None:
-                c = pg.PlotCurveItem()
-                c.unit, c.look = tr.var.unit, None
-                self.rows[tr.var.unit].addItem(c)
-                self.curves[key] = c
-            look = (tr.sel.number, shades[tr.var.key])
-            if c.look != look:                  # the shade follows the checked order
-                c.setPen(pg.mkPen(shade(sel_color(look[0]), look[1]), width=1))
-                c.look = look
-            c.setData(tr.t, tr.y)
-        for key in [k for k in self.curves if k not in seen]:
-            c = self.curves.pop(key)
-            self.rows[c.unit].removeItem(c)
-        self._legends(ds, shades, units)
-        if self._auto:
-            longest = max((s.duration for s in ds.selections), default=0.0)
-            if longest > 0:
-                first.setXRange(0.0, longest, padding=0.01)
-        self.glw.scene().prepareForPaint()
-
-    def _legends(self, ds: Dataset, shades: dict, units: list[str]) -> None:
-        key = (tuple(v.key for v in ds.variables),
-               tuple((s.number, round(s.t0, 2), round(s.t1, 2)) for s in ds.selections))
-        if key == self._legend_key:
-            return
-        self._legend_key = key
-        for i, u in enumerate(units):
-            p = self.rows[u]
-            if p.legend is None:
-                p.addLegend(offset=(-10, 5), labelTextColor="k",
-                            brush=pg.mkBrush(255, 255, 255, 210), pen=pg.mkPen(180, 180, 180))
-            p.legend.clear()
-            for v in ds.variables:
-                if v.unit == u:
-                    grey = shade(QColor(128, 128, 128), shades[v.key])
-                    p.legend.addItem(pg.PlotDataItem(pen=pg.mkPen(grey, width=3)), v.label)
-            if i == 0:
-                for s in ds.selections:
-                    p.legend.addItem(pg.PlotDataItem(pen=pg.mkPen(sel_color(s.number), width=3)),
-                                     f"#{s.number}  {s.t0:.2f} .. {s.t1:.2f} s")
 
 
 class AnalysisWindow(ViewWindow):
@@ -211,11 +75,27 @@ class AnalysisWindow(ViewWindow):
         tb = QToolBar("Analysis")
         tb.setMovable(False)
         self.addToolBar(tb)
+        self._act_select = QAction("Select", self, checkable=True)
+        self._act_select.setShortcut(QKeySequence("S"))
+        self._act_select.setToolTip("Compare: drag to make a sub-range (seconds from each"
+                                    " selection's start); Spectrum and Spectrogram use it [S]")
+        self._act_select.toggled.connect(lambda on: self.statusBar().showMessage(
+            "Select: drag in Compare for a sub-range (Esc clears it)") if on
+            else self.statusBar().clearMessage())
+        self._act_clear_sub = QAction("Clear sub-range", self)
+        self._act_clear_sub.setShortcut(QKeySequence(Qt.Key.Key_Escape))
+        self._act_clear_sub.setToolTip("Back to the whole selections [Esc]")
+        self._act_clear_sub.setEnabled(False)
+        self._act_clear_sub.triggered.connect(lambda: self.set_sub(None))
         self._act_reset = QAction("Reset view", self)
         self._act_reset.setShortcut(QKeySequence("R"))
-        self._act_reset.setToolTip("X: the longest selection, Y: fit the data [R]")
+        self._act_reset.setToolTip("Fit the data (Compare: X the longest selection) [R]")
         self._act_reset.triggered.connect(self._reset_view)
-        tb.addAction(self._act_reset)
+        for a in (self._act_select, self._act_clear_sub, self._act_reset):
+            tb.addAction(a)
+            w = tb.widgetForAction(a)
+            if w is not None:
+                w.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
         # side panel
         side = QWidget()
@@ -241,13 +121,16 @@ class AnalysisWindow(ViewWindow):
         sl.addWidget(self.var_tree, 2)
 
         self.tabs = QTabWidget()
-        self.compare = CompareTab()
-        self.tabs.addTab(self.compare, "Compare")
-        for name in TABS[1:]:
-            lab = QLabel(f"{name}: coming in phase C2.")
-            lab.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.tabs.addTab(lab, name)
-        self.tabs.currentChanged.connect(lambda _i: self._request())
+        self.compare = CompareTab(lambda: self._act_select.isChecked())
+        self.spectrum = SpectrumTab()
+        self.spectrogram = SpectrogramTab()
+        for tab, name in zip((self.compare, self.spectrum, self.spectrogram), TABS):
+            self.tabs.addTab(tab, name)
+        self.compare.subChanged.connect(self.set_sub)
+        for tab in (self.spectrum, self.spectrogram):
+            tab.changed.connect(self._request)
+        self.tabs.currentChanged.connect(self._on_tab)
+        self.sub: Optional[tuple] = None              # the Compare sub-range (relative)
 
         split = QSplitter()
         split.addWidget(side)
@@ -302,14 +185,35 @@ class AnalysisWindow(ViewWindow):
         self._included = []
         self.set_checked([v.key for v in self._vars], False)
         self.set_tab("Compare")
-        self.compare.reset_view()
+        self.set_sub(None)
+        for tab in (self.compare, self.spectrum, self.spectrogram):
+            tab.reset_view()
         self._lists_dirty = True
 
     def dataset(self) -> Dataset:
         keys = set(self.checked_keys())
         m = self.model
         return Dataset(self.included, [v for v in self._vars if v.key in keys],
-                       despike=m.despike, v0=m.v0, scale=m.scale)
+                       despike=m.despike, v0=m.v0, scale=m.scale, sub=self.sub)
+
+    def set_sub(self, sub) -> None:
+        """The Compare sub-range (a, b) in seconds from each selection's start, or None:
+        Spectrum and Spectrogram use that part of every included selection."""
+        self.compare.set_sub(sub)
+        sub = self.compare.sub                     # normalised (sorted, >= 0, or None)
+        if sub == self.sub:
+            return
+        self.sub = sub
+        self._act_clear_sub.setEnabled(sub is not None)
+        for tab in (self.spectrum, self.spectrogram):
+            tab.set_sub_text(sub)
+        self._request()
+
+    def _on_tab(self, i: int) -> None:
+        self._act_select.setEnabled(i == 0)        # the sub-range is made in Compare
+        if i != 0:
+            self._act_select.setChecked(False)
+        self._request()
 
     # ----- variables tree
 
@@ -464,33 +368,28 @@ class AnalysisWindow(ViewWindow):
         scheduler().request(self)
 
     def _reset_view(self) -> None:
-        self.compare.reset_view()
+        self.tabs.currentWidget().reset_view()
         self._request()
-
-    @staticmethod
-    def _shades(ds: Dataset) -> dict:
-        """Each variable's lightness: dark to light within its row, in the listed order."""
-        out = {}
-        for u in UNIT_GROUPS:
-            vs = [v for v in ds.variables if v.unit == u]
-            out.update(zip((v.key for v in vs), shade_levels(len(vs))))
-        return out
 
     def _render(self) -> None:
         scheduler().done(self)
         if not self.isVisible():
             return
-        if self.tabs.currentIndex() != 0:
-            return                                  # C2's tabs
+        tab = self.tabs.currentWidget()              # only the shown tab is drawn
         ds = self.dataset()
         if not ds.selections or not ds.variables:
-            self.compare.show_hint(
+            tab.show_hint(
                 "No selections here yet: in the Line or IMU window, turn on Select (S), drag "
                 "over a time span, then right-click it → Compare." if not len(self.model) else
                 "Include a selection (its box on the left)." if not ds.selections else
                 "Check variables on the left (whiskers, IMU, depth).")
+            if tab is not self.compare:
+                tab._last = None                     # redraw when there is something again
             return
-        self.compare.render(ds, self._shades(ds))
+        if tab is self.spectrogram:
+            tab.render(ds)
+        else:
+            tab.render(ds, shades_of(ds))
 
     def showEvent(self, event) -> None:  # noqa: N802 — Qt naming
         super().showEvent(event)

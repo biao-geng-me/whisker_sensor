@@ -108,8 +108,8 @@ from wavi_py.views.analysis_window import AnalysisWindow
 from wavi_py.views.base import (REC_FOREIGN, REC_OFF, REC_ON, REC_PENDING, ViewWindow,
                                 add_timeline_dock, alarm_label, bring_to_front, show_alarm)
 from wavi_py.views.fault_log import FaultLogView
-from wavi_py.views.selections import (COMPARE, NEW_WINDOW, SelectionModel, SelectionOverlay,
-                                      attach_select)
+from wavi_py.views.selections import (COMPARE, NEW_WINDOW, SPECTROGRAM, SPECTRUM, SelectionModel,
+                                      SelectionOverlay, attach_select)
 from wavi_py.views.replay_bar import FINE_STEP_S, STEP_S, ReplayModel, TimelineBar, fmt_t
 from wavi_py.views.sim_panel import SimPanel
 from wavi_py.views.spectral_base import FFT_WINDOWS_S
@@ -1349,17 +1349,18 @@ class MainWindow(QMainWindow):
             self._analysis.append(win)
 
     def _on_selection_request(self, action: str, sel, keys: list) -> None:
-        """A region's menu: Compare in the newest focused Analysis window (a new one
-        if none is open), or a new window; C2 adds Spectrum / Spectrogram."""
-        if action == NEW_WINDOW or (action == COMPARE and not self._analysis):
-            self.new_analysis_window(sel, keys)
-            return
-        if action == COMPARE:
+        """A region's menu: Compare / Spectrum / Spectrogram in the newest focused
+        Analysis window (a new one if none is open), on that tab; or a new window."""
+        tab = {COMPARE: "Compare", SPECTRUM: "Spectrum", SPECTROGRAM: "Spectrogram"}.get(action)
+        if action == NEW_WINDOW or not self._analysis:
+            win = self.new_analysis_window(sel, keys)
+        else:
             win = self._analysis[-1]
             win.include(sel)
             win.set_checked(keys)
-            win.set_tab("Compare")
             bring_to_front(win)
+        if tab is not None:
+            win.set_tab(tab)
 
     def _push_rec_state(self) -> None:
         """Show the Rec state in every view window's indicator (from here only: the

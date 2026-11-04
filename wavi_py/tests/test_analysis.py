@@ -316,7 +316,7 @@ def test_two_analysis_windows(app, win):
 
 def test_shade_levels():
     from PyQt6.QtGui import QColor
-    from wavi_py.views.analysis_window import shade, shade_levels
+    from wavi_py.views.analysis_tabs import shade, shade_levels
     assert shade_levels(1) == [None] and shade_levels(0) == []
     lv = shade_levels(4)
     assert lv[0] < lv[1] < lv[2] < lv[3] and lv[-1] - lv[0] > 0.4

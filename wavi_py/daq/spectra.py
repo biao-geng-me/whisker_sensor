@@ -3,6 +3,10 @@
 ``amp_spectra`` is the one method all spectral windows use: mean removed, Hann
 window, scaled so a sine of amplitude a reads a. It takes a stack of windows,
 so the spectrogram columns that fell due in one GUI tick are one rfft call.
+The Analysis window's Spectrum also offers a rectangular window and a linear
+detrend or none (``window`` / ``detrend``); the scaling is the same for any
+window (2 / the window's sum, the DC and Nyquist bins not doubled), so a sine
+still reads its amplitude.
 
 ``SpecHistory`` keeps the spectrogram columns in a ring (no shifting of the
 whole history per column); a dB copy is kept alongside, converted one column
@@ -20,7 +24,26 @@ from wavi_py.views.spectral_base import to_db
 SPEC_COL_HZ = 20.0              # spectrogram columns: at most this many a second
 
 
-def amp_spectra(x: np.ndarray, scale: float = 1.0) -> np.ndarray:
+WINDOWS = ("hann", "rect")
+DETRENDS = ("mean", "linear", "none")
+
+
+def _detrend(x: np.ndarray, how: str) -> np.ndarray:
+    """``x`` (..., n, nch) minus its mean, or its least-squares line, or as it is."""
+    if how == "none":
+        return x
+    x = x - x.mean(axis=-2, keepdims=True)
+    if how == "linear":
+        n = x.shape[-2]
+        u = np.arange(n, dtype=np.float64) - (n - 1) / 2         # centred: mean 0
+        den = float(u @ u) or 1.0
+        slope = np.einsum("n,...nc->...c", u, x) / den
+        x = x - u[:, None] * slope[..., None, :]
+    return x
+
+
+def amp_spectra(x: np.ndarray, scale: float = 1.0, window: str = "hann",
+                detrend: str = "mean") -> np.ndarray:
     """(..., nfreq, nch) amplitude of the windows ``x`` (..., n, nch); see the module doc.
 
     Windows with gaps (non-finite samples) come out all zero.
@@ -31,11 +54,11 @@ def amp_spectra(x: np.ndarray, scale: float = 1.0) -> np.ndarray:
     n = x.shape[-2]
     finite = np.isfinite(x).all(axis=(-2, -1))
     x = np.where(finite[..., None, None], x, 0.0)
-    w = np.hanning(n)
-    # Mean removal, not a linear detrend: with a 1 s window a 1 Hz sine is one cycle,
-    # and a line fitted to one cycle takes ~45 % of its amplitude (5 mV read as 2.7).
-    # Slow drift is kept out of the higher bins by the Hann window.
-    x = (x - x.mean(axis=-2, keepdims=True)) * w[:, None]
+    w = np.hanning(n) if window == "hann" else np.ones(n)
+    # Mean removal by default, not a linear detrend: with a 1 s window a 1 Hz sine is
+    # one cycle, and a line fitted to one cycle takes ~45 % of its amplitude (5 mV read
+    # as 2.7). Slow drift is kept out of the higher bins by the Hann window.
+    x = _detrend(x, detrend) * w[:, None]
     amp = np.abs(np.fft.rfft(x, axis=-2))
     amp *= 2 * scale / w.sum()
     amp[..., 0, :] /= 2

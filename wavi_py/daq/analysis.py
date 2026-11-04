@@ -20,8 +20,18 @@ one Analysis window, with the panel's Despike / V0 / scale. ``traces(n)`` is
 Compare's: the time relative to each selection's start, min / max decimated to
 ``n`` pixel columns over the longest selection (``Series.envelope``: one call per
 source per selection, from the store's pyramid in replay), so a long selection
-costs about what a short one does. ``samples(sel, var)`` is every sample, for
-the spectra.
+costs about what a short one does. ``samples(sel, var)`` is every sample.
+
+The spectra read the dataset's ``span(sel)``: the whole selection, or with a
+Compare sub-range ``sub = (a, b)`` (seconds from each selection's start)
+[t0 + a, t0 + b] clipped to the selection, None when it is shorter than a.
+``spectrum`` is the amplitude spectrum of every sample of the span (the method
+of ``daq/spectra.amp_spectra``: a sine of amplitude a reads a), at the span's
+own mean sample rate, so selections of different lengths each have their own
+frequency resolution (1 / length); IMU rows come a little unevenly and are
+taken as evenly spaced at that rate. ``spectrogram`` is the same on segments
+of ``seg_s`` overlapping by ``overlap`` (Hann, mean removed, as the Spec
+window), timed at their centres from the selection's start.
 """
 
 from __future__ import annotations
@@ -168,7 +178,16 @@ class Dataset:
     despike: bool = False
     v0: Optional[np.ndarray] = None     # per gauge column, raw mV
     scale: float = 1.0
+    sub: Optional[tuple] = None         # the Compare sub-range (a, b), relative
     _names: dict = field(default_factory=dict, repr=False)
+
+    def span(self, sel: Selection) -> Optional[tuple[float, float]]:
+        """The part of ``sel`` the spectra use (see the module doc)."""
+        if self.sub is None:
+            return sel.t0, sel.t1
+        a, b = self.sub
+        lo, hi = sel.t0 + max(0.0, a), min(sel.t1, sel.t0 + b)
+        return (lo, hi) if hi > lo else None
 
     def pairs(self) -> list[tuple[Selection, Variable]]:
         return [(s, v) for s in self.selections for v in self.variables]
@@ -214,17 +233,59 @@ class Dataset:
                     out.append(Trace(sel, v, t - sel.t0, y[:, 0]))
         return out
 
-    def samples(self, sel: Selection, var: Variable) -> tuple[np.ndarray, np.ndarray]:
-        """Every sample of ``var`` in ``sel`` (absolute time, ``var.unit``); empty if
-        the selection's source has none."""
+    def samples(self, sel: Selection, var: Variable,
+                span: Optional[tuple[float, float]] = None) -> tuple[np.ndarray, np.ndarray]:
+        """Every sample of ``var`` in ``sel`` (or in ``span``, absolute; absolute
+        time, ``var.unit``); empty if the selection's source has none."""
+        t0, t1 = span if span is not None else (sel.t0, sel.t1)
         if var.source == DEPTH:
             dt, dd = sel.source.depth
-            i0, i1 = span_index(dt, sel.t0, sel.t1)
+            i0, i1 = span_index(dt, t0, t1)
             return np.array(dt[i0:i1]), np.asarray(dd[i0:i1], dtype=float)
         ser = sel.source.series
         names = ser.names(var.source)
         if var.col >= len(names):
             return np.empty(0), np.empty(0)
         name = names[var.col]
-        t, y = ser.channels([name], sel.t0, sel.t1, self.despike and var.source == WSK)[name]
+        t, y = ser.channels([name], t0, t1, self.despike and var.source == WSK)[name]
         return t, self._convert(var, y)
+
+    def _span_samples(self, sel: Selection, var: Variable, n_min: int):
+        sp = self.span(sel)
+        if sp is None:
+            return None
+        t, y = self.samples(sel, var, sp)
+        if len(t) < n_min or t[-1] <= t[0]:
+            return None
+        return t, y, (len(t) - 1) / (t[-1] - t[0])
+
+    def spectrum(self, sel: Selection, var: Variable, window: str = "hann",
+                 detrend: str = "mean") -> Optional[tuple[np.ndarray, np.ndarray]]:
+        """(f Hz, amplitude in ``var.unit``) of the span (see the module doc); None if
+        it holds fewer than 8 samples."""
+        from wavi_py.daq.spectra import amp_spectra
+        got = self._span_samples(sel, var, 8)
+        if got is None:
+            return None
+        t, y, fs = got
+        amp = amp_spectra(y[:, None], 1.0, window, detrend)[:, 0]
+        return np.fft.rfftfreq(len(t), 1.0 / fs), amp
+
+    def spectrogram(self, sel: Selection, var: Variable, seg_s: float = 1.0,
+                    overlap: float = 0.75) -> Optional[tuple[np.ndarray, np.ndarray, np.ndarray]]:
+        """(segment centres s from the selection's start, f Hz, amplitude (segments,
+        nfreq)); None if the span is shorter than one segment."""
+        from wavi_py.daq.spectra import amp_spectra
+        got = self._span_samples(sel, var, 8)
+        if got is None:
+            return None
+        t, y, fs = got
+        m = max(8, int(round(seg_s * fs)))
+        if len(t) < m:
+            return None
+        hop = max(1, int(round(m * (1.0 - overlap))))
+        segs = np.lib.stride_tricks.sliding_window_view(y, m)[::hop]
+        amp = amp_spectra(segs[..., None], 1.0)[..., 0]
+        starts = np.arange(len(segs)) * hop
+        centres = 0.5 * (t[starts] + t[starts + m - 1]) - sel.t0
+        return centres, np.fft.rfftfreq(m, 1.0 / fs), amp

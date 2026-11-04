@@ -232,8 +232,8 @@ class SelectionOverlay(QObject):
         m.addSeparator()
         for action, text, tip, enabled in (
                 (COMPARE, "Compare", "Show it in the Analysis window (the newest focused)", True),
-                (SPECTRUM, "Spectrum", "Not yet (phase C2)", False),
-                (SPECTROGRAM, "Spectrogram", "Not yet (phase C2)", False),
+                (SPECTRUM, "Spectrum", "Its amplitude spectrum in the Analysis window", True),
+                (SPECTROGRAM, "Spectrogram", "Its spectrogram in the Analysis window", True),
                 (NEW_WINDOW, "New analysis window", "Compare it in a new Analysis window", True)):
             a = m.addAction(text)
             a.setToolTip(tip)
