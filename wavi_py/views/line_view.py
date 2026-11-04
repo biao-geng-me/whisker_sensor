@@ -362,9 +362,10 @@ class LineView(WhiskerPlotsView):
         if self._store is not None:              # replay: the store has it all; V0 / scale only
             self._request_render()
             return
-        # live, the caller's buffer itself (a view: it is shifted in place by the tick
-        # that calls this next, so it always holds what was last pushed; no 90 s copy per
-        # tick); paused, a copy, as the buffer keeps moving under a paused window
+        # live, the caller's buffer itself (a view of the ring's window, daq/ring.py: no
+        # 90 s copy per tick; it stays valid until the ring next moves, and every tick
+        # that moves it pushes the new view here); paused, a copy, as the ring keeps
+        # moving (and compacting) under a paused window
         if self._paused:
             self._t = np.array(t_seconds, dtype=float)
             self._sig = np.array(sig, dtype=np.float32)
