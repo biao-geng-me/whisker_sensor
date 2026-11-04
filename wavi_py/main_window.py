@@ -345,6 +345,9 @@ class MainWindow(QMainWindow):
         # the IMU window follows the Line window's time range (and drives it)
         self._line_view.timeWindowChanged.connect(self._on_line_time_window)
         self._line_view.closed.connect(lambda: self._imu_view.set_time_window(None))
+        # ... and every timeline shows it (the view-span band), while the window is open
+        self._line_view.shownChanged.connect(lambda on: self._replay.set_view_span(
+            self._line_view.time_window() if on else None))
         self._imu_view.timeWindowChanged.connect(self._line_view.set_time_window)
         # replay: playback state drives the Pause buttons
         self._replay.stateChanged.connect(self._on_replay_state)
@@ -1665,6 +1668,7 @@ class MainWindow(QMainWindow):
         """The Line window's visible time range: the IMU window follows it."""
         if self._line_view.isVisible():
             self._imu_view.set_time_window((x0, x1))
+            self._replay.set_view_span((x0, x1))
 
     def _on_replay_state(self, state: str) -> None:
         """Playback started / stopped (any control, or the end): the Pause buttons."""
