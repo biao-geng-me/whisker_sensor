@@ -101,8 +101,17 @@ def test_open_play_seek(app, win):
     assert abs(x0 - w._store.extent(WSK)[0]) < 0.01 and abs(x1 - w._store.extent(WSK)[1]) < 0.01
     status = lv._stream_status.text()
     assert status.startswith("REPLAY 4x"), status
-    # the IMU window: its own times, on the same axis
-    assert len(w._imu_t) > 0 and abs(w._imu_t[-1] - t[-1]) < 0.1
+    # the IMU window: its own times, on the same axis. Not the newest IMU row against the
+    # newest scan: the fixture's MAVLink block written 0.2 s late (BACKSTEP_AT) puts the
+    # IMU up to 0.2 s behind while the playhead is in it, wherever a loaded run lands.
+    # Instead, every IMU row's time is exactly the store's for that row (the store's times
+    # are the pipeline's, test_replay_store), and the store's IMU and whisker axes agree.
+    it = w._imu_t.copy()
+    assert len(it) > 0
+    j0 = int(np.searchsorted(w._store.imu_t, it[0]))
+    assert np.array_equal(w._store.imu_t[j0:j0 + len(it)], it)
+    assert abs(w._store.imu_t[-1] - w._store.wsk_t[-1]) < 0.1     # the same session axis
+    assert abs(w._store.imu_t[0] - w._store.wsk_t[0]) < 0.1
     _shot(w, "replay_panel")
     _shot(lv, "replay_line")
     # pause: the playhead holds; the views are not frozen
