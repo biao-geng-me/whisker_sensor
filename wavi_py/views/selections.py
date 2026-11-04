@@ -161,7 +161,8 @@ class _Region(pg.LinearRegionItem):
         self._overlay, self.sel, self.plot = overlay, sel, plot
         if sel.bounds is not None:
             self.setBounds(sel.bounds)
-        pg.InfLineLabel(self.lines[0], text=str(sel.number), position=0.96, anchors=[(0, 0), (0, 0)],
+        # at the bottom: the top corners hold the Line tiles' value labels and legends
+        pg.InfLineLabel(self.lines[0], text=str(sel.number), position=0.04, anchors=[(0, 1), (0, 1)],
                         color=c)
         self.sigRegionChanged.connect(self._dragged)
 

@@ -745,19 +745,31 @@ class MainWindow(QMainWindow):
         menu.addAction("None (W1 .. W16)", lambda: self.set_dome_map(None))
         self._map_btn.setMenu(menu)
 
+        self._analysis_btn = QPushButton("Analysis")
+        self._analysis_btn.setToolTip("The Analysis window last used (a new one if none is open):"
+                                      " compare selections")
+        self._analysis_btn.clicked.connect(self.show_analysis)
+
         h.addWidget(self._toggle_imu)
         h2.addWidget(self._toggle_dome)
         h2.addWidget(self._toggle_rov)
         h2.addWidget(self._map_btn)
+        h2.addWidget(self._analysis_btn)
         h2.addStretch(1)
         h2.addWidget(self._despike_chk)
         h2.addWidget(self._pause_btn)
         h2.addWidget(self._reset_btn)
         _compact(self._toggle_line, self._toggle_spectrum, self._toggle_fft, self._toggle_spec,
-                 self._toggle_imu, self._toggle_dome, self._toggle_rov, self._pause_btn,
-                 self._reset_btn)
+                 self._toggle_imu, self._toggle_dome, self._toggle_rov, self._analysis_btn,
+                 self._pause_btn, self._reset_btn)
         self._pause_btn.setMinimumWidth(                    # it says Resume when paused
             self._pause_btn.fontMetrics().horizontalAdvance("Resume") + 20)
+        # the second row (with Analysis) packed a little tighter, so it is no wider than
+        # the transport row and the panel keeps its minimum width
+        h2.setSpacing(3)
+        for b in (self._toggle_dome, self._toggle_rov, self._analysis_btn, self._reset_btn):
+            b.setMinimumWidth(b.fontMetrics().horizontalAdvance(b.text()) + 14)
+        self._pause_btn.setMinimumWidth(self._pause_btn.fontMetrics().horizontalAdvance("Resume") + 14)
         return box
 
     def _build_record_row(self) -> QGroupBox:
@@ -1316,6 +1328,15 @@ class MainWindow(QMainWindow):
         win.set_checked(keys)
         bring_to_front(win)
         return win
+
+    def show_analysis(self) -> AnalysisWindow:
+        """The panel's Analysis button: raise the most recently focused Analysis window,
+        or open a new one (every selection included) if none is open."""
+        if self._analysis:
+            win = self._analysis[-1]
+            bring_to_front(win)
+            return win
+        return self.new_analysis_window()
 
     def _on_analysis_closed(self, win: AnalysisWindow) -> None:
         if win in self._analysis:

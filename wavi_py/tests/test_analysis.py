@@ -171,10 +171,11 @@ def test_dataset_matches_series():
     t, y = ds.samples(s1, vs[0])
     tt, yy = ser.channels(["W1_A"], 2.0, 6.0)["W1_A"]
     assert np.array_equal(t, tt) and np.allclose(y, (yy - 0.5) * 2.0)
-    t, y = ds.samples(s2, vs[4])                           # accel x: mg -> m/s²
+    t, y = ds.samples(s2, vs[4])                           # accel x: mg, as the IMU window
     assert np.allclose(y, 0.0) and len(t) == len(ser.channels(["i0"], 10, 12)["i0"][0])
-    t, y = ds.samples(s2, vs[7])                           # gyro x (col 3): mrad/s -> deg/s
-    assert np.allclose(y, 300 * 180 / np.pi / 1000)
+    t, y = ds.samples(s2, vs[7])                           # gyro x (col 3): mrad/s as it is
+    assert np.allclose(y, 300.0)
+    assert ds.samples(s2, vs[10])[1][0] == pytest.approx(np.degrees(600.0))   # roll: rad -> deg
     # Compare's traces: relative time inside each selection, an envelope of the samples
     trs = {(tr.sel.number, tr.var.key): tr for tr in ds.traces(100)}
     assert set(trs) == {(n, v.key) for n in (1, 2) for v in (vs[0], vs[4], vs[7])}
@@ -267,11 +268,20 @@ def test_two_analysis_windows(app, win):
     assert w1.included == [a] and w2.included == [b]
     assert w1.checked_keys() == ["imu:0", "imu:1"] and w2.checked_keys() == ["wsk:0"]
     _pump(app, lambda: bool(w1.compare.curves) and bool(w2.compare.curves), 2)
-    assert set(w1.compare.rows) == {"m/s²"} and set(w2.compare.rows) == {"mV"}
+    assert set(w1.compare.rows) == {"mg"} and set(w2.compare.rows) == {"mV"}
     # the newest focused takes a region's Compare
     w._on_analysis_activated(w1)
     m.request("compare", b, [])
     assert w1.included == [a, b] and w2.included == [b]
+    # colour = the selection's (its region's), shade = the variable within the row
+    from wavi_py.views.selections import sel_color
+    w1._render()
+    col = {k: c.opts["pen"].color() for k, c in w1.compare.curves.items()}
+    assert col[(1, "imu:0")].hslHue() == sel_color(1).hslHue() != col[(2, "imu:0")].hslHue()
+    assert col[(2, "imu:0")].hslHue() == col[(2, "imu:1")].hslHue() == sel_color(2).hslHue()
+    assert col[(1, "imu:0")].lightnessF() < col[(1, "imu:1")].lightnessF() - 0.2
+    # the panel's Analysis button raises the newest focused one
+    assert w.show_analysis() is w1
     # a window from Go to includes every selection; the menu lists the open ones
     acts = {}
     from PyQt6.QtWidgets import QMenu
@@ -298,6 +308,21 @@ def test_two_analysis_windows(app, win):
     assert w1.goto_button is not None and w1.rec_indicator is not None
     for x in (w1, w3, w4):
         x.close()
+    # ... or opens a new one when none is open (a closed one reused)
+    w5 = w.show_analysis()
+    assert w5.isVisible() and w._analysis == [w5] and w5.included == [a, b]
+    w5.close()
+
+
+def test_shade_levels():
+    from PyQt6.QtGui import QColor
+    from wavi_py.views.analysis_window import shade, shade_levels
+    assert shade_levels(1) == [None] and shade_levels(0) == []
+    lv = shade_levels(4)
+    assert lv[0] < lv[1] < lv[2] < lv[3] and lv[-1] - lv[0] > 0.4
+    c = QColor(230, 140, 0)
+    assert shade(c, None) == c and abs(shade(c, 0.3).lightnessF() - 0.3) < 0.01
+    assert shade(c, 0.3).hslHue() == c.hslHue()
 
 
 def test_new_source_clears(app, win):
@@ -377,6 +402,9 @@ def test_screenshots(app, tmp_path):
             _drag(lv._tiles[0].getViewBox(), t0, t1)
         _pump(app, lambda: False, 0.5)
         _shot(lv, "analysis_line_selections")
+        w.resize(w.minimumSizeHint().width(), w.height())     # the narrowest panel
+        _pump(app, lambda: False, 0.2)
+        _shot(w, "analysis_panel")
         m = w._selections
         s1, s2 = m.selections[:2]
         keys = ["wsk:0", "wsk:1", "wsk:6", "wsk:7", "imu:0", "imu:1", "imu:2"]
@@ -385,6 +413,13 @@ def test_screenshots(app, tmp_path):
         a1.resize(1400, 850)
         _pump(app, lambda: False, 0.8)
         _shot(a1, "analysis_compare")
+        # the legibility case: 4 variables x 3 selections (W1 A / B, W4 A / B)
+        a1.include(m.selections[2])
+        a1.set_checked(["imu:0", "imu:1", "imu:2"], False)
+        _pump(app, lambda: False, 0.8)
+        _shot(a1, "analysis_compare_4x3")
+        a1.include(m.selections[2], False)
+        a1.set_checked(["imu:0", "imu:1", "imu:2"], True)
         _shot(a1.centralWidget().widget(0), "analysis_side_panel")
         a2 = w.new_analysis_window(m.selections[2], ["imu:3", "imu:4", "imu:5", "imu:8", "depth"])
         a2.resize(1100, 700)

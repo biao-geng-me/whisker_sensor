@@ -9,8 +9,9 @@ drawing are in ``views/selections.py``.
 A ``Variable`` is one curve's worth of data by key: ``wsk:<col>`` (a gauge, the
 series' stream-order column), ``imu:<col>`` (``IMU_CHANNELS``) or ``depth`` (the
 source's depth from the external pressure, which is not in the series). Each has
-a unit group, the rows of Compare (and of C2's Spectrum): mV, m/s², deg/s, deg,
-cm; the IMU series' mg / mrad/s / rad are converted to those. The gauges are
+a unit group, the rows of Compare (and of C2's Spectrum): mV, mg, mrad/s, deg,
+cm, as the IMU window shows them (accel and gyro as the series has them, the
+attitude's rad in degrees). The gauges are
 drawn as the Line window draws them, (raw - V0) * scale, so the curves line up
 with what was selected.
 
@@ -34,16 +35,14 @@ import numpy as np
 from wavi_py.daq.series import IMU, WSK, ArraySeries, Series, peak_decimate, span_index
 
 DEPTH = "depth"
-UNIT_GROUPS = ("mV", "m/s²", "deg/s", "deg", "cm")      # Compare's rows, top to bottom
-_G = 9.80665e-3                     # mg -> m/s²
-_MRAD_DEG = 180.0 / math.pi / 1000.0  # mrad/s -> deg/s
+UNIT_GROUPS = ("mV", "mg", "mrad/s", "deg", "cm")      # Compare's rows, top to bottom
 _RAD_DEG = 180.0 / math.pi
 
-# (IMU column, group label, axis label, unit, factor)
+# (IMU column, group label, axis label, unit, factor): the IMU window's units
 IMU_VARS = (
-    (0, "Accel", "x", "m/s²", _G), (1, "Accel", "y", "m/s²", _G), (2, "Accel", "z", "m/s²", _G),
-    (3, "Gyro", "x", "deg/s", _MRAD_DEG), (4, "Gyro", "y", "deg/s", _MRAD_DEG),
-    (5, "Gyro", "z", "deg/s", _MRAD_DEG),
+    (0, "Accel", "x", "mg", 1.0), (1, "Accel", "y", "mg", 1.0), (2, "Accel", "z", "mg", 1.0),
+    (3, "Gyro", "x", "mrad/s", 1.0), (4, "Gyro", "y", "mrad/s", 1.0),
+    (5, "Gyro", "z", "mrad/s", 1.0),
     (6, "Attitude", "roll", "deg", _RAD_DEG), (7, "Attitude", "pitch", "deg", _RAD_DEG),
     (8, "Attitude", "yaw", "deg", _RAD_DEG),
 )

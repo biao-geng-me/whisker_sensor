@@ -12,10 +12,12 @@ A side panel with two lists shared by the tabs:
 Tabs read one ``daq/analysis.Dataset`` (the included selections x the checked
 variables, with the panel's Despike / V0 / scale), made per redraw:
 
-- Compare: stacked rows, one per unit group (mV, m/s², deg/s, deg, cm), X linked;
-  X is the time from each selection's start, so the selections overlay at t = 0.
-  Colour is the variable, line style the selection (solid, dash, dot, ...), with
-  legends (the top row's also lists the selections). The curves are min / max
+- Compare: stacked rows, one per unit group (mV, mg, mrad/s, deg, cm: the IMU
+  window's units), X linked; X is the time from each selection's start, so the
+  selections overlay at t = 0. Colour is the selection (its region's colour), and
+  the variables in a row are told apart by the shade of it, dark to light in the
+  order they are listed (``shade_levels``). The legends: each row's variables in
+  their shade (grey), the top row's also the selections in their colour. The curves are min / max
   decimated to the plot's width (``Dataset.traces``), from the store's pyramid in
   replay, so a long selection redraws as cheaply as a short one. X follows the
   longest selection and Y fits the data until a mouse zoom; R (Reset view) goes
@@ -50,13 +52,26 @@ from wavi_py.views.render_sched import GraphicsLayoutWidget, scheduler
 from wavi_py.views.selections import SelectionModel, sel_color
 from wavi_py.views.whisker_plots import _show_grid
 
-# variable colours, by order among the checked ones (tab10-like, on white)
-VAR_COLORS = ((31, 119, 180), (214, 39, 40), (44, 160, 44), (255, 127, 14), (148, 103, 189),
-              (140, 86, 75), (227, 119, 194), (127, 127, 127), (188, 189, 34), (23, 190, 207))
-SEL_STYLES = (Qt.PenStyle.SolidLine, Qt.PenStyle.DashLine, Qt.PenStyle.DotLine,
-              Qt.PenStyle.DashDotLine, Qt.PenStyle.DashDotDotLine)
+# a row's variables: HSL lightness of the selection's colour, dark to light (one
+# variable keeps the colour itself); the light end stays readable as a 1 px line on white
+_L_DARK, _L_LIGHT = 0.18, 0.66
 TABS = ("Compare", "Spectrum", "Spectrogram")
 _KEY = Qt.ItemDataRole.UserRole
+
+
+def shade_levels(n: int) -> list[Optional[float]]:
+    """Lightness of each of ``n`` variables in a row (None: the colour as it is)."""
+    if n <= 1:
+        return [None] * n
+    return [_L_DARK + (_L_LIGHT - _L_DARK) * i / (n - 1) for i in range(n)]
+
+
+def shade(color: QColor, lightness: Optional[float]) -> QColor:
+    """``color`` at HSL ``lightness`` (hue and saturation kept)."""
+    if lightness is None:
+        return QColor(color)
+    h, s_, _l, _a = color.getHslF()
+    return QColor.fromHslF(max(h, 0.0), s_, lightness)
 
 
 def _swatch(color: QColor) -> QIcon:
@@ -118,7 +133,8 @@ class CompareTab(QWidget):
         self._hint.setText(text)
         self._pages.setCurrentIndex(0)
 
-    def render(self, ds: Dataset, var_colors: dict, sel_styles: dict) -> None:
+    def render(self, ds: Dataset, shades: dict) -> None:
+        """``shades``: the lightness of each variable (``shade_levels`` per row)."""
         units = [u for u in UNIT_GROUPS if any(v.unit == u for v in ds.variables)]
         if units != list(self.rows):
             self._rebuild_rows(units)
@@ -135,24 +151,22 @@ class CompareTab(QWidget):
                 c.unit, c.look = tr.var.unit, None
                 self.rows[tr.var.unit].addItem(c)
                 self.curves[key] = c
-            look = (var_colors[tr.var.key], sel_styles[tr.sel.number])
-            if c.look != look:                  # the encoding follows the checked / included order
-                pen = pg.mkPen(look[0], width=1)
-                pen.setStyle(look[1])
-                c.setPen(pen)
+            look = (tr.sel.number, shades[tr.var.key])
+            if c.look != look:                  # the shade follows the checked order
+                c.setPen(pg.mkPen(shade(sel_color(look[0]), look[1]), width=1))
                 c.look = look
             c.setData(tr.t, tr.y)
         for key in [k for k in self.curves if k not in seen]:
             c = self.curves.pop(key)
             self.rows[c.unit].removeItem(c)
-        self._legends(ds, var_colors, sel_styles, units)
+        self._legends(ds, shades, units)
         if self._auto:
             longest = max((s.duration for s in ds.selections), default=0.0)
             if longest > 0:
                 first.setXRange(0.0, longest, padding=0.01)
         self.glw.scene().prepareForPaint()
 
-    def _legends(self, ds: Dataset, var_colors: dict, sel_styles: dict, units: list[str]) -> None:
+    def _legends(self, ds: Dataset, shades: dict, units: list[str]) -> None:
         key = (tuple(v.key for v in ds.variables),
                tuple((s.number, round(s.t0, 2), round(s.t1, 2)) for s in ds.selections))
         if key == self._legend_key:
@@ -166,13 +180,11 @@ class CompareTab(QWidget):
             p.legend.clear()
             for v in ds.variables:
                 if v.unit == u:
-                    p.legend.addItem(pg.PlotDataItem(pen=pg.mkPen(var_colors[v.key], width=2)),
-                                     v.label)
+                    grey = shade(QColor(128, 128, 128), shades[v.key])
+                    p.legend.addItem(pg.PlotDataItem(pen=pg.mkPen(grey, width=3)), v.label)
             if i == 0:
                 for s in ds.selections:
-                    pen = pg.mkPen((60, 60, 60), width=2)
-                    pen.setStyle(sel_styles[s.number])
-                    p.legend.addItem(pg.PlotDataItem(pen=pen),
+                    p.legend.addItem(pg.PlotDataItem(pen=pg.mkPen(sel_color(s.number), width=3)),
                                      f"#{s.number}  {s.t0:.2f} .. {s.t1:.2f} s")
 
 
@@ -455,11 +467,14 @@ class AnalysisWindow(ViewWindow):
         self.compare.reset_view()
         self._request()
 
-    def _encoding(self, ds: Dataset) -> tuple[dict, dict]:
-        """Colour per variable (order among the checked), line style per selection."""
-        colors = {v.key: VAR_COLORS[i % len(VAR_COLORS)] for i, v in enumerate(ds.variables)}
-        styles = {s.number: SEL_STYLES[i % len(SEL_STYLES)] for i, s in enumerate(ds.selections)}
-        return colors, styles
+    @staticmethod
+    def _shades(ds: Dataset) -> dict:
+        """Each variable's lightness: dark to light within its row, in the listed order."""
+        out = {}
+        for u in UNIT_GROUPS:
+            vs = [v for v in ds.variables if v.unit == u]
+            out.update(zip((v.key for v in vs), shade_levels(len(vs))))
+        return out
 
     def _render(self) -> None:
         scheduler().done(self)
@@ -475,8 +490,7 @@ class AnalysisWindow(ViewWindow):
                 "Include a selection (its box on the left)." if not ds.selections else
                 "Check variables on the left (whiskers, IMU, depth).")
             return
-        colors, styles = self._encoding(ds)
-        self.compare.render(ds, colors, styles)
+        self.compare.render(ds, self._shades(ds))
 
     def showEvent(self, event) -> None:  # noqa: N802 — Qt naming
         super().showEvent(event)
