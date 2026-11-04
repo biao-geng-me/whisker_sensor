@@ -1,26 +1,57 @@
-"""The Analysis window: selections x variables, compared (C1), spectra (C2).
+"""The Analysis window: a timeline over a resizable 2x2 of plots.
 
-A side panel with two lists shared by the tabs:
+Layout (each window keeps its own sizes)::
+
+    side panel | timeline (whole recording, absolute time)
+               | -------------------------------------------------
+               | waveform (relative time)   | spectrum of the windows
+               | spectrogram (one tile)     | spectrum at the cursors
+
+The left column has the time axes (x-linked), the right one the frequency axes.
+The 2x2 is a vertical splitter over two horizontal ones that keep the same
+sizes, so the left / right border is one line across both rows (``Grid2x2``);
+a cell collapses when its border is dragged to zero, and a double-click on a
+border shares its space equally again. The timeline sits over the 2x2 in its
+own vertical splitter.
+
+The side panel holds two lists:
 
 - Selections: every selection of the app-wide model (``views/selections.py``),
   with an include box, its colour and number, t0 / t1 boxes (edits move it
   everywhere) and delete. Which are included is this window's own.
 - Variables: a tree, Whiskers (by sensor, then gauge; a sensor's box checks
   both) and IMU (accel x / y / z, gyro x / y / z, attitude roll / pitch / yaw,
-  depth). Also this window's own.
+  depth), with two checkbox columns: Plots (the 2x2) and Timeline (the
+  timeline's own rows, independent). The Timeline column starts on Depth when
+  the recording has depth, else on the first variable checked for Plots, until
+  it is edited.
 
-Tabs read one ``daq/analysis.Dataset`` (the included selections x the checked
-variables, with the panel's Despike / V0 / scale and this window's Compare
-sub-range), made per redraw; they are in ``views/analysis_tabs.py`` (Compare,
-Spectrum, Spectrogram). Only the shown tab is drawn. Toolbar: Select (S, in
-Compare: a drag makes the sub-range), Clear sub-range (Esc), Reset view (R).
+The cells read one ``daq/analysis.Dataset`` (the included selections x the
+Plots variables, with the panel's Despike / V0 / scale and the sub-range),
+made per redraw; they are in ``views/analysis_cells.py`` and
+``views/analysis_timeline.py``. A collapsed cell is not drawn, and every cell
+skips its work when its inputs did not change.
+
+Cursors: a click in the spectrogram or the waveform adds a numbered vertical
+cursor at that relative time, drawn in both; drag it to move it, right-click it
+or Del (hovered) to delete it. A click on a waveform trace also picks that
+(variable, selection) for the spectrogram. The bottom right shows the picked
+tile's spectrogram column at each cursor.
+
+Toolbar: Select (S: a drag in the waveform makes the sub-range, in the
+timeline a new selection), Clear sub-range (Esc), Probe (P: hover readout in
+the waveform, timeline, both spectra and the spectrogram), Reset view (R: the
+cell under the mouse, or all), Keys. The Line window's zoom / pan keys act on
+the cell under the mouse (= - X, + _ Y of the row under the mouse, . , Y of all
+its rows, arrows move the data), matched by the character typed in an
+application event filter while the window is shown, as the Line window does.
 
 Several Analysis windows may be open, each with its own included selections,
-variables and tab (the control panel keeps them; the newest focused one takes a
-region's Compare). Model changes only mark the window dirty: the render
-scheduler redraws it at most ``MAX_HZ`` a second, and not at all while it is
-hidden or closed (closing only hides it; the panel reuses it for the next new
-window).
+variables, sizes, cursors and options (the control panel keeps them; the
+newest focused one takes a region's Compare). Model changes only mark the
+window dirty: the render scheduler redraws it at most ``MAX_HZ`` a second, and
+not at all while it is hidden or closed (closing only hides it; the panel
+reuses it for the next new window).
 """
 
 from __future__ import annotations
@@ -28,22 +59,47 @@ from __future__ import annotations
 import weakref
 from typing import Callable, Optional, Sequence
 
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QAction, QColor, QIcon, QKeySequence, QPixmap
-from PyQt6.QtWidgets import (QAbstractSpinBox, QDoubleSpinBox, QHeaderView, QLabel, QSplitter,
-                             QTabWidget, QToolBar, QToolButton, QTreeWidget,
+from PyQt6.QtCore import QEvent, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QAction, QColor, QCursor, QIcon, QKeySequence, QPixmap
+from PyQt6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication, QComboBox,
+                             QDoubleSpinBox, QHeaderView, QLabel, QLineEdit, QMessageBox,
+                             QSplitter, QSplitterHandle, QToolBar, QToolButton, QTreeWidget,
                              QTreeWidgetItem, QVBoxLayout, QWidget)
 
+import numpy as np
+import pyqtgraph as pg
 
 from wavi_py.daq.analysis import DEPTH, Dataset, Selection, Variable
 from wavi_py.daq.series import IMU, WSK
-from wavi_py.views.analysis_tabs import CompareTab, SpectrogramTab, SpectrumTab, shades_of
+from wavi_py.views.analysis_cells import (CursorCell, CursorLines, SpecgramCell, SpectrumCell,
+                                          WaveCell, shades_of)
+from wavi_py.views.analysis_timeline import TimelineCell, timeline_source_of
 from wavi_py.views.base import ViewWindow
 from wavi_py.views.render_sched import scheduler
 from wavi_py.views.selections import SelectionModel, sel_color
+from wavi_py.views.whisker_plots import _PAN_STEP, ZOOM_STEP
 
-TABS = ("Compare", "Spectrum", "Spectrogram")
+CELLS = ("Compare", "Spectrum", "Spectrogram", "Cursors")   # set_tab names (region menus)
+PLOTS, TIMELINE = 1, 2                                      # the Variables tree's check columns
 _KEY = Qt.ItemDataRole.UserRole
+_LIVE_POLL_MS = 1000                                        # the timeline follows live data
+
+KEYS_HELP = """\
+<table cellspacing=4>
+<tr><td><b>S</b></td><td>Select: drag in the waveform for the sub-range, in the timeline for a new selection</td></tr>
+<tr><td><b>Esc</b></td><td>clear the sub-range</td></tr>
+<tr><td><b>P</b></td><td>probe: values under the mouse (waveform, timeline, spectra, spectrogram)</td></tr>
+<tr><td><b>R</b></td><td>reset view: the cell under the mouse (outside the cells: all)</td></tr>
+<tr><td><b>= &nbsp;-</b></td><td>zoom X in / out (the cell under the mouse). Keypad + - too</td></tr>
+<tr><td><b>+ &nbsp;_</b></td><td>zoom Y in / out: the row under the mouse</td></tr>
+<tr><td><b>. &nbsp;,</b></td><td>zoom Y in / out: all rows of the cell</td></tr>
+<tr><td><b>arrows</b></td><td>move the data (Left: traces slide left), the cell under the mouse</td></tr>
+<tr><td><b>Del</b></td><td>delete the cursor (else the selection) under the mouse</td></tr>
+</table>
+Mouse: click in the waveform or the spectrogram adds a cursor (on a waveform trace it
+also picks that trace for the spectrogram); drag a cursor to move it, right-click
+deletes it. Timeline: drag pans, wheel zooms, double-click seeks. Double-click a
+border between cells to share the space equally; drag it to the edge to collapse a cell."""
 
 
 def _swatch(color: QColor) -> QIcon:
@@ -52,50 +108,117 @@ def _swatch(color: QColor) -> QIcon:
     return QIcon(pm)
 
 
+class _Handle(QSplitterHandle):
+    """A splitter border: a double-click shares the space equally."""
+
+    def mouseDoubleClickEvent(self, ev) -> None:  # noqa: N802 — Qt naming
+        self.splitter().equalise()
+
+
+class _Splitter(QSplitter):
+    equalised = pyqtSignal()
+
+    def createHandle(self) -> QSplitterHandle:  # noqa: N802 — Qt naming
+        return _Handle(self.orientation(), self)
+
+    def equalise(self) -> None:
+        n = self.count()
+        total = sum(self.sizes()) or (self.width() if self.orientation() == Qt.Orientation.Horizontal
+                                      else self.height())
+        self.setSizes([total // n] * n)
+        self.equalised.emit()
+
+
+def _open(cell: QWidget) -> bool:
+    """Not collapsed (a collapsed cell is not drawn)."""
+    return cell.width() > 1 and cell.height() > 1
+
+
+class Grid2x2(QWidget):
+    """The 2x2 (see the module doc): ``top`` / ``bottom`` horizontal splitters in
+    ``rows``; moving one's border moves the other's, so the column border is one."""
+
+    resized = pyqtSignal()                       # a border moved (cells may un-collapse)
+
+    def __init__(self, tl: QWidget, tr: QWidget, bl: QWidget, br: QWidget,
+                 parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        self.rows = _Splitter(Qt.Orientation.Vertical)
+        self.top = _Splitter(Qt.Orientation.Horizontal)
+        self.bottom = _Splitter(Qt.Orientation.Horizontal)
+        self.top.addWidget(tl)
+        self.top.addWidget(tr)
+        self.bottom.addWidget(bl)
+        self.bottom.addWidget(br)
+        self.rows.addWidget(self.top)
+        self.rows.addWidget(self.bottom)
+        for s in (self.rows, self.top, self.bottom):
+            s.setChildrenCollapsible(True)
+            s.setHandleWidth(5)
+            s.splitterMoved.connect(lambda *_: self.resized.emit())
+        self.top.splitterMoved.connect(lambda *_: self._sync(self.top, self.bottom))
+        self.bottom.splitterMoved.connect(lambda *_: self._sync(self.bottom, self.top))
+        self.top.equalised.connect(lambda: self._sync(self.top, self.bottom))
+        self.bottom.equalised.connect(lambda: self._sync(self.bottom, self.top))
+        for s in (self.rows, self.top, self.bottom):
+            s.equalised.connect(self.resized.emit)
+        lay.addWidget(self.rows)
+
+    @staticmethod
+    def _sync(src: QSplitter, dst: QSplitter) -> None:
+        if dst.sizes() != src.sizes():
+            dst.blockSignals(True)
+            dst.setSizes(src.sizes())
+            dst.blockSignals(False)
+
+    def resizeEvent(self, ev) -> None:  # noqa: N802 — Qt naming
+        super().resizeEvent(ev)
+        self._sync(self.top, self.bottom)           # each splitter shares out a resize itself
+
+    def state(self) -> dict:
+        return {"cols": self.top.sizes(), "rows": self.rows.sizes()}
+
+    def set_state(self, cols: Sequence[int], rows: Sequence[int]) -> None:
+        self.top.setSizes(list(cols))
+        self.bottom.setSizes(list(cols))
+        self.rows.setSizes(list(rows))
+        self.resized.emit()
+
+
 class AnalysisWindow(ViewWindow):
     """See the module doc. ``variables_fn()`` lists the variables there are (the
-    gauges by the Line window's sensor names, the IMU, depth)."""
+    gauges by the Line window's sensor names, the IMU, depth); ``source_fn()`` is
+    what the timeline shows (a ``SelSource``: the whole recording, the live
+    buffers; or None / a str when there is none); ``replay``: the ``ReplayModel``
+    (playhead, seek)."""
 
     MAX_HZ = 20.0
     activated = pyqtSignal(object)            # this window got the focus (newest-focused)
 
-    def __init__(self, model: SelectionModel, variables_fn: Callable[[], list], number: int = 1):
+    def __init__(self, model: SelectionModel, variables_fn: Callable[[], list], number: int = 1,
+                 source_fn: Optional[Callable] = None, replay=None):
         super().__init__()
         self.model = model
         self._variables_fn = variables_fn
+        self._source_fn = source_fn
+        self.replay = replay
         self._vars: list[Variable] = []
         self._included: list[Selection] = []
+        self._last_included: Optional[Selection] = None
         self._lists_dirty = True
+        self._tl_edited = False                   # the Timeline column was edited by hand
         self.number = number
+        self.cursors: list[list] = []             # [number, t (relative)]
+        self._next_cursor = 1
+        self.hovered_cursor: Optional[int] = None
+        self._hover_cell = None                   # the cell last under the mouse (keys)
         self.setWindowTitle(f"Wavi - Analysis {number}")
-        self.resize(1100, 700)
+        self.resize(1300, 860)
         ref = weakref.ref(self)                   # the scheduler must not keep it alive
         scheduler().register(self, lambda: (w := ref()) is not None and w._render(), self.MAX_HZ)
-
-        tb = QToolBar("Analysis")
-        tb.setMovable(False)
-        self.addToolBar(tb)
-        self._act_select = QAction("Select", self, checkable=True)
-        self._act_select.setShortcut(QKeySequence("S"))
-        self._act_select.setToolTip("Compare: drag to make a sub-range (seconds from each"
-                                    " selection's start); Spectrum and Spectrogram use it [S]")
-        self._act_select.toggled.connect(lambda on: self.statusBar().showMessage(
-            "Select: drag in Compare for a sub-range (Esc clears it)") if on
-            else self.statusBar().clearMessage())
-        self._act_clear_sub = QAction("Clear sub-range", self)
-        self._act_clear_sub.setShortcut(QKeySequence(Qt.Key.Key_Escape))
-        self._act_clear_sub.setToolTip("Back to the whole selections [Esc]")
-        self._act_clear_sub.setEnabled(False)
-        self._act_clear_sub.triggered.connect(lambda: self.set_sub(None))
-        self._act_reset = QAction("Reset view", self)
-        self._act_reset.setShortcut(QKeySequence("R"))
-        self._act_reset.setToolTip("Fit the data (Compare: X the longest selection) [R]")
-        self._act_reset.triggered.connect(self._reset_view)
-        for a in (self._act_select, self._act_clear_sub, self._act_reset):
-            tb.addAction(a)
-            w = tb.widgetForAction(a)
-            if w is not None:
-                w.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._build_toolbar()
 
         # side panel
         side = QWidget()
@@ -116,34 +239,115 @@ class AnalysisWindow(ViewWindow):
         sl.addWidget(self.sel_list, 1)
         sl.addWidget(QLabel("<b>Variables</b>"))
         self.var_tree = QTreeWidget()
-        self.var_tree.setHeaderHidden(True)
-        self.var_tree.itemChanged.connect(lambda *_: self._request())
+        self.var_tree.setColumnCount(3)
+        self.var_tree.setHeaderLabels(["", "Plots", "Timeline"])
+        self.var_tree.headerItem().setToolTip(PLOTS, "Shown in the 2x2 (waveform, spectra)")
+        self.var_tree.headerItem().setToolTip(TIMELINE, "Shown in the timeline (its own rows)")
+        vh = self.var_tree.header()
+        vh.setStretchLastSection(False)
+        vh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for c in (PLOTS, TIMELINE):
+            vh.setSectionResizeMode(c, QHeaderView.ResizeMode.ResizeToContents)
+        self.var_tree.itemChanged.connect(self._on_var_item)
         sl.addWidget(self.var_tree, 2)
 
-        self.tabs = QTabWidget()
-        self.compare = CompareTab(lambda: self._act_select.isChecked())
-        self.spectrum = SpectrumTab()
-        self.spectrogram = SpectrogramTab()
-        for tab, name in zip((self.compare, self.spectrum, self.spectrogram), TABS):
-            self.tabs.addTab(tab, name)
+        # the cells
+        self.spectrogram = SpecgramCell()
+        self.compare = WaveCell(lambda: self._act_select.isChecked(), self.spectrogram.plot)
+        self.spectrum = SpectrumCell()
+        self.at_cursors = CursorCell()
+        self.timeline = TimelineCell(model, self, self._act_select, replay)
+        self.grid = Grid2x2(self.compare, self.spectrum, self.spectrogram, self.at_cursors)
         self.compare.subChanged.connect(self.set_sub)
-        for tab in (self.spectrum, self.spectrogram):
-            tab.changed.connect(self._request)
-        self.tabs.currentChanged.connect(self._on_tab)
-        self.sub: Optional[tuple] = None              # the Compare sub-range (relative)
+        self.compare.clicked.connect(self._on_wave_click)
+        self.spectrogram.clicked.connect(self.add_cursor)
+        for cell in (self.spectrum, self.spectrogram, self.timeline):
+            cell.changed.connect(self._request)
+        self.grid.resized.connect(self._on_resized)
+        self.spectrogram.plot.getViewBox().sigRangeChangedManually.connect(
+            lambda *_: self.compare.on_manual())
+        self.timeline.madeSelection.connect(self.include)
+        self.sub: Optional[tuple] = None              # the waveform's sub-range (relative)
+        self._wave_lines = CursorLines(self)
+        self._spec_lines = CursorLines(self, halo=True)
 
-        split = QSplitter()
-        split.addWidget(side)
-        split.addWidget(self.tabs)
-        split.setStretchFactor(1, 1)
-        split.setSizes([290, 810])
-        self.setCentralWidget(split)
+        self.right = _Splitter(Qt.Orientation.Vertical)
+        self.right.addWidget(self.timeline)
+        self.right.addWidget(self.grid)
+        self.right.setChildrenCollapsible(True)
+        self.right.setStretchFactor(1, 1)
+        self.right.splitterMoved.connect(lambda *_: self._on_resized())
+        self.split = QSplitter()
+        self.split.addWidget(side)
+        self.split.addWidget(self.right)
+        self.split.setStretchFactor(1, 1)
+        self.setCentralWidget(self.split)
+        self.default_sizes()
 
+        for cell in self.cells():
+            cell.glw.scene().sigMouseMoved.connect(lambda pos, c=cell: self._on_mouse(c, pos))
+        self._live_timer = QTimer(self)
+        self._live_timer.setInterval(_LIVE_POLL_MS)
+        self._live_timer.timeout.connect(self._poll_source)
+        if replay is not None:
+            replay.positionChanged.connect(self._on_position)
+            replay.sourceChanged.connect(self._request)
         model.added.connect(self._on_added)
         model.removed.connect(self._on_removed)
         model.changed.connect(self._on_changed)
         model.dataChanged.connect(self._on_data_changed)
         self._rebuild_vars()
+
+    def _build_toolbar(self) -> None:
+        tb = QToolBar("Analysis")
+        tb.setMovable(False)
+        self.addToolBar(tb)
+        self._act_select = QAction("Select", self, checkable=True)
+        self._act_select.setShortcut(QKeySequence("S"))
+        self._act_select.setToolTip("Drag in the waveform for a sub-range (seconds from each"
+                                    " selection's start; the spectra use it), or in the timeline"
+                                    " for a new selection [S]")
+        self._act_select.toggled.connect(lambda on: self.statusBar().showMessage(
+            "Select: drag in the waveform for a sub-range (Esc clears it), in the timeline for a"
+            " new selection") if on else self.statusBar().clearMessage())
+        self._act_clear_sub = QAction("Clear sub-range", self)
+        self._act_clear_sub.setShortcut(QKeySequence(Qt.Key.Key_Escape))
+        self._act_clear_sub.setToolTip("Back to the whole selections [Esc]")
+        self._act_clear_sub.setEnabled(False)
+        self._act_clear_sub.triggered.connect(lambda: self.set_sub(None))
+        self._act_probe = QAction("Probe", self, checkable=True)
+        self._act_probe.setShortcut(QKeySequence("P"))
+        self._act_probe.setToolTip("Show the values under the mouse (waveform, timeline, spectra,"
+                                   " spectrogram) [P]")
+        self._act_probe.toggled.connect(self._on_probe_toggled)
+        self._act_reset = QAction("Reset view", self)
+        self._act_reset.setShortcut(QKeySequence("R"))
+        self._act_reset.setToolTip("Fit the data: the cell under the mouse, or all [R]")
+        self._act_reset.triggered.connect(self._reset_view)
+        act_keys = QAction("Keys", self)
+        act_keys.setToolTip("Keyboard and mouse shortcuts")
+        act_keys.triggered.connect(self._show_keys)
+        for a in (self._act_select, self._act_clear_sub, self._act_probe, self._act_reset, act_keys):
+            tb.addAction(a)
+            w = tb.widgetForAction(a)
+            if w is not None:
+                w.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        delete = QAction("Delete cursor / selection", self)
+        delete.setShortcuts([QKeySequence(Qt.Key.Key_Delete), QKeySequence(Qt.Key.Key_Backspace)])
+        delete.triggered.connect(self._delete_hovered)
+        self.addAction(delete)
+
+    def cells(self) -> list:
+        return [self.timeline, self.compare, self.spectrum, self.spectrogram, self.at_cursors]
+
+    def default_sizes(self) -> None:
+        """The layout a new window starts with: panel 290 px, timeline 150 px, the
+        2x2 at 62 / 38 % across and half / half down."""
+        w, h = max(800, self.width()), max(500, self.height())
+        self.split.setSizes([290, w - 290])
+        self.right.setSizes([150, h - 150])
+        cw = w - 290
+        self.grid.set_state([int(cw * 0.62), cw - int(cw * 0.62)], [(h - 150) // 2] * 2)
 
     # ----- state (the panel and the region menus use these)
 
@@ -157,37 +361,69 @@ class AnalysisWindow(ViewWindow):
             self._included.append(sel)
         elif not on and sel in self._included:
             self._included.remove(sel)
+        if on:
+            self._last_included = sel
         self._lists_dirty = True
         self._sync_lists()
         self._request()
 
-    def checked_keys(self) -> list[str]:
+    def checked_keys(self, column: int = PLOTS) -> list[str]:
         return [it.data(0, _KEY) for it in self._var_leaves()
-                if it.checkState(0) == Qt.CheckState.Checked]
+                if it.checkState(column) == Qt.CheckState.Checked]
 
-    def set_checked(self, keys: Sequence[str], on: bool = True) -> None:
+    def timeline_keys(self) -> list[str]:
+        return self.checked_keys(TIMELINE)
+
+    def set_checked(self, keys: Sequence[str], on: bool = True, column: int = PLOTS) -> None:
         keys = set(keys)
         self.var_tree.blockSignals(True)
         for it in self._var_leaves():
             if it.data(0, _KEY) in keys:
-                it.setCheckState(0, Qt.CheckState.Checked if on else Qt.CheckState.Unchecked)
+                it.setCheckState(column, Qt.CheckState.Checked if on else Qt.CheckState.Unchecked)
         self.var_tree.blockSignals(False)
         self._fix_parents()
+        if column == TIMELINE:
+            self._tl_edited = True
         self._request()
 
+    def set_timeline(self, keys: Sequence[str]) -> None:
+        """The Timeline column checks exactly ``keys``."""
+        self.set_checked([v.key for v in self._vars], False, TIMELINE)
+        self.set_checked(keys, True, TIMELINE)
+
     def set_tab(self, name: str) -> None:
-        self.tabs.setCurrentIndex(TABS.index(name))
+        """A region menu's Compare / Spectrum / Spectrogram: that cell shows (a
+        collapsed one gets its space back); Spectrogram also picks the selection
+        last included, with the first Plots variable."""
+        cell = {"Compare": self.compare, "Spectrum": self.spectrum,
+                "Spectrogram": self.spectrogram, "Cursors": self.at_cursors}[name]
+        if cell.width() <= 1:
+            (self.grid.top if cell in (self.compare, self.spectrum) else self.grid.bottom).equalise()
+        if cell.height() <= 1:
+            self.grid.rows.equalise()
+        if cell is self.spectrogram and self._last_included is not None:
+            keys = self.checked_keys()
+            if keys:
+                self.spectrogram.set_pick(self._last_included.number, keys[0])
+        self._request()
 
     def reset_state(self, number: int) -> None:
-        """A closed window reused as a new one: nothing included or checked."""
+        """A closed window reused as a new one: nothing included or checked, no
+        cursors, the default sizes."""
         self.number = number
         self.setWindowTitle(f"Wavi - Analysis {number}")
         self._included = []
         self.set_checked([v.key for v in self._vars], False)
-        self.set_tab("Compare")
+        self.set_checked([v.key for v in self._vars], False, TIMELINE)
+        self._tl_edited = False
         self.set_sub(None)
-        for tab in (self.compare, self.spectrum, self.spectrogram):
-            tab.reset_view()
+        self.cursors = []
+        self._next_cursor = 1
+        self._sync_cursors()
+        self.spectrogram.pick = None
+        for cell in self.cells():
+            cell.reset_view()
+        self.default_sizes()
         self._lists_dirty = True
 
     def dataset(self) -> Dataset:
@@ -196,24 +432,67 @@ class AnalysisWindow(ViewWindow):
         return Dataset(self.included, [v for v in self._vars if v.key in keys],
                        despike=m.despike, v0=m.v0, scale=m.scale, sub=self.sub)
 
+    def timeline_dataset(self) -> Dataset:
+        keys = set(self.timeline_keys())
+        m = self.model
+        return Dataset([], [v for v in self._vars if v.key in keys],
+                       despike=m.despike, v0=m.v0, scale=m.scale)
+
     def set_sub(self, sub) -> None:
-        """The Compare sub-range (a, b) in seconds from each selection's start, or None:
-        Spectrum and Spectrogram use that part of every included selection."""
+        """The sub-range (a, b) in seconds from each selection's start, or None: the
+        spectra use that part of every included selection."""
         self.compare.set_sub(sub)
         sub = self.compare.sub                     # normalised (sorted, >= 0, or None)
         if sub == self.sub:
             return
         self.sub = sub
         self._act_clear_sub.setEnabled(sub is not None)
-        for tab in (self.spectrum, self.spectrogram):
-            tab.set_sub_text(sub)
+        for cell in (self.spectrum, self.spectrogram):
+            cell.set_sub_text(sub)
         self._request()
 
-    def _on_tab(self, i: int) -> None:
-        self._act_select.setEnabled(i == 0)        # the sub-range is made in Compare
-        if i != 0:
-            self._act_select.setChecked(False)
+    # ----- cursors
+
+    def add_cursor(self, t: float) -> int:
+        n = self._next_cursor
+        self._next_cursor += 1
+        self.cursors.append([n, float(t)])
+        self._sync_cursors()
         self._request()
+        return n
+
+    def move_cursor(self, number: int, t: float) -> None:
+        for c in self.cursors:
+            if c[0] == number and c[1] != t:
+                c[1] = float(t)
+                self._sync_cursors()
+                self._request()
+
+    def delete_cursor(self, number: int) -> None:
+        self.cursors = [c for c in self.cursors if c[0] != number]
+        if self.hovered_cursor == number:
+            self.hovered_cursor = None
+        self._sync_cursors()
+        self._request()
+
+    def hover_cursor(self, number: Optional[int]) -> None:
+        self.hovered_cursor = number
+
+    def _sync_cursors(self) -> None:
+        cur = [(n, t) for n, t in self.cursors]
+        self._wave_lines.sync(list(self.compare.rows.values()), cur)
+        self._spec_lines.sync([self.spectrogram.plot], cur)
+
+    def _on_wave_click(self, t: float, pick) -> None:
+        if pick is not None:
+            self.spectrogram.set_pick(*pick)
+        self.add_cursor(t)
+
+    def _delete_hovered(self) -> None:
+        if self.hovered_cursor is not None:
+            self.delete_cursor(self.hovered_cursor)
+        else:
+            self.model.remove(self.model.hovered)
 
     # ----- variables tree
 
@@ -233,16 +512,22 @@ class AnalysisWindow(ViewWindow):
         """Tristate parents follow their children after a programmatic change."""
         self.var_tree.blockSignals(True)
 
-        def walk(it: QTreeWidgetItem) -> Optional[Qt.CheckState]:
+        def walk(it: QTreeWidgetItem, col: int) -> Optional[Qt.CheckState]:
             if it.childCount() == 0:
-                return it.checkState(0)
-            states = {walk(it.child(i)) for i in range(it.childCount())}
+                return it.checkState(col)
+            states = {walk(it.child(i), col) for i in range(it.childCount())}
             st = (states.pop() if len(states) == 1 else Qt.CheckState.PartiallyChecked)
             if it is not self.var_tree.invisibleRootItem():
-                it.setCheckState(0, st)
+                it.setCheckState(col, st)
             return st
-        walk(self.var_tree.invisibleRootItem())
+        for col in (PLOTS, TIMELINE):
+            walk(self.var_tree.invisibleRootItem(), col)
         self.var_tree.blockSignals(False)
+
+    def _on_var_item(self, _it: QTreeWidgetItem, col: int) -> None:
+        if col == TIMELINE:
+            self._tl_edited = True
+        self._request()
 
     def _rebuild_vars(self) -> None:
         """The tree from ``variables_fn`` (kept checks by key); only when it changed."""
@@ -250,7 +535,7 @@ class AnalysisWindow(ViewWindow):
         if [v.key for v in new] == [v.key for v in self._vars] and \
                 [v.label for v in new] == [v.label for v in self._vars]:
             return
-        keep = set(self.checked_keys())
+        keep = {col: set(self.checked_keys(col)) for col in (PLOTS, TIMELINE)}
         self._vars = new
         self.var_tree.blockSignals(True)
         self.var_tree.clear()
@@ -260,7 +545,8 @@ class AnalysisWindow(ViewWindow):
         def node(parent, text: str) -> QTreeWidgetItem:
             it = QTreeWidgetItem(parent, [text])
             it.setFlags(tri)
-            it.setCheckState(0, Qt.CheckState.Unchecked)
+            for col in (PLOTS, TIMELINE):
+                it.setCheckState(col, Qt.CheckState.Unchecked)
             return it
         tops = {WSK: node(self.var_tree, "Whiskers"), IMU: node(self.var_tree, "IMU")}
         groups: dict = {}
@@ -277,11 +563,26 @@ class AnalysisWindow(ViewWindow):
             it.setFlags(flags)
             it.setData(0, _KEY, v.key)
             it.setToolTip(0, f"{v.label} ({v.unit})")
-            it.setCheckState(0, Qt.CheckState.Checked if v.key in keep else Qt.CheckState.Unchecked)
+            for col in (PLOTS, TIMELINE):
+                it.setCheckState(col, Qt.CheckState.Checked if v.key in keep[col]
+                                 else Qt.CheckState.Unchecked)
         tops[IMU].setExpanded(True)
         tops[WSK].setExpanded(True)
         self.var_tree.blockSignals(False)
         self._fix_parents()
+
+    def _default_timeline(self, source) -> None:
+        """Until the Timeline column is edited: Depth if the source has depth, else the
+        first variable checked for Plots."""
+        if self._tl_edited:
+            return
+        has_depth = source is not None and len(source.depth[0]) > 0
+        plots = self.checked_keys()
+        want = [DEPTH] if has_depth and any(v.key == DEPTH for v in self._vars) else plots[:1]
+        if want and want != self.timeline_keys():
+            self.set_checked([v.key for v in self._vars], False, TIMELINE)
+            self.set_checked(want, True, TIMELINE)
+            self._tl_edited = False                # still the default
 
     # ----- selections list
 
@@ -358,47 +659,248 @@ class AnalysisWindow(ViewWindow):
             on = it.checkState(0) == Qt.CheckState.Checked
             if on and sel not in self._included:
                 self._included.append(sel)
+                self._last_included = sel
             elif not on and sel in self._included:
                 self._included.remove(sel)
             self._request()
+
+    # ----- keys, probe
+
+    def _cell_at(self, global_pos) -> Optional[object]:
+        w = QApplication.widgetAt(global_pos)
+        while w is not None and w is not self:
+            for cell in self.cells():
+                if w is cell.glw or w is cell.glw.viewport():
+                    return cell
+            w = w.parentWidget()
+        return None
+
+    def _target(self):
+        """(cell, plot under the mouse or None) the keys act on: the cell under the
+        mouse, else the one last under it."""
+        pos = QCursor.pos()
+        cell = self._cell_at(pos) or self._hover_cell
+        if cell is None:
+            return None, None
+        scene_pos = cell.glw.mapToScene(cell.glw.mapFromGlobal(pos))
+        plot = next((p for p in cell.nav_plots() if p.sceneBoundingRect().contains(scene_pos)), None)
+        return cell, plot
+
+    def eventFilter(self, obj, ev) -> bool:  # noqa: N802 — Qt naming
+        """Zoom / pan keys by the character typed, anywhere in this window."""
+        if ev.type() != QEvent.Type.KeyPress or not isinstance(obj, QWidget) or obj.window() is not self:
+            return False
+        if isinstance(obj, (QAbstractSpinBox, QLineEdit, QComboBox, QAbstractItemView)):
+            return False                                   # typing / moving in a box or list
+        mods = ev.modifiers() & ~(Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.KeypadModifier)
+        if mods:
+            return False
+        key = ev.key()
+        arrows = {Qt.Key.Key_Left: (_PAN_STEP, 0), Qt.Key.Key_Right: (-_PAN_STEP, 0),
+                  Qt.Key.Key_Up: (0, -_PAN_STEP), Qt.Key.Key_Down: (0, _PAN_STEP)}
+        if key in arrows:
+            self._pan(*arrows[key])
+            return True
+        text = ev.text()
+        if not text:
+            return False
+        if ev.modifiers() & Qt.KeyboardModifier.KeypadModifier:
+            action = {"+": lambda: self._zoom_x(1 / ZOOM_STEP), "-": lambda: self._zoom_x(ZOOM_STEP)}.get(text)
+        else:
+            action = {
+                "=": lambda: self._zoom_x(1 / ZOOM_STEP), "-": lambda: self._zoom_x(ZOOM_STEP),
+                "+": lambda: self._zoom_y(1 / ZOOM_STEP, False), "_": lambda: self._zoom_y(ZOOM_STEP, False),
+                ".": lambda: self._zoom_y(1 / ZOOM_STEP, True), ",": lambda: self._zoom_y(ZOOM_STEP, True),
+            }.get(text)
+        if action is None:
+            return False
+        action()
+        return True
+
+    def _zoom_x(self, f: float, cell=None) -> None:
+        cell = cell or self._target()[0]
+        p = cell.x_plot() if cell is not None else None
+        if p is not None:
+            p.getViewBox().scaleBy(x=f)
+            cell.on_manual()
+            self._request()
+
+    def _zoom_y(self, f: float, all_rows: bool, cell=None, plot=None) -> None:
+        if cell is None:
+            cell, plot = self._target()
+        if cell is None:
+            return
+        plots = cell.nav_plots() if all_rows or plot is None else [plot]
+        for p in plots:
+            p.getViewBox().scaleBy(y=f)
+        self._request()
+
+    def _pan(self, dx: float, dy: float, cell=None, plot=None) -> None:
+        if cell is None:
+            cell, plot = self._target()
+        if cell is None:
+            return
+        if dx and cell.x_plot() is not None:
+            vb = cell.x_plot().getViewBox()
+            x0, x1 = vb.viewRange()[0]
+            vb.translateBy(x=dx * (x1 - x0))
+            cell.on_manual()
+        if dy:
+            for p in ([plot] if plot is not None else cell.nav_plots()):
+                vb = p.getViewBox()
+                y0, y1 = vb.viewRange()[1]
+                vb.translateBy(y=dy * (y1 - y0))
+        self._request()
+
+    def _reset_view(self) -> None:
+        cell = self._cell_at(QCursor.pos())
+        for c in ([cell] if cell is not None else self.cells()):
+            c.reset_view()
+        self._request()
+
+    def _show_keys(self) -> None:
+        box = QMessageBox(QMessageBox.Icon.NoIcon, "Analysis keys", KEYS_HELP, parent=self)
+        box.setTextFormat(Qt.TextFormat.RichText)
+        box.setModal(False)
+        box.show()
+
+    def _probe_lines(self) -> list[pg.InfiniteLine]:
+        return [*self.compare.probes.values(), *self.spectrum.probes.values(),
+                *self.timeline.probes.values(), self.spectrogram.probe, self.at_cursors.probe]
+
+    def _on_probe_toggled(self, on: bool) -> None:
+        if not on:
+            for line in self._probe_lines():
+                line.hide()
+            self.statusBar().clearMessage()
+
+    def _on_mouse(self, cell, pos) -> None:
+        if cell is not self._hover_cell:
+            for line in self._probe_lines():
+                line.hide()
+        self._hover_cell = cell
+        if self._act_probe.isChecked():
+            text = self.probe_text(cell, pos)
+            if text:
+                self.statusBar().showMessage(text)
+
+    def probe_text(self, cell, scene_pos) -> Optional[str]:
+        """The Probe readout at ``scene_pos`` in ``cell`` (and its probe lines moved
+        there): x, then every curve of the row under the mouse at the nearest sample."""
+        plots = [cell.plot] if cell is self.spectrogram else cell.nav_plots()
+        plot = next((p for p in plots if p.getViewBox().sceneBoundingRect().contains(scene_pos)),
+                    None)
+        if plot is None:
+            return None
+        pt = plot.getViewBox().mapSceneToView(scene_pos)
+        if cell is self.spectrogram:
+            self.spectrogram.probe.setPos(pt.x())
+            self.spectrogram.probe.show()
+            return self.spectrogram.probe_text(pt.x(), pt.y())
+        got = cell.probe_items(plot)
+        if got is None:
+            return None
+        xname, xunit, fx, fy, items = got
+        lines = cell.probes.values() if hasattr(cell, "probes") else [cell.probe]
+        for line in lines:
+            line.setPos(pt.x())
+            line.show()
+        parts = [f"{xname} = {fx(pt.x()):.4g} {xunit}"]
+        for label, unit, c in items[:10]:
+            x, y = c.getData()
+            if x is None or not len(x):
+                continue
+            i = int(min(max(0, np.searchsorted(x, pt.x())), len(x) - 1))
+            if i > 0 and abs(x[i - 1] - pt.x()) < abs(x[i] - pt.x()):
+                i -= 1
+            if np.isfinite(y[i]):
+                parts.append(f"{label}: {fy(y[i]):.4g} {unit}")
+        if len(items) > 10:
+            parts.append(f"(+{len(items) - 10} more)")
+        return "  ·  ".join(parts)
 
     # ----- drawing
 
     def _request(self) -> None:
         scheduler().request(self)
 
-    def _reset_view(self) -> None:
-        self.tabs.currentWidget().reset_view()
+    def _on_resized(self) -> None:
+        # a collapsed cell's linked X may have been squashed: back to the data, or
+        # the other's range (lined up on screen again)
+        if not self.compare._auto and self.compare.rows and self.compare.width() > 1 \
+                and self.spectrogram.width() > 1:
+            self.spectrogram.plot.setXRange(*self.compare.x_plot().getViewBox().viewRange()[0],
+                                            padding=0)
         self._request()
+
+    def _on_position(self, *_a) -> None:
+        if self.isVisible():
+            self.timeline.show_position()
+
+    def _poll_source(self) -> None:
+        """Live: the timeline follows the buffers (once a second, while shown)."""
+        if self.replay is None or not self.replay.active:
+            self._request()
 
     def _render(self) -> None:
         scheduler().done(self)
         if not self.isVisible():
             return
-        tab = self.tabs.currentWidget()              # only the shown tab is drawn
+        src = timeline_source_of(self._source_fn)
+        self._default_timeline(src)
+        if _open(self.timeline):
+            self.timeline.render(src, self.timeline_dataset())
         ds = self.dataset()
+        grid_cells = (self.compare, self.spectrum, self.spectrogram, self.at_cursors)
         if not ds.selections or not ds.variables:
-            tab.show_hint(
-                "No selections here yet: in the Line or IMU window, turn on Select (S), drag "
-                "over a time span, then right-click it → Compare." if not len(self.model) else
-                "Include a selection (its box on the left)." if not ds.selections else
-                "Check variables on the left (whiskers, IMU, depth).")
-            if tab is not self.compare:
-                tab._last = None                     # redraw when there is something again
+            hint = ("No selections here yet: turn on Select (S) and drag in the timeline above"
+                    " (or in the Line or IMU window)." if not len(self.model) else
+                    "Include a selection (its box on the left)." if not ds.selections else
+                    "Check variables for Plots on the left (whiskers, IMU, depth).")
+            for cell in grid_cells:
+                cell.show_hint(hint)
+            self.spectrogram.data = None
             return
-        if tab is self.spectrogram:
-            tab.render(ds)
-        else:
-            tab.render(ds, shades_of(ds))
+        shades = shades_of(ds)
+        if _open(self.compare):
+            self.compare.render(ds, shades)
+            self._sync_cursors()                    # rows may have been rebuilt
+        if _open(self.spectrum):
+            self.spectrum.render(ds, shades)
+        # the spectrogram feeds the cursor cell: drawn when either shows
+        if _open(self.spectrogram) or _open(self.at_cursors):
+            self.spectrogram.render(ds)
+        self._fit_x(max((s.duration for s in ds.selections), default=0.0))
+        if _open(self.at_cursors):
+            self.at_cursors.render(self.spectrogram, [(n, t) for n, t in self.cursors])
+
+    def _fit_x(self, longest: float) -> None:
+        """The time cells' X (linked) from 0 to the longest selection unless zoomed by
+        hand; set on a cell that is open (a collapsed one has no width to line up)."""
+        if not self.compare._auto or longest <= 0:
+            return
+        if _open(self.compare) and self.compare.rows:
+            self.compare.fit_x(longest)
+        elif _open(self.spectrogram):
+            self.spectrogram.plot.setXRange(0.0, longest, padding=0.01)
 
     def showEvent(self, event) -> None:  # noqa: N802 — Qt naming
         super().showEvent(event)
+        QApplication.instance().installEventFilter(self)     # the keys (app-wide: only while shown)
+        self._live_timer.start()
         self._rebuild_vars()
         self._lists_dirty = True
         self._sync_lists()
+        self.timeline.show_position()
         self._request()
+
+    def hideEvent(self, event) -> None:  # noqa: N802 — Qt naming
+        QApplication.instance().removeEventFilter(self)
+        self._live_timer.stop()
+        super().hideEvent(event)
 
     def changeEvent(self, event) -> None:  # noqa: N802 — Qt naming
         super().changeEvent(event)
         if event.type() == event.Type.ActivationChange and self.isActiveWindow():
             self.activated.emit(self)
+

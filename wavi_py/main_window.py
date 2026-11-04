@@ -1272,6 +1272,15 @@ class MainWindow(QMainWindow):
             return "connect, or open a recording, first"
         return "pause first (a live selection is taken from the paused buffers)"
 
+    def _timeline_source(self):
+        """What an Analysis window's timeline shows: the whole recording in replay,
+        else the live buffers (``series()``) with the depth so far; None before any."""
+        if self._store is None and self._client is None:
+            return None
+        src = self._replay.source
+        return SelSource(self.series(), src.depth() if src is not None
+                         else (np.empty(0), np.empty(0)))
+
     def _freeze_selections(self, on: bool) -> None:
         """Live Pause: copy the buffers (and the depth so far) for the selections made
         while paused (~3 MB for 90 s of 32 gauges); Resume lets go of the copy (the
@@ -1318,7 +1327,8 @@ class MainWindow(QMainWindow):
             win = self._analysis_spare.pop(0)
             win.reset_state(self._analysis_n)
         else:
-            win = AnalysisWindow(self._selections, self.analysis_variables, self._analysis_n)
+            win = AnalysisWindow(self._selections, self.analysis_variables, self._analysis_n,
+                                 self._timeline_source, self._replay)
             win.closed.connect(lambda w=win: self._on_analysis_closed(w))
             win.activated.connect(self._on_analysis_activated)
             self._add_chrome(win)

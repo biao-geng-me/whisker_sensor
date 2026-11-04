@@ -31,7 +31,12 @@ own mean sample rate, so selections of different lengths each have their own
 frequency resolution (1 / length); IMU rows come a little unevenly and are
 taken as evenly spaced at that rate. ``spectrogram`` is the same on segments
 of ``seg_s`` overlapping by ``overlap`` (Hann, mean removed, as the Spec
-window), timed at their centres from the selection's start.
+window), timed at their centres from the selection's start;
+``spectrogram_column`` is one segment of it (the Analysis window's cursors).
+
+``overview`` is the Analysis window's timeline: the dataset's variables over an
+absolute span of a source (the whole recording), min / max decimated to the
+plot width, in the same units.
 """
 
 from __future__ import annotations
@@ -164,9 +169,9 @@ def envelope_within(series: Series, source: str, cols, t0: float, t1: float, n: 
 
 @dataclass
 class Trace:
-    sel: Selection
+    sel: Optional[Selection]  # None: the timeline's (absolute time)
     var: Variable
-    t: np.ndarray            # relative: seconds from the selection's start
+    t: np.ndarray            # relative: seconds from the selection's start (timeline: absolute)
     y: np.ndarray            # in var.unit
 
 
@@ -289,3 +294,50 @@ class Dataset:
         starts = np.arange(len(segs)) * hop
         centres = 0.5 * (t[starts] + t[starts + m - 1]) - sel.t0
         return centres, np.fft.rfftfreq(m, 1.0 / fs), amp
+
+    def overview(self, source: SelSource, t0: float, t1: float, n_px: int) -> list[Trace]:
+        """The timeline's curves (``sel`` None): every variable of the dataset over
+        [t0, t1] of ``source`` (absolute time, clipped to what it has), min / max
+        decimated to ~``n_px`` columns (``Series.envelope``: the store's pyramid, so
+        the whole recording costs about what a minute does), in ``var.unit``."""
+        out: list[Trace] = []
+        ser = source.series
+        for src in (WSK, IMU):
+            have = len(ser.names(src))
+            want = [v for v in self.variables if v.source == src and v.col < have]
+            ext = ser.extent(src)
+            if not want or ext is None:
+                continue
+            a, b = max(t0, ext[0]), min(t1, ext[1])
+            if b <= a:
+                continue
+            t, y = ser.envelope(src, [v.col for v in want], a, b, max(8, n_px),
+                                self.despike and src == WSK)
+            for j, v in enumerate(want):
+                out.append(Trace(None, v, t, self._convert(v, y[:, j])))
+        dt, dd = source.depth
+        if len(dt) and any(v.source == DEPTH for v in self.variables):
+            i0, i1 = span_index(dt, t0, t1)
+            if i1 > i0:
+                t, y = peak_decimate(dt[i0:i1], np.asarray(dd[i0:i1], float)[:, None],
+                                     max(1, (i1 - i0) // max(1, n_px)))
+                v = next(v for v in self.variables if v.source == DEPTH)
+                out.append(Trace(None, v, t, y[:, 0]))
+        return out
+
+
+def spectrogram_column(sg: Optional[tuple], t: float) -> Optional[tuple[np.ndarray, np.ndarray, float]]:
+    """One segment of a ``Dataset.spectrogram`` result ``sg``: (f Hz, amplitude, the
+    segment's centre) of the segment whose centre is nearest ``t`` (seconds from the
+    selection's start); None when ``t`` is outside the segments (more than half a
+    hop past the first or last centre) or there is no spectrogram."""
+    if sg is None:
+        return None
+    tc, f, amp = sg
+    if not len(tc):
+        return None
+    half = 0.5 * (tc[1] - tc[0]) if len(tc) > 1 else np.inf
+    if t < tc[0] - half or t > tc[-1] + half:
+        return None
+    i = int(np.argmin(np.abs(tc - t)))
+    return f, amp[i], float(tc[i])
