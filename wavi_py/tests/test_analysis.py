@@ -360,6 +360,12 @@ def test_screenshots(app, tmp_path):
         spans = [(1.0, 3.0), (4.0, 6.0), (6.5, 7.5)]
     w = _open(app, p)
     try:
+        # the panel latches V0 from the first samples played (opened paused at 0 it
+        # has none yet, and every window shows absolute mV): play a moment first
+        w._pause_btn.setChecked(False)
+        assert _pump(app, lambda: bool(np.any(w._v0)), 10)
+        w._pause_btn.setChecked(True)
+        assert w._selections.v0 is not None and np.any(w._selections.v0)
         w._toggle_line.setChecked(True)
         lv = w._line_view
         lv.resize(1400, 850)
