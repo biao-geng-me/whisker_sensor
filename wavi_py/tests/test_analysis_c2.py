@@ -241,7 +241,70 @@ def test_spectrogram_grid_and_cap(app, win):
     sg.hi_box.setValue(1.0)
     assert not sg.auto_box.isChecked()
     _pump(app, lambda: False, 0.2)
-    assert sg._cbar.levels() == pytest.approx((sg.lo_box.value(), 1.0))
+    assert sg.cbars["mV"].levels() == pytest.approx((sg.lo_box.value(), 1.0))
+    aw.close()
+
+
+def test_spectrogram_colour_range_per_unit(app, win):
+    from wavi_py.views.spectral_base import auto_levels
+    w = win
+    m = w._selections
+    sels = [m.create(1.0, 4.0), m.create(4.5, 7.5), m.create(7.0, 9.5)]
+    aw = w.new_analysis_window(sels[0], ["wsk:0", "imu:2"])
+    for s in sels[1:]:
+        aw.include(s)
+    aw.set_tab("Spectrogram")
+    sg = aw.spectrogram
+    assert _pump(app, lambda: sg.grid == (2, 3) and set(sg.levels) == {"mV", "mg"}, 3)
+    # one colour bar and one auto range per unit group, from that unit's tiles only
+    assert set(sg.cbars) == {"mV", "mg"}
+    for u, key in (("mV", "wsk:0"), ("mg", "imu:2")):
+        v = np.concatenate([sg.tiles[(s.number, key)][1].image.ravel() for s in sels])
+        assert sg.levels[u] == pytest.approx(auto_levels(v, False, (0, 1)))
+        assert sg.cbars[u].levels() == pytest.approx(sg.levels[u])
+        assert all(sg.tiles[(s.number, key)][1].levels == pytest.approx(sg.levels[u]) for s in sels)
+    assert sg.levels["mV"] != pytest.approx(sg.levels["mg"])
+    # the controls set the chosen unit's range; the other stays auto
+    mv = sg.levels["mV"]
+    sg.unit_box.setCurrentText("mg")
+    assert sg.auto_box.isChecked() and sg.hi_box.value() == pytest.approx(sg.levels["mg"][1], abs=0.01)
+    sg.hi_box.setValue(99.0)
+    _pump(app, lambda: False, 0.3)
+    assert sg.levels["mg"][1] == 99.0 and sg.levels["mV"] == pytest.approx(mv)
+    sg.unit_box.setCurrentText("mV")
+    assert sg.auto_box.isChecked()                       # mV still auto
+    sg.unit_box.setCurrentText("mg")
+    assert not sg.auto_box.isChecked() and sg.hi_box.value() == 99.0
+    sg.auto_box.setChecked(True)
+    _pump(app, lambda: False, 0.3)
+    assert sg.levels["mg"][1] != 99.0
+    aw.close()
+
+
+def test_spectrum_frequency_range_follows_nyquist(app, win):
+    w = win
+    sel = w._selections.create(1.0, 5.0)
+    aw = w.new_analysis_window(sel, ["imu:0"])
+    aw.set_tab("Spectrum")
+    sp = aw.spectrum
+
+    def x_hi():
+        if not sp.rows:
+            return float("nan")                          # not drawn yet
+        return next(iter(sp.rows.values())).getViewBox().viewRange()[0][1]
+    assert sp.f_hi.value() == 0.0 and sp.f_hi.text() == "Nyquist"      # the default
+    assert _pump(app, lambda: abs(x_hi() - 50.0) < 1.5, 3)            # IMU at 100 Hz
+    aw.set_checked(["wsk:0"])                                          # + gauges at 250 Hz
+    assert _pump(app, lambda: abs(x_hi() - 125.0) < 2.0, 3)           # the highest Nyquist
+    # an edited range stays, whatever is shown; back at its lowest: follows again
+    sp.f_hi.setValue(60.0)
+    assert _pump(app, lambda: abs(x_hi() - 60.0) < 1.0, 3)
+    aw.set_checked(["wsk:0"], False)
+    aw.set_checked(["wsk:1"])
+    _pump(app, lambda: False, 0.3)
+    assert abs(x_hi() - 60.0) < 1.0
+    sp.f_hi.setValue(0.0)
+    assert _pump(app, lambda: abs(x_hi() - 125.0) < 2.0, 3)
     aw.close()
 
 
@@ -302,8 +365,7 @@ def test_screenshots_c2(app, tmp_path):
             aw.include(s)
         aw.resize(1400, 850)
         aw.set_tab("Spectrum")
-        aw.spectrum.log_a.setChecked(True)
-        aw.spectrum.f_hi.setValue(60.0)
+        aw.spectrum.log_a.setChecked(True)                 # f: 0 .. the highest Nyquist
         _pump(app, lambda: False, 1.0)
         _shot(aw, "c2_spectrum")
         aw.set_checked(keys, False)

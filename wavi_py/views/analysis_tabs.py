@@ -21,9 +21,11 @@ their colour. Rows are unit groups (mV, mg, mrad/s, deg, cm).
   selection's traces only, and a render with nothing changed does nothing
   (``computed`` / ``renders`` count it, for the tests).
 - Spectrogram (``SpectrogramTab``): one tile per (variable, selection), rows =
-  variables, columns = selections, relative time; one colour range for all
-  tiles, chosen as in the Spec window (Auto: 1st to 99.5th percentile; or the
-  min / max boxes, kept per lin / dB; ``spectral_base``). At most ``MAX_TILES``
+  variables, columns = selections, relative time; one colour range for the
+  tiles of a unit group (mV, mg, ...: a colour bar each), chosen as in the Spec
+  window (Auto: 1st to 99.5th percentile of that unit's tiles; or the min / max
+  boxes, kept per lin / dB; ``spectral_base``); the Colour box picks the unit
+  the controls set. At most ``MAX_TILES``
   tiles and ``MAX_COLS`` columns: variables are cut first, with a note.
 """
 
@@ -473,16 +475,21 @@ class SpectrogramTab(QWidget):
         self.ovl_box.setCurrentIndex(OVERLAPS.index(0.75))
         self.db_box = h.add("", QCheckBox("dB"))
         self.db_box.setToolTip("Colour by amplitude in dB re 1 unit instead of linear")
+        self.unit_box = h.add("Colour", QComboBox())
+        self.unit_box.setToolTip("The unit group whose colour range Auto / min / max set (each"
+                                 " unit has its own range and colour bar)")
         self.auto_box = h.add("", QCheckBox("Auto"))
         self.auto_box.setChecked(True)
-        self.auto_box.setToolTip("Colour range from the data (1st to 99.5th percentile of all"
-                                 " tiles); off: the min / max boxes")
+        self.auto_box.setToolTip("Colour range of this unit from the data (1st to 99.5th"
+                                 " percentile of its tiles); off: the min / max boxes")
         self.lo_box = h.add("min", _spin(-1e6, 1e6, _LIN_LEVELS[0]))
         self.hi_box = h.add("max", _spin(-1e6, 1e6, _LIN_LEVELS[1]))
         h.row.addStretch(1)
-        self._levels_saved = {False: _LIN_LEVELS, True: _DB_LEVELS}
+        # per unit group: auto, and the fixed range of each scale (lin False, dB True)
+        self._ranges: dict[str, dict] = {}
         for w in (self.seg_box, self.ovl_box):
             w.currentIndexChanged.connect(lambda _i: self.changed.emit())
+        self.unit_box.currentIndexChanged.connect(self._on_unit)
         self.db_box.toggled.connect(self._on_db)
         self.auto_box.toggled.connect(self._on_auto)
         for b in (self.lo_box, self.hi_box):
@@ -503,7 +510,8 @@ class SpectrogramTab(QWidget):
         self._cmap = pg.colormap.get("viridis")
         self.tiles: dict[tuple, tuple] = {}           # (sel number, var key) -> (plot, image)
         self._layout_key: tuple = ()
-        self._cbar: Optional[pg.ColorBarItem] = None
+        self.cbars: dict[str, pg.ColorBarItem] = {}   # unit -> its colour bar
+        self.levels: dict[str, tuple] = {}            # unit -> the range in use
         self._cache: dict[tuple, tuple] = {}
         self._last: Optional[tuple] = None
         self.grid = (0, 0)                            # (rows, cols) shown
@@ -516,21 +524,57 @@ class SpectrogramTab(QWidget):
     def db(self) -> bool:
         return self.db_box.isChecked()
 
+    def _range(self, unit: str) -> dict:
+        return self._ranges.setdefault(unit, {"auto": True, False: _LIN_LEVELS, True: _DB_LEVELS})
+
+    @property
+    def unit(self) -> str:
+        """The unit group the Auto / min / max controls are showing."""
+        return self.unit_box.currentText()
+
+    def _show_unit(self) -> None:
+        """The controls show the chosen unit's state."""
+        st = self._range(self.unit)
+        self.auto_box.blockSignals(True)
+        self.auto_box.setChecked(st["auto"])
+        self.auto_box.blockSignals(False)
+        show_level_boxes((self.lo_box, self.hi_box),
+                         self.levels.get(self.unit, st[self.db]) if st["auto"] else st[self.db])
+
+    def _on_unit(self, _i: int) -> None:
+        if self.unit:
+            self._show_unit()
+            self.changed.emit()
+
     def _on_levels_edited(self, _v: float) -> None:
+        st = self._range(self.unit)
         self.auto_box.blockSignals(True)
         self.auto_box.setChecked(False)              # typing a range means: use it
         self.auto_box.blockSignals(False)
-        self._levels_saved[self.db] = (self.lo_box.value(), self.hi_box.value())
+        st["auto"] = False
+        st[self.db] = (self.lo_box.value(), self.hi_box.value())
         self.changed.emit()
 
     def _on_auto(self, on: bool) -> None:
+        st = self._range(self.unit)
+        st["auto"] = on
         if not on:
-            self._levels_saved[self.db] = (self.lo_box.value(), self.hi_box.value())
+            st[self.db] = (self.lo_box.value(), self.hi_box.value())
         self.changed.emit()
 
     def _on_db(self, _on: bool) -> None:
-        if not self.auto_box.isChecked():
-            show_level_boxes((self.lo_box, self.hi_box), self._levels_saved[self.db])
+        if self.unit and not self._range(self.unit)["auto"]:
+            show_level_boxes((self.lo_box, self.hi_box), self._range(self.unit)[self.db])
+        self.changed.emit()
+
+    def set_levels(self, unit: str, lo_hi: Optional[tuple]) -> None:
+        """A unit's fixed range (on the current scale), or None: Auto again."""
+        st = self._range(unit)
+        st["auto"] = lo_hi is None
+        if lo_hi is not None:
+            st[self.db] = tuple(lo_hi)
+        if unit == self.unit:
+            self._show_unit()
         self.changed.emit()
 
     def set_sub_text(self, sub) -> None:
@@ -575,8 +619,14 @@ class SpectrogramTab(QWidget):
                 if r == len(vars_) - 1:
                     p.setLabel("bottom", "Time from the selection's start", units="s")
                 self.tiles[(sel.number, var.key)] = (p, img)
-        self._cbar = pg.ColorBarItem(colorMap=self._cmap, interactive=False, width=14)
-        self.glw.addItem(self._cbar, row=0, col=len(sels), rowspan=max(1, len(vars_)))
+        # a colour bar per unit group, beside its rows (the tree lists a unit's
+        # variables together, so they are consecutive rows)
+        self.cbars = {}
+        for u in dict.fromkeys(v.unit for v in vars_):
+            rows = [r for r, v in enumerate(vars_) if v.unit == u]
+            bar = pg.ColorBarItem(colorMap=self._cmap, interactive=False, width=14)
+            self.glw.addItem(bar, row=rows[0], col=len(sels), rowspan=len(rows))
+            self.cbars[u] = bar
 
     def spectrograms(self, ds: Dataset, sels: list, vars_: list) -> dict:
         seg = SEGMENTS_S[self.seg_box.currentIndex()]
@@ -609,8 +659,18 @@ class SpectrogramTab(QWidget):
         self.note.setVisible(bool(cut))
         seg = SEGMENTS_S[self.seg_box.currentIndex()]
         ovl = OVERLAPS[self.ovl_box.currentIndex()]
-        levels_in = (self.db, self.auto_box.isChecked(),
-                     None if self.auto_box.isChecked() else (self.lo_box.value(), self.hi_box.value()))
+        units = list(dict.fromkeys(v.unit for v in vars_))
+        if units != [self.unit_box.itemText(i) for i in range(self.unit_box.count())]:
+            keep = self.unit
+            self.unit_box.blockSignals(True)
+            self.unit_box.clear()
+            self.unit_box.addItems(units)
+            self.unit_box.setCurrentIndex(units.index(keep) if keep in units else 0)
+            self.unit_box.blockSignals(False)
+            self._show_unit()
+        levels_in = (self.db, self.unit, tuple(
+            (u, self._range(u)["auto"], None if self._range(u)["auto"] else self._range(u)[self.db])
+            for u in units))
         inputs = (tuple((s.number, v.key, _input_key(ds, s, v, seg, ovl)) for s in sels for v in vars_),
                   levels_in)
         if inputs == self._last:
@@ -626,13 +686,18 @@ class SpectrogramTab(QWidget):
         data = self.spectrograms(ds, sels, vars_)
         vals = {k: (None if g is None else (g, to_db(g[2]) if self.db else g[2]))
                 for k, g in data.items()}
-        allv = [v for g in vals.values() if g is not None for v in (g[1].ravel(),)]
-        if self.auto_box.isChecked():
-            lo, hi = auto_levels(np.concatenate(allv) if allv else np.empty(0), self.db,
-                                 self._levels_saved[self.db])
-            show_level_boxes((self.lo_box, self.hi_box), (lo, hi))
-        else:
-            lo, hi = self.lo_box.value(), self.hi_box.value()
+        unit_of = {v.key: v.unit for v in vars_}
+        self.levels = {}
+        for u in units:                               # each unit group its own range
+            st = self._range(u)
+            if st["auto"]:
+                vs = [g[1].ravel() for k, g in vals.items() if g is not None and unit_of[k[1]] == u]
+                self.levels[u] = auto_levels(np.concatenate(vs) if vs else np.empty(0), self.db,
+                                             st[self.db])
+            else:
+                self.levels[u] = st[self.db]
+        if self.unit in self.levels and self._range(self.unit)["auto"]:
+            show_level_boxes((self.lo_box, self.hi_box), self.levels[self.unit])
         t_end, f_top = 0.0, {}
         for k, (p, img) in self.tiles.items():
             got = vals.get(k)
@@ -643,7 +708,7 @@ class SpectrogramTab(QWidget):
             dt = tc[1] - tc[0] if len(tc) > 1 else 1.0
             df = f[1] - f[0] if len(f) > 1 else 1.0
             rect = pg.QtCore.QRectF(tc[0] - dt / 2, -df / 2, dt * len(tc), df * len(f))
-            img.setImage(v, autoLevels=False, levels=(lo, hi), rect=rect)
+            img.setImage(v, autoLevels=False, levels=self.levels[unit_of[k[1]]], rect=rect)
             t_end = max(t_end, float(rect.right()))
             f_top[k[1]] = max(f_top.get(k[1], 0.0), float(rect.bottom()))
         # the ranges set, as the Spec window does (an image's auto-range lags its rect):
@@ -653,7 +718,8 @@ class SpectrogramTab(QWidget):
                 p.setXRange(0.0, t_end, padding=0)
                 if key in f_top:
                     p.setYRange(0.0, f_top[key], padding=0)
-        if self._cbar is not None:
-            self._cbar.setLevels((lo, hi))
-            self._cbar.axis.setLabel("dB" if self.db else "amplitude")
+        for u, bar in self.cbars.items():
+            if u in self.levels:
+                bar.setLevels(self.levels[u])
+                bar.axis.setLabel(f"dB re 1 {u}" if self.db else u)
         self.glw.scene().prepareForPaint()
