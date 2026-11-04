@@ -7,12 +7,15 @@ Layout (each window keeps its own sizes)::
                | waveform (relative time)   | spectrum of the windows
                | spectrogram (one tile)     | spectrum at the cursors
 
-The left column has the time axes (x-linked), the right one the frequency axes.
-The 2x2 is a vertical splitter over two horizontal ones that keep the same
-sizes, so the left / right border is one line across both rows (``Grid2x2``);
-a cell collapses when its border is dragged to zero, and a double-click on a
-border shares its space equally again. The timeline sits over the 2x2 in its
-own vertical splitter.
+The left column has the time axes (the same time span in both), the right one
+the frequency axes. The 2x2 is a vertical splitter over two horizontal ones that
+keep the same sizes while all four cells are open, so the left / right border is
+one line across both rows (``Grid2x2``). Each cell collapses on its own (the
+button at the right of its header, or its border dragged to the edge): its row's
+other cell takes the width, a row with both collapsed gives the other row the
+height, and a thin bar above the 2x2 lists the collapsed cells (click one to
+bring it back). A double-click on a border shares its space equally again. The
+timeline sits over the 2x2 in its own vertical splitter.
 
 The side panel holds two lists:
 
@@ -32,11 +35,12 @@ made per redraw; they are in ``views/analysis_cells.py`` and
 ``views/analysis_timeline.py``. A collapsed cell is not drawn, and every cell
 skips its work when its inputs did not change.
 
-Cursors: a click in the spectrogram or the waveform adds a numbered vertical
-cursor at that relative time, drawn in both; drag it to move it, right-click it
-or Del (hovered) to delete it. A click on a waveform trace also picks that
-(variable, selection) for the spectrogram. The bottom right shows the picked
-tile's spectrogram column at each cursor.
+Cursors: a click in the spectrogram adds a numbered vertical cursor at that
+relative time, drawn there and in the waveform; drag it to move it, right-click
+it or Del (hovered) to delete it. In the waveform a click on a trace shows that
+(variable, selection) in the spectrogram (the trace is then drawn thick), a click
+on the thick trace adds a cursor, and a click away from the traces does nothing.
+The bottom right shows the picked tile's spectrogram column at each cursor.
 
 Toolbar: Select (S: a drag in the waveform makes the sub-range, in the
 timeline a new selection), Clear sub-range (Esc), Probe (P: hover readout in
@@ -62,7 +66,7 @@ from typing import Callable, Optional, Sequence
 from PyQt6.QtCore import QEvent, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction, QColor, QCursor, QIcon, QKeySequence, QPixmap
 from PyQt6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication, QComboBox,
-                             QDoubleSpinBox, QHeaderView, QLabel, QLineEdit, QMessageBox,
+                             QDoubleSpinBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox,
                              QSplitter, QSplitterHandle, QToolBar, QToolButton, QTreeWidget,
                              QTreeWidgetItem, QVBoxLayout, QWidget)
 
@@ -82,7 +86,8 @@ from wavi_py.views.whisker_plots import _PAN_STEP, ZOOM_STEP
 CELLS = ("Compare", "Spectrum", "Spectrogram", "Cursors")   # set_tab names (region menus)
 PLOTS, TIMELINE = 1, 2                                      # the Variables tree's check columns
 _KEY = Qt.ItemDataRole.UserRole
-_LIVE_POLL_MS = 1000                                        # the timeline follows live data
+_LIVE_POLL_MS = 1000
+TIMELINE_H = 190                                            # its default height (two rows)                                        # the timeline follows live data
 
 KEYS_HELP = """\
 <table cellspacing=4>
@@ -96,10 +101,12 @@ KEYS_HELP = """\
 <tr><td><b>arrows</b></td><td>move the data (Left: traces slide left), the cell under the mouse</td></tr>
 <tr><td><b>Del</b></td><td>delete the cursor (else the selection) under the mouse</td></tr>
 </table>
-Mouse: click in the waveform or the spectrogram adds a cursor (on a waveform trace it
-also picks that trace for the spectrogram); drag a cursor to move it, right-click
-deletes it. Timeline: drag pans, wheel zooms, double-click seeks. Double-click a
-border between cells to share the space equally; drag it to the edge to collapse a cell."""
+Mouse: a click in the spectrogram adds a cursor. In the waveform a click on a trace
+shows it in the spectrogram (drawn thick); a click on the thick trace adds a cursor.
+Drag a cursor to move it, right-click deletes it. Timeline: drag pans, wheel zooms,
+double-click seeks. A cell's – button (or its border dragged to the edge) collapses
+it; the bar above the plots brings it back. Double-click a border between cells to
+share the space equally."""
 
 
 def _swatch(color: QColor) -> QIcon:
@@ -122,29 +129,60 @@ class _Splitter(QSplitter):
         return _Handle(self.orientation(), self)
 
     def equalise(self) -> None:
-        n = self.count()
+        """The shown children share the space equally (a collapsed one keeps none)."""
+        shown = [i for i in range(self.count()) if not self.widget(i).isHidden()]
+        if not shown:
+            return
         total = sum(self.sizes()) or (self.width() if self.orientation() == Qt.Orientation.Horizontal
                                       else self.height())
-        self.setSizes([total // n] * n)
+        self.setSizes([total // len(shown) if i in shown else 0 for i in range(self.count())])
         self.equalised.emit()
 
 
 def _open(cell: QWidget) -> bool:
-    """Not collapsed (a collapsed cell is not drawn)."""
-    return cell.width() > 1 and cell.height() > 1
+    """Shown and not squashed (a collapsed cell is not drawn)."""
+    return cell.isVisibleTo(cell.window()) and cell.width() > 1 and cell.height() > 1
 
 
 class Grid2x2(QWidget):
     """The 2x2 (see the module doc): ``top`` / ``bottom`` horizontal splitters in
-    ``rows``; moving one's border moves the other's, so the column border is one."""
+    ``rows``. While all four cells are open, moving one row's border moves the
+    other's, so the column border is one line. Each cell collapses on its own
+    (``collapse``: its header's button, or its border dragged to the edge): it is
+    hidden, its row's other cell takes the width, and a row with both collapsed
+    is hidden (the other row takes the height). The collapsed cells are listed
+    as buttons on a thin bar above the 2x2 (``bar``); a click restores one
+    (``restore``) at the sizes it had."""
 
-    resized = pyqtSignal()                       # a border moved (cells may un-collapse)
+    resized = pyqtSignal()                       # a border moved, a cell collapsed / came back
 
     def __init__(self, tl: QWidget, tr: QWidget, bl: QWidget, br: QWidget,
                  parent: Optional[QWidget] = None):
         super().__init__(parent)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        self.cells = (tl, tr, bl, br)
+        self.bar = QWidget()
+        bl_ = QHBoxLayout(self.bar)
+        bl_.setContentsMargins(4, 1, 4, 1)
+        bl_.setSpacing(4)
+        lab = QLabel("Collapsed:")
+        lab.setStyleSheet("color: #555;")
+        bl_.addWidget(lab)
+        self.restore_buttons: dict = {}
+        for c in self.cells:
+            b = QToolButton()
+            b.setText(f"▸ {getattr(c, 'TITLE', '') or 'cell'}")
+            b.setToolTip("Bring this cell back")
+            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            b.clicked.connect(lambda _=False, c=c: self.restore(c))
+            b.hide()
+            bl_.addWidget(b)
+            self.restore_buttons[c] = b
+        bl_.addStretch(1)
+        self.bar.hide()
+        lay.addWidget(self.bar)
         self.rows = _Splitter(Qt.Orientation.Vertical)
         self.top = _Splitter(Qt.Orientation.Horizontal)
         self.bottom = _Splitter(Qt.Orientation.Horizontal)
@@ -154,17 +192,93 @@ class Grid2x2(QWidget):
         self.bottom.addWidget(br)
         self.rows.addWidget(self.top)
         self.rows.addWidget(self.bottom)
+        self._cols: dict = {}                        # row -> its column sizes, last seen both open
+        self._row_sizes: Optional[list] = None       # row sizes, last seen both rows shown
         for s in (self.rows, self.top, self.bottom):
             s.setChildrenCollapsible(True)
             s.setHandleWidth(5)
-            s.splitterMoved.connect(lambda *_: self.resized.emit())
-        self.top.splitterMoved.connect(lambda *_: self._sync(self.top, self.bottom))
-        self.bottom.splitterMoved.connect(lambda *_: self._sync(self.bottom, self.top))
-        self.top.equalised.connect(lambda: self._sync(self.top, self.bottom))
-        self.bottom.equalised.connect(lambda: self._sync(self.bottom, self.top))
-        for s in (self.rows, self.top, self.bottom):
-            s.equalised.connect(self.resized.emit)
-        lay.addWidget(self.rows)
+            s.splitterMoved.connect(lambda *_, s=s: self._moved(s))
+            s.equalised.connect(lambda s=s: self._moved(s))
+        for c in self.cells:
+            if hasattr(c, "collapseRequested"):
+                c.collapseRequested.connect(lambda c=c: self.collapse(c))
+        lay.addWidget(self.rows, 1)
+        self.top.installEventFilter(self)
+        self.bottom.installEventFilter(self)
+
+    # ----- collapse / restore
+
+    def _row(self, cell: QWidget) -> QSplitter:
+        return self.top if cell in self.cells[:2] else self.bottom
+
+    def _partner(self, cell: QWidget) -> QWidget:
+        return self.cells[self.cells.index(cell) ^ 1]
+
+    def collapsed(self) -> list:
+        return [c for c in self.cells if c.isHidden()]
+
+    def all_open(self) -> bool:
+        return not self.collapsed()
+
+    def _remember(self) -> None:
+        for row in (self.top, self.bottom):
+            if not row.isHidden() and not any(row.widget(i).isHidden() for i in range(2)) \
+                    and all(row.sizes()):
+                self._cols[row] = row.sizes()
+        if not self.top.isHidden() and not self.bottom.isHidden() and all(self.rows.sizes()):
+            self._row_sizes = self.rows.sizes()
+
+    def collapse(self, cell: QWidget) -> None:
+        if cell.isHidden():
+            return
+        self._remember()
+        cell.hide()
+        if self._partner(cell).isHidden():
+            self._row(cell).hide()                   # the whole row: the other takes the height
+        self._show_bar()
+        self.resized.emit()
+
+    def restore(self, cell: QWidget) -> None:
+        if not cell.isHidden():
+            return
+        row = self._row(cell)
+        other_row = self.bottom if row is self.top else self.top
+        row_was_hidden = row.isHidden()
+        cell.show()
+        row.show()
+        if row_was_hidden and not other_row.isHidden():
+            h = sum(self.rows.sizes())
+            self.rows.setSizes(self._row_sizes or [h // 2, h - h // 2])
+        if not self._partner(cell).isHidden():       # the row has both again
+            w = sum(row.sizes())
+            if self.all_open():
+                row.setSizes(other_row.sizes())     # one column border again
+            else:
+                row.setSizes(self._cols.get(row) or [w // 2, w - w // 2])
+        self._show_bar()
+        self.resized.emit()
+
+    def _show_bar(self) -> None:
+        for c, b in self.restore_buttons.items():
+            b.setVisible(c.isHidden())
+        self.bar.setVisible(bool(self.collapsed()))
+
+    def _moved(self, s: QSplitter) -> None:
+        if s in (self.top, self.bottom) and self.all_open():
+            self._sync(s, self.bottom if s is self.top else self.top)
+        # a border dragged to the edge collapses what it squashed
+        for row in (self.top, self.bottom):
+            if row.isHidden():
+                continue
+            if s is self.rows and self.rows.sizes()[self.rows.indexOf(row)] == 0:
+                for i in range(2):
+                    self.collapse(row.widget(i))
+                continue
+            for i, size in enumerate(row.sizes()):
+                if size == 0 and not row.widget(i).isHidden() and not row.widget(i ^ 1).isHidden():
+                    self.collapse(row.widget(i))
+        self._remember()
+        self.resized.emit()
 
     @staticmethod
     def _sync(src: QSplitter, dst: QSplitter) -> None:
@@ -173,17 +287,24 @@ class Grid2x2(QWidget):
             dst.setSizes(src.sizes())
             dst.blockSignals(False)
 
-    def resizeEvent(self, ev) -> None:  # noqa: N802 — Qt naming
-        super().resizeEvent(ev)
-        self._sync(self.top, self.bottom)           # each splitter shares out a resize itself
+    def eventFilter(self, obj, ev) -> bool:  # noqa: N802 — Qt naming
+        # each row splitter shares out a resize itself (rounding apart): one border again
+        if ev.type() == QEvent.Type.Resize and obj in (self.top, self.bottom) and self.all_open():
+            QTimer.singleShot(0, lambda: self.all_open() and self._sync(self.top, self.bottom))
+        return False
 
     def state(self) -> dict:
-        return {"cols": self.top.sizes(), "rows": self.rows.sizes()}
+        return {"cols": self.top.sizes(), "rows": self.rows.sizes(),
+                "collapsed": [getattr(c, "TITLE", "") for c in self.collapsed()]}
 
     def set_state(self, cols: Sequence[int], rows: Sequence[int]) -> None:
+        """All cells open, at these sizes."""
+        for c in self.cells:
+            self.restore(c)
         self.top.setSizes(list(cols))
         self.bottom.setSizes(list(cols))
         self.rows.setSizes(list(rows))
+        self._remember()
         self.resized.emit()
 
 
@@ -253,7 +374,7 @@ class AnalysisWindow(ViewWindow):
 
         # the cells
         self.spectrogram = SpecgramCell()
-        self.compare = WaveCell(lambda: self._act_select.isChecked(), self.spectrogram.plot)
+        self.compare = WaveCell(lambda: self._act_select.isChecked())
         self.spectrum = SpectrumCell()
         self.at_cursors = CursorCell()
         self.timeline = TimelineCell(model, self, self._act_select, replay)
@@ -266,6 +387,12 @@ class AnalysisWindow(ViewWindow):
         self.grid.resized.connect(self._on_resized)
         self.spectrogram.plot.getViewBox().sigRangeChangedManually.connect(
             lambda *_: self.compare.on_manual())
+        # the waveform and the spectrogram show the same time span (copied both ways:
+        # with a collapsed neighbour their widths differ, and pyqtgraph's own link
+        # would line them up on screen and crop the narrower one)
+        self.compare.xChanged.connect(self._wave_x)
+        self.spectrogram.plot.getViewBox().sigXRangeChanged.connect(
+            lambda _vb, r: self.compare.set_x(float(r[0]), float(r[1])))
         self.timeline.madeSelection.connect(self.include)
         self.sub: Optional[tuple] = None              # the waveform's sub-range (relative)
         self._wave_lines = CursorLines(self)
@@ -344,10 +471,11 @@ class AnalysisWindow(ViewWindow):
         """The layout a new window starts with: panel 290 px, timeline 150 px, the
         2x2 at 62 / 38 % across and half / half down."""
         w, h = max(800, self.width()), max(500, self.height())
+        th = max(TIMELINE_H, self.timeline.minimumHeight())
         self.split.setSizes([290, w - 290])
-        self.right.setSizes([150, h - 150])
+        self.right.setSizes([th, h - th])
         cw = w - 290
-        self.grid.set_state([int(cw * 0.62), cw - int(cw * 0.62)], [(h - 150) // 2] * 2)
+        self.grid.set_state([int(cw * 0.62), cw - int(cw * 0.62)], [(h - th) // 2] * 2)
 
     # ----- state (the panel and the region menus use these)
 
@@ -397,8 +525,9 @@ class AnalysisWindow(ViewWindow):
         last included, with the first Plots variable."""
         cell = {"Compare": self.compare, "Spectrum": self.spectrum,
                 "Spectrogram": self.spectrogram, "Cursors": self.at_cursors}[name]
-        if cell.width() <= 1:
-            (self.grid.top if cell in (self.compare, self.spectrum) else self.grid.bottom).equalise()
+        self.grid.restore(cell)
+        if cell.width() <= 1:                         # squashed without collapsing
+            self.grid._row(cell).equalise()
         if cell.height() <= 1:
             self.grid.rows.equalise()
         if cell is self.spectrogram and self._last_included is not None:
@@ -483,10 +612,21 @@ class AnalysisWindow(ViewWindow):
         self._wave_lines.sync(list(self.compare.rows.values()), cur)
         self._spec_lines.sync([self.spectrogram.plot], cur)
 
+    def _wave_x(self, lo: float, hi: float) -> None:
+        x0, x1 = self.spectrogram.plot.getViewBox().viewRange()[0]
+        if abs(x0 - lo) > 1e-9 or abs(x1 - hi) > 1e-9:
+            self.spectrogram.plot.setXRange(lo, hi, padding=0)
+
     def _on_wave_click(self, t: float, pick) -> None:
-        if pick is not None:
+        """A click on a trace shows it in the spectrogram; on the one shown (drawn
+        thick), it adds a cursor there; away from the traces, nothing."""
+        if pick is None:
+            return
+        if pick == self.spectrogram.pick:
+            self.add_cursor(t)
+        else:
             self.spectrogram.set_pick(*pick)
-        self.add_cursor(t)
+            self.compare.set_picked(pick)
 
     def _delete_hovered(self) -> None:
         if self.hovered_cursor is not None:
@@ -825,12 +965,6 @@ class AnalysisWindow(ViewWindow):
         scheduler().request(self)
 
     def _on_resized(self) -> None:
-        # a collapsed cell's linked X may have been squashed: back to the data, or
-        # the other's range (lined up on screen again)
-        if not self.compare._auto and self.compare.rows and self.compare.width() > 1 \
-                and self.spectrogram.width() > 1:
-            self.spectrogram.plot.setXRange(*self.compare.x_plot().getViewBox().viewRange()[0],
-                                            padding=0)
         self._request()
 
     def _on_position(self, *_a) -> None:
@@ -870,6 +1004,7 @@ class AnalysisWindow(ViewWindow):
         # the spectrogram feeds the cursor cell: drawn when either shows
         if _open(self.spectrogram) or _open(self.at_cursors):
             self.spectrogram.render(ds)
+        self.compare.set_picked(self.spectrogram.pick)
         self._fit_x(max((s.duration for s in ds.selections), default=0.0))
         if _open(self.at_cursors):
             self.at_cursors.render(self.spectrogram, [(n, t) for n, t in self.cursors])

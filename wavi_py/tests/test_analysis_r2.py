@@ -128,29 +128,93 @@ def test_layout_and_splitters_per_window(app, win):
         xw = wv.mapViewToDevice(QPointF(t, 0)).x() + aw.compare.glw.mapTo(aw, aw.compare.glw.rect().topLeft()).x()
         xs = sv.mapViewToDevice(QPointF(t, 0)).x() + aw.spectrogram.glw.mapTo(aw, aw.spectrogram.glw.rect().topLeft()).x()
         assert abs(xw - xs) < 3
-    # collapse the spectrum: not drawn (an option change there does no work)
+    # the shared border dragged to the edge collapses the right column (both cells):
+    # not drawn (an option change there does no work), listed on the restore bar
+    g.top.moveSplitter(700, 1)
+    cols = g.top.sizes()
     total = sum(g.top.sizes())
     g.top.moveSplitter(total + 10, 1)
     _pump(app, lambda: False, 0.1)
-    assert aw.spectrum.width() <= 1 and g.bottom.sizes() == g.top.sizes()
+    assert aw.spectrum.isHidden() and aw.at_cursors.isHidden() and g.bar.isVisibleTo(aw)
+    assert g.restore_buttons[aw.spectrum].isVisibleTo(aw)
     r = aw.spectrum.renders
     aw.spectrum.window_box.setCurrentIndex(1)
     _pump(app, lambda: False, 0.3)
     assert aw.spectrum.renders == r
+    # back from the bar: at the sizes before the drag, both rows in step again
+    g.restore_buttons[aw.spectrum].click()
+    g.restore_buttons[aw.at_cursors].click()
+    assert not g.collapsed() and not g.bar.isVisibleTo(aw)
+    assert g.top.sizes() == g.bottom.sizes() and abs(g.top.sizes()[0] - cols[0]) <= 8
+    assert _pump(app, lambda: aw.spectrum.renders > r, 2)            # drawn again
     # double-click the border: equal again, both rows
     g.top.handle(1).mouseDoubleClickEvent(None)
     a, b = g.top.sizes()
     assert abs(a - b) <= 2 and g.bottom.sizes() == g.top.sizes()
-    assert _pump(app, lambda: aw.spectrum.renders > r, 2)            # drawn again
     # a second window keeps its own sizes
     aw2 = win.new_analysis_window(sels[0], ["wsk:0"])
     aw2.resize(1400, 900)
     _pump(app, lambda: False, 0.2)
     aw2.grid.set_state([300, 900], [200, 500])
+    aw2.grid.collapse(aw2.spectrogram)
     _pump(app, lambda: False, 0.1)
     assert aw.grid.top.sizes() == [a, b] and aw2.grid.top.sizes() != aw.grid.top.sizes()
+    assert aw2.grid.state()["collapsed"] == ["Spectrogram"] and aw.grid.state()["collapsed"] == []
     aw.close()
     aw2.close()
+
+
+def test_single_cell_collapse(app, win):
+    aw, sels = _window(app, win)
+    g = aw.grid
+    g.set_state([800, 500], [400, 400])
+    _pump(app, lambda: False, 0.3)
+    bottom, rows = g.bottom.sizes(), g.rows.sizes()
+    # a right cell's button: its row's left cell takes the full width, the other row stays
+    aw.spectrum.header.collapse_btn.click()
+    _pump(app, lambda: False, 0.3)
+    assert aw.spectrum.isHidden() and not aw.at_cursors.isHidden()
+    assert aw.compare.width() >= sum(g.top.sizes()) - 2 and g.bottom.sizes() == bottom
+    assert [b.text() for c, b in g.restore_buttons.items() if b.isVisibleTo(aw)] == ["▸ Spectrum"]
+    # still the same time span in the waveform and the spectrogram (widths differ)
+    assert aw.compare.width() > aw.spectrogram.width() + 100
+    wr = aw.compare.x_plot().getViewBox().viewRange()[0]
+    assert aw.spectrogram.plot.getViewBox().viewRange()[0] == pytest.approx(wr, abs=1e-6)
+    aw._hover_cell = aw.spectrogram
+    aw._zoom_x(1 / 1.25, aw.spectrogram)
+    _pump(app, lambda: False, 0.1)
+    assert aw.compare.x_plot().getViewBox().viewRange()[0] == pytest.approx(
+        aw.spectrogram.plot.getViewBox().viewRange()[0], abs=1e-6)
+    # dragging the bottom border no longer moves the top one (it has one cell)
+    g.bottom.moveSplitter(600, 1)
+    assert g.top.sizes()[1] == 0 and g.bottom.sizes()[0] == pytest.approx(600, abs=8)
+    moved = g.bottom.sizes()
+    # both cells of the bottom row: the row goes, the top row takes the height
+    aw.spectrogram.header.collapse_btn.click()
+    aw.at_cursors.header.collapse_btn.click()
+    _pump(app, lambda: False, 0.3)
+    assert g.bottom.isHidden() and g.top.height() >= g.rows.height() - 2
+    assert len([b for b in g.restore_buttons.values() if b.isVisibleTo(aw)]) == 3
+    # an option change in a collapsed cell does no work
+    r = aw.at_cursors.renders, aw.spectrogram.renders
+    aw.spectrogram.seg_box.setCurrentIndex(0)
+    _pump(app, lambda: False, 0.3)
+    assert (aw.at_cursors.renders, aw.spectrogram.renders) == r
+    # back: the row at its height again, then all four in step
+    g.restore(aw.spectrogram)
+    got = g.rows.sizes()                     # (the restore bar takes a little height)
+    assert not g.bottom.isHidden() and got[0] / sum(got) == pytest.approx(rows[0] / sum(rows), abs=0.02)
+    assert aw.spectrogram.width() >= sum(g.bottom.sizes()) - 2       # alone in its row
+    assert _pump(app, lambda: aw.spectrogram.renders > r[1], 2)
+    g.restore(aw.at_cursors)
+    assert g.bottom.sizes() == pytest.approx(moved, abs=4)
+    g.restore(aw.spectrum)
+    assert _pump(app, lambda: g.top.sizes() == g.bottom.sizes(), 1) and not g.bar.isVisibleTo(aw)
+    # a region menu's Spectrum brings a collapsed spectrum back
+    g.collapse(aw.spectrum)
+    win._selections.request("spectrum", sels[0], [])
+    assert not aw.spectrum.isHidden()
+    aw.close()
 
 
 # ----------------------------------------------------------------------
@@ -168,19 +232,27 @@ def test_picker_and_click_to_pick(app, win):
     sg.var_box.activated.emit(3)
     assert sg.pick == (3, "wsk:3")
     assert _pump(app, lambda: sg.sel is sels[2] and sg.var.key == "wsk:3", 2)
-    # a click on a waveform trace picks it (and adds a cursor there)
+    # the picked trace is drawn thick and on top
+    assert _pump(app, lambda: aw.compare.picked == (3, "wsk:3"), 2)
+    thick = aw.compare.curves[(3, "wsk:3")]
+    assert thick.opts["pen"].widthF() > 2 and thick.zValue() > 0
+    # a click on another waveform trace only picks it (no cursor); the mark moves
     c = aw.compare.curves[(2, "wsk:1")]
     x, y = c.getData()
     i = len(x) // 3
     vb = aw.compare.rows["mV"].getViewBox()
     ev = _click(vb, x[i], y[i])
-    assert ev.accepted and sg.pick == (2, "wsk:1")
+    assert ev.accepted and sg.pick == (2, "wsk:1") and aw.cursors == []
+    assert c.opts["pen"].widthF() > 2 and thick.opts["pen"].widthF() == 1 and thick.zValue() == 0
+    # a click on the picked one adds a cursor there
+    _click(vb, x[i], y[i])
     assert [n for n, _t in aw.cursors] == [1] and aw.cursors[0][1] == pytest.approx(x[i], abs=1e-6)
-    # far from every trace: a cursor only
+    assert sg.pick == (2, "wsk:1")
+    # far from every trace: nothing
     lo, hi = vb.viewRange()[1]
     vb.setYRange(hi + 50 * (hi - lo), hi + 60 * (hi - lo), padding=0)
     _click(vb, 1.0)
-    assert sg.pick == (2, "wsk:1") and len(aw.cursors) == 2
+    assert sg.pick == (2, "wsk:1") and len(aw.cursors) == 1
     # the pick falls back when its variable is unchecked
     aw.set_checked(["wsk:1"], False)
     assert _pump(app, lambda: sg.pick[1] == "wsk:0", 2)
@@ -284,6 +356,35 @@ def test_timeline_variables_independent(app, win):
     shown = [h for u, h in tl._heads.items() if u in tl.rows]
     assert _pump(app, lambda: all(h.isVisible() and abs(h.value() - win._replay.position) < 0.05
                                   for h in shown), 2)
+    aw.close()
+
+
+def test_timeline_row_height(app, win):
+    from wavi_py.views.analysis_timeline import ROW_MIN
+    aw, sels = _window(app, win)
+    aw.set_timeline(["depth", "imu:2", "imu:3", "wsk:0"])            # 4 unit rows
+    assert _pump(app, lambda: len(aw.timeline.rows) == 4, 2)
+    _pump(app, lambda: False, 0.3)
+    assert aw.timeline.minimumHeight() >= 4 * ROW_MIN
+    assert aw.timeline.height() >= aw.timeline.minimumHeight()
+    for p in aw.timeline.rows.values():
+        assert p.getViewBox().height() >= ROW_MIN - 12               # room for the y labels
+    # a new window's default: room for two rows at least
+    aw.reset_state(9)
+    assert aw.right.sizes()[0] >= 2 * ROW_MIN
+    aw.close()
+
+
+def test_spectrum_log_amplitude_default(app, win):
+    aw, sels = _window(app, win)
+    sp = aw.spectrum
+    assert sp.log_a.isChecked()
+    assert _pump(app, lambda: (1, "wsk:0") in sp.curves, 2)
+    f, a = aw.dataset().spectrum(sels[0], aw.dataset().variables[0], *sp.options)
+    _, y = sp.curves[(1, "wsk:0")].getData()
+    with np.errstate(divide="ignore"):
+        assert np.allclose(y, np.where(a > 0, np.log10(a), np.nan), equal_nan=True)
+    assert all(p.getAxis("left").logMode for p in sp.rows.values())
     aw.close()
 
 
@@ -470,12 +571,19 @@ def test_screenshots_r2(app, tmp_path):
             aw.add_cursor(t)
         _pump(app, lambda: False, 1.2)
         _shot(aw, "r2_window")
-        # a collapsed cell: the spectrum at the cursors dragged away
+        # one right cell collapsed (its button): the spectrogram takes the row's width
         g = aw.grid
-        g.bottom.moveSplitter(sum(g.bottom.sizes()) + 10, 1)
+        aw.at_cursors.header.collapse_btn.click()
         _pump(app, lambda: False, 0.8)
-        _shot(aw, "r2_collapsed_cell")
-        g.bottom.handle(1).mouseDoubleClickEvent(None)
+        _shot(aw, "r2_right_cell_collapsed")
+        g.restore(aw.at_cursors)
+        # a whole row collapsed: the waveform and spectrum take the height
+        aw.spectrogram.header.collapse_btn.click()
+        aw.at_cursors.header.collapse_btn.click()
+        _pump(app, lambda: False, 0.8)
+        _shot(aw, "r2_row_collapsed")
+        g.restore(aw.spectrogram)
+        g.restore(aw.at_cursors)
         _pump(app, lambda: False, 0.3)
         _shot(aw.centralWidget().widget(0), "r2_variables_tree")
         # the measured drag on real data: 3 selections x 4 gauges, 3 cursors

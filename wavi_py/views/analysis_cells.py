@@ -15,13 +15,14 @@ colour. Rows are unit groups (mV, mg, mrad/s, deg, cm).
 - ``WaveCell`` (top left, the former Compare tab): relative time, min / max
   decimated to the plot width (``Dataset.traces``). With the window's Select on,
   a drag makes the sub-range (a shaded band in every row, edges draggable). A
-  click adds a cursor; on a trace (within ``PICK_PX``) it also picks that
-  (variable, selection) for the spectrogram. Its X is linked to the
-  spectrogram's (``x_anchor``): pyqtgraph lines linked views up on screen, so a
-  time is at the same x in both.
+  click on a trace (within ``PICK_PX``) picks that (variable, selection) for the
+  spectrogram, which the window then marks (``set_picked``: drawn thick, on
+  top); a click on the picked trace adds a cursor; elsewhere nothing. Its time
+  range is copied to and from the spectrogram (``xChanged`` / ``set_x``: the
+  same span, whatever the two widths).
 - ``SpectrumCell`` (top right, the former Spectrum tab): ``Dataset.spectrum``
   per (variable, selection), of the whole selections or the sub-range. Options:
-  window, detrend, log f, log amplitude, f range (0 .. the highest Nyquist until
+  window, detrend, log f, log amplitude (on by default), f range (0 .. the highest Nyquist until
   edited). A trace is recomputed only when its inputs change (the selection's
   span, the options, Despike, that gauge's V0 / scale).
 - ``SpecgramCell`` (bottom left): ONE tile, the picked (variable, selection),
@@ -42,6 +43,9 @@ Their colours (``CURSOR_COLORS``: saturated red, green, azure, magenta, black)
 are none of the selections' muted ones, and solid (no dash styles); in the
 spectrogram they get a white outline to stand out on its colours.
 
+Every cell has a header with a collapse button at its right
+(``collapseRequested``; ``TITLE`` names it on the window's restore bar).
+
 Navigation (the window's keys and Probe) goes through ``nav_plots`` (the plots
 a Y key may act on), ``x_plot`` (the one X keys scale), ``on_manual`` (a key
 zoomed: stop following the data) and ``probe_items(plot)`` (the curves a
@@ -56,7 +60,7 @@ import numpy as np
 from PyQt6.QtCore import QPointF, Qt, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QHBoxLayout, QLabel,
-                             QSizePolicy, QStackedWidget, QVBoxLayout, QWidget)
+                             QSizePolicy, QStackedWidget, QToolButton, QVBoxLayout, QWidget)
 
 import pyqtgraph as pg
 
@@ -238,9 +242,20 @@ class _Header(QWidget):
         super().__init__(parent)
         # no minimum width: the 2x2's borders move freely (a narrow cell clips its options)
         self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-        v = QVBoxLayout(self)
-        v.setContentsMargins(4, 2, 4, 0)
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(4, 2, 2, 0)
+        outer.setSpacing(4)
+        v = QVBoxLayout()
+        v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(1)
+        outer.addLayout(v, 1)
+        # the cell's collapse button, top right (the window restores it from its bar)
+        self.collapse_btn = QToolButton()
+        self.collapse_btn.setText("–")
+        self.collapse_btn.setAutoRaise(True)
+        self.collapse_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.collapse_btn.setToolTip("Collapse this cell (the bar above the plots brings it back)")
+        outer.addWidget(self.collapse_btn, 0, Qt.AlignmentFlag.AlignTop)
         self.row = QHBoxLayout()
         self.row.setSpacing(6)
         v.addLayout(self.row)
@@ -269,6 +284,8 @@ class _Cell(QWidget):
     """A cell: an optional header over a hint page / a GraphicsLayoutWidget."""
 
     changed = pyqtSignal()                       # an option: redraw
+    collapseRequested = pyqtSignal()             # its header's collapse button
+    TITLE = ""                                   # the window's restore bar names it so
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -293,8 +310,18 @@ class _Cell(QWidget):
 
     def _add_header(self, sub_line: bool = True) -> _Header:
         self.header = _Header(sub_line=sub_line)
+        self.header.collapse_btn.clicked.connect(self.collapseRequested.emit)
         self._lay.insertWidget(0, self.header)
         return self.header
+
+    def _add_title(self, text: str) -> QLabel:
+        """A header with just a title (and the collapse button)."""
+        h = self._add_header(sub_line=False)
+        lab = QLabel(text)
+        lab.setStyleSheet("color: #444;")
+        lab.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        h.row.addWidget(lab, 1)
+        return lab
 
     def set_sub_text(self, sub) -> None:
         if self.header is not None:
@@ -308,7 +335,8 @@ class _Cell(QWidget):
     @property
     def showing(self) -> bool:
         """The plots page is up (not the hint) and the cell is not collapsed."""
-        return self._pages.currentIndex() == 1 and self.width() > 1 and self.height() > 1
+        return (self._pages.currentIndex() == 1 and not self.isHidden() and self.width() > 1
+                and self.height() > 1)
 
     # navigation (the window's keys / Probe)
     def nav_plots(self) -> list[pg.PlotItem]:
@@ -341,6 +369,7 @@ class _RowsCell(_Cell):
         self.probes: dict[str, pg.InfiniteLine] = {}     # unit -> its probe line
         self._legend_key: tuple = ()
         self._sel_labels: dict = {}                      # selection number -> its legend label
+        self.picked: Optional[tuple] = None              # (sel number, var key) drawn thicker
         self._auto = True                                # X follows the data
 
     def nav_plots(self) -> list[pg.PlotItem]:
@@ -402,11 +431,17 @@ class _RowsCell(_Cell):
             c.unit, c.look, c.label = var.unit, None, f"{var.label} #{sel.number}"
             self.rows[var.unit].addItem(c)
             self.curves[key] = c
-        look = (sel.number, lightness)
-        if c.look != look:                  # the shade follows the checked order
-            c.setPen(pg.mkPen(shade(sel_color(look[0]), look[1]), width=1))
-            c.look = look
+        self._style(key, c, sel.number, lightness)
         return c
+
+    def _style(self, key: tuple, c: pg.PlotCurveItem, number: int, lightness) -> None:
+        """The pen: the selection's colour in the variable's shade (the checked order);
+        the picked trace (waveform) thicker and on top."""
+        look = (number, lightness, key == self.picked)
+        if c.look != look:
+            c.setPen(pg.mkPen(shade(sel_color(number), lightness), width=2.5 if look[2] else 1))
+            c.setZValue(5 if look[2] else 0)
+            c.look = look
 
     def _drop(self, seen: set) -> None:
         for key in [k for k in self.curves if k not in seen]:
@@ -463,26 +498,50 @@ class WaveCell(_RowsCell):
     ``subChanged(sub or None)``; ``clicked(t, (sel number, var key) or None)``."""
 
     X_LABEL = ("Time from the selection's start", "s")
+    TITLE = "Waveform"
     subChanged = pyqtSignal(object)
     clicked = pyqtSignal(float, object)
+    xChanged = pyqtSignal(float, float)          # the time range shown (the spectrogram copies it)
 
     def __init__(self, selecting: Callable[[], bool] = lambda: False,
-                 x_anchor: Optional[pg.PlotItem] = None, parent: Optional[QWidget] = None):
+                 parent: Optional[QWidget] = None):
         super().__init__(parent)
         self._selecting = selecting
-        self._anchor = x_anchor
         self.sub: Optional[tuple] = None
         self.bands: list[pg.LinearRegionItem] = []
+        self.title = self._add_title(
+            "Waveform · click a trace: the spectrogram shows it (drawn thick) · click the thick"
+            " one again: a cursor there")
+        self.glw.setToolTip("Click a trace to show it in the spectrogram (it is then drawn"
+                            " thick); click the thick trace again to add a cursor there")
 
     def x_plot(self) -> Optional[pg.PlotItem]:
-        return next(iter(self.rows.values()), None) if self.rows else self._anchor
+        return next(iter(self.rows.values()), None)
 
-    def _link_x(self, p: pg.PlotItem, first: Optional[pg.PlotItem]) -> None:
-        # every row to the spectrogram (one link group; lined up on screen)
-        if self._anchor is not None:
-            p.setXLink(self._anchor)
-        elif first is not None:
-            p.setXLink(first)
+    def _rebuild_rows(self, units: list[str]) -> None:
+        self.bands = []
+        super()._rebuild_rows(units)
+        first = self.x_plot()
+        if first is not None:
+            first.getViewBox().sigXRangeChanged.connect(
+                lambda _vb, r: self.xChanged.emit(float(r[0]), float(r[1])))
+
+    def set_x(self, lo: float, hi: float) -> None:
+        """The time range from the spectrogram (the same span, whatever the widths)."""
+        p = self.x_plot()
+        if p is not None:
+            x0, x1 = p.getViewBox().viewRange()[0]
+            if abs(x0 - lo) > 1e-9 or abs(x1 - hi) > 1e-9:
+                p.setXRange(lo, hi, padding=0)
+
+    def set_picked(self, pick: Optional[tuple]) -> None:
+        """The trace the spectrogram shows: drawn thick and on top."""
+        if pick == self.picked:
+            return
+        self.picked = pick
+        for key, c in self.curves.items():
+            if c.look is not None:
+                self._style(key, c, c.look[0], c.look[1])
 
     def _row_added(self, p: pg.PlotItem) -> None:
         _hook_drag(p.getViewBox(), self._drag)
@@ -497,10 +556,6 @@ class WaveCell(_RowsCell):
         band.sigRegionChanged.connect(self._band_dragged)
         p.addItem(band, ignoreBounds=True)
         self.bands.append(band)
-
-    def _rebuild_rows(self, units: list[str]) -> None:
-        self.bands = []
-        super()._rebuild_rows(units)
 
     def _drag(self, vb: pg.ViewBox, ev) -> bool:
         if not self._selecting() or ev.button() != Qt.MouseButton.LeftButton:
@@ -606,6 +661,7 @@ class SpectrumCell(_RowsCell):
     """Amplitude spectra per (variable, selection) (see the module doc)."""
 
     X_LABEL = ("Frequency", "Hz")
+    TITLE = "Spectrum"
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -621,6 +677,7 @@ class SpectrumCell(_RowsCell):
         h.new_row()
         self.log_f = h.add("", QCheckBox("log f"))
         self.log_a = h.add("", QCheckBox("log amp"))
+        self.log_a.setChecked(True)                   # the default: spectra span decades
         self.log_a.setToolTip("Log amplitude axis")
         self.f_lo = h.add("f", _spin(0.0, 1e5, 0.0, 2))
         self.f_hi = h.add("..", _spin(0.0, 1e5, 0.0, 2, special="Nyquist"))
@@ -723,6 +780,7 @@ class SpecgramCell(_Cell):
     ``clicked(t)``: a click in the tile (the window adds a cursor)."""
 
     clicked = pyqtSignal(float)
+    TITLE = "Spectrogram"
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -958,8 +1016,11 @@ class SpecgramCell(_Cell):
 class CursorCell(_Cell):
     """The picked tile's spectrum at each cursor (see the module doc)."""
 
+    TITLE = "At the cursors"
+
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
+        self.title = self._add_title("Spectrum at the cursors")
         self.plot = self.glw.addPlot(row=0, col=0)
         self.plot.setMenuEnabled(False)
         self.plot.hideButtons()
@@ -1013,8 +1074,8 @@ class CursorCell(_Cell):
         self._pages.setCurrentIndex(1)
         self._unit = f"dB re 1 {spec.unit}" if spec.db else spec.unit
         self.plot.setLabel("left", self._unit)
-        self.plot.setTitle(f"At the cursors: {spec.var.label}  #{spec.sel.number}",
-                           color=sel_color(spec.sel.number).name(), size="9pt")
+        self.title.setText(f"Spectrum at the cursors: <span style='color:"
+                           f"{sel_color(spec.sel.number).name()}'>{spec.var.label}  #{spec.sel.number}</span>")
         nums = {n for n, _t in cursors}
         for n in [n for n in self.curves if n not in nums]:
             self.plot.removeItem(self.curves.pop(n))

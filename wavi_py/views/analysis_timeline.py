@@ -17,6 +17,10 @@ There is no click-seek, so a click on a region or a near miss does not move
 the playhead. The view starts on the whole source and keeps a hand zoom
 (``zoomed``) until Reset (R).
 
+Each row keeps at least ``ROW_MIN`` px, so its y labels don't overlap; the
+cell's minimum height grows with the rows, and the window's splitter makes
+room for it.
+
 The rows are kept (a unit's plot and its overlay are made once and only moved
 in the layout), so checking variables does not rebuild the regions.
 """
@@ -42,6 +46,8 @@ TIMELINE_COLORS = ((40, 90, 170), (70, 70, 70), (20, 120, 60), (150, 30, 30), (1
                    (0, 110, 120))
 _HEAD_PEN = pg.mkPen((210, 0, 0), width=2)
 _BARE = ""                                       # the row shown with no variable
+ROW_MIN = 58                                     # px a row keeps (its y labels don't overlap)
+_AXIS_H = 34                                     # the bottom row's time axis and label
 
 
 class TimelineCell(_Cell):
@@ -131,6 +137,10 @@ class TimelineCell(_Cell):
             self._anchor.setXRange(*xr, padding=0)
         last = self.rows[units[-1]]
         last.setLabel("bottom", "Recording time", units="s")
+        for p in self.rows.values():
+            p.setMinimumHeight(ROW_MIN + (_AXIS_H if p is last else 0))
+        # the splitter keeps the timeline at least this tall (it grows with the rows)
+        self.setMinimumHeight(len(units) * ROW_MIN + _AXIS_H + 6)
         self.show_position()
 
     def _on_manual(self, *_a) -> None:
