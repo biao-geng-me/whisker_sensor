@@ -38,8 +38,8 @@ from typing import Optional
 import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtCore import QObject, QPoint, Qt, pyqtSignal
-from PyQt6.QtWidgets import (QComboBox, QHBoxLayout, QLabel, QLineEdit, QPushButton, QToolTip,
-                             QVBoxLayout, QWidget)
+from PyQt6.QtWidgets import (QComboBox, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
+                             QSizePolicy, QToolTip, QVBoxLayout, QWidget)
 
 from wavi_py.transports.replay_transport import SPEEDS
 
@@ -324,16 +324,22 @@ class ReplayControls(QWidget):
         self._speed.activated.connect(lambda i: model.set_speed(self._speed.itemData(i)))
         self._time = QLabel("–")
         self._time.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        # cut at the right in a narrow window instead of setting the window's width,
+        # but the position always shows
+        self._time.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self._time.setMinimumWidth(self._time.fontMetrics().horizontalAdvance("00:00.0 / 00:00.0"))
         self._goto = QLineEdit()
         self._goto.setPlaceholderText("go to: 2:03 / 40cm / max")
         self._goto.setToolTip("Seek to a time (seconds or m:ss), to the next time the depth\n"
                               "crosses a value (40cm; -40cm: the previous one), or to the\n"
                               "deepest point (max). Enter to go.")
-        self._goto.setFixedWidth(150)
+        self._goto.setMinimumWidth(100)
+        self._goto.setMaximumWidth(150)
         self._goto.returnPressed.connect(self._on_goto)
-        for w in (self._back, self._play, self._fwd):
+        for w, widest in ((self._back, "◀◀"), (self._play, "❚❚ Pause"), (self._fwd, "▶▶")):
             w.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             w.setMaximumWidth(80)
+            w.setMinimumWidth(w.fontMetrics().horizontalAdvance(widest) + 20)   # not the style's 80
         h.addWidget(self._back)
         h.addWidget(self._play)
         h.addWidget(self._fwd)
@@ -505,7 +511,7 @@ class TimelineBar(QWidget):
                                " to zoom / pan time, double-click for all of it")
         self.events.activated.connect(self._on_event_picked)
         side.addWidget(self.events)
-        row = QHBoxLayout()
+        row = QGridLayout()               # 2 x 2: the side column stays narrow
         side.addLayout(row)
         self._prev = QPushButton("◀ event")
         self._prev.setToolTip("Previous event [,]")
@@ -522,9 +528,9 @@ class TimelineBar(QWidget):
         self.export_btn.setToolTip("Save the loop range (without Loop: the Line window's time"
                                    " span) as a .jsonl clip or a .dat")
         self.export_btn.clicked.connect(model.exportRequested.emit)
-        for w in (self._prev, self._next, self.loop_btn, self.export_btn):
+        for i, w in enumerate((self._prev, self._next, self.loop_btn, self.export_btn)):
             w.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            row.addWidget(w)
+            row.addWidget(w, i // 2, i % 2)
         side.addStretch(1)
         self._dragging = False
         self.strip.head.sigDragged.connect(self._on_drag)

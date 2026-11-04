@@ -209,7 +209,10 @@ def test_timeline(app, win):
     w._toggle_line.setChecked(True)
     bars = [d.widget() for d in w._timeline_docks]
     assert len(bars) == 6 and all(isinstance(b, TimelineBar) for b in bars)
-    assert all(d.isVisible() for d in (w._timeline_docks[0], w._line_view.timeline_dock))
+    assert w._timeline_docks[0].isVisible()
+    assert not w._line_view.timeline_dock.isVisible()      # windows: hidden by default
+    w._line_view.timeline_dock.toggleViewAction().trigger()
+    assert w._line_view.timeline_dock.isVisible()
     bar = w._line_view.timeline_dock.widget()
     evs = w._index.events
     assert bar.events.count() == len(evs) + 1 and bar.controls.isVisible()

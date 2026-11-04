@@ -1,7 +1,8 @@
 """Toolbar defaults and value-box typing (offscreen): Link Y on by default, typing
 into every value box while data flows (the FFT / Spec colour min / max boxes used
 to be overwritten by each Auto redraw), the FFT lower plot's default mode and its
-Box over time history on data time (a replay at 8x).
+Box over time history on data time (a replay at 8x), and the view windows' timeline
+hidden by default.
 
 Run: QT_QPA_PLATFORM=offscreen python -m pytest wavi_py/tests/test_ui_defaults.py
 """
@@ -21,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from PyQt6.QtCore import Qt  # noqa: E402
 from PyQt6.QtTest import QTest  # noqa: E402
-from PyQt6.QtWidgets import QApplication, QMessageBox  # noqa: E402
+from PyQt6.QtWidgets import QApplication, QMessageBox, QToolBar  # noqa: E402
 
 from wavi_py.tests import replay_fixture as fx  # noqa: E402
 
@@ -287,3 +288,34 @@ def test_spectral_columns_wait_for_despike(app, sim):
         w._fft_view.update_view = orig
     lag = w._despiker.pending / w._fs
     assert seen and all(newest - last >= lag - 1.5 / w._fs for last, newest in seen)
+
+
+# ----------------------------------------------------------------------
+# timeline: the panel's shows with a source, the view windows' only on request
+# ----------------------------------------------------------------------
+
+def test_timeline_hidden_in_view_windows(app, tmp_path):
+    from wavi_py.main_window import MainWindow
+    p = tmp_path / "rec.jsonl"
+    fx.write_recording(p)
+    w = MainWindow(transport="replay", nsensor=16, fs=80.0, t_buffer_s=2.0, replay_path=str(p))
+    w.show()
+    try:
+        w.open_replay(str(p))
+        assert _pump(app, 10, lambda: w._client is not None and w._replay.active)
+        w._toggle_line.setChecked(True)
+        w._toggle_imu.setChecked(True)
+        _pump(app, 0.1)
+        assert w._timeline_docks[0].isVisible()                     # the panel keeps it
+        for v in (w._line_view, w._imu_view):
+            d = v.timeline_dock
+            assert v.isVisible() and not d.isVisible()
+            act = d.toggleViewAction()
+            assert act in v.findChildren(QToolBar)[0].actions()      # on its toolbar
+            act.trigger()                                           # the Timeline toggle
+            assert d.isVisible()
+        w._disconnect()                                             # no source: all go
+        _pump(app, 0.1)
+        assert not any(d.isVisible() for d in w._timeline_docks)
+    finally:
+        w.close()

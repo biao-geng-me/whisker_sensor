@@ -41,6 +41,7 @@ import numpy as np
 from PyQt6.QtCore import QRegularExpression, QTimer, Qt
 from PyQt6.QtGui import QGuiApplication, QKeySequence, QRegularExpressionValidator, QShortcut
 from PyQt6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QFileDialog,
@@ -81,7 +82,8 @@ from wavi_py.scan_mode import (DEFAULT_SELECTS, PRESETS, ModeKeeper, ScanRequest
                                legacy_nominal_hz, parse_selects)
 from wavi_py.transports.sim_transport import SimSignals
 from wavi_py.views import FftView, ImuView, LineView, SpectrogramView, SpectrumView
-from wavi_py.views.base import add_timeline_dock, alarm_label, show_alarm
+from wavi_py.views.base import (REC_FOREIGN, REC_OFF, REC_ON, REC_PENDING, ViewWindow,
+                                add_timeline_dock, alarm_label, bring_to_front, show_alarm)
 from wavi_py.views.fault_log import FaultLogView
 from wavi_py.views.replay_bar import FINE_STEP_S, STEP_S, ReplayModel, TimelineBar, fmt_t
 from wavi_py.views.sim_panel import SimPanel
@@ -127,6 +129,13 @@ class _WrapLabel(QLabel):
         h = self.heightForWidth(max(1, self.width()))
         if h > 0 and h != self.minimumHeight():
             self.setMinimumHeight(h)
+
+
+def _compact(*btns) -> None:
+    """Let text buttons shrink to their text: the style's 80 px minimum per button is
+    what made the panel's button rows (and so the panel) wide."""
+    for b in btns:
+        b.setMinimumWidth(b.fontMetrics().horizontalAdvance(b.text()) + 20)
 
 
 def _same_rec(a: Optional[str], b: Optional[str]) -> bool:
@@ -312,11 +321,14 @@ class MainWindow(QMainWindow):
         self._replay.stateChanged.connect(self._on_replay_state)
         self._replay.seeked.connect(lambda _t: self._line_view.go_live())
         # the timeline (replay controls, depth, events): a dock in the panel and in
-        # every view window, all on the one model; shown while there is a source
+        # every view window, all on the one model; the panel's is shown while there is
+        # a source, the windows' only by their Timeline toggle
         self._timeline_docks = [add_timeline_dock(self, TimelineBar(self._replay))]
+        self._rec_shown: Optional[tuple] = None     # what the windows' indicators show
         for v in (self._line_view, self._spectrum_view, self._fft_view, self._spec_view,
                   self._imu_view):
             self._timeline_docks.append(v.add_timeline(TimelineBar(self._replay)))
+            v.add_chrome(self._fill_goto)
         self._replay.sourceChanged.connect(self._show_timelines)
         self._replay.liveSeekRequested.connect(self._show_time_from_buffer)
         self._replay.exportRequested.connect(self.export_range)
@@ -418,8 +430,10 @@ class MainWindow(QMainWindow):
     def _build_transport_group(self) -> QGroupBox:
         box = QGroupBox("Sensor array")
         rows = QVBoxLayout(box)
-        h = QHBoxLayout()
+        h = QHBoxLayout()                     # transport, Connect, Signals, Reset ESP32
         rows.addLayout(h)
+        addr = QHBoxLayout()                  # host / port / serial, or the file
+        rows.addLayout(addr)
         rows.addLayout(self._build_scan_mode_row())
 
         self._transport_combo = QComboBox()
@@ -461,14 +475,22 @@ class MainWindow(QMainWindow):
         self._live_inputs = [QLabel("Host:"), self._host_edit, QLabel("Port:"), self._port_spin,
                              QLabel("Serial:"), self._serial_port_edit]
         self._replay_inputs = [QLabel("File:"), self._file_edit, self._browse_btn]
+        _compact(self._browse_btn, self._connect_btn, self._sim_btn)
+        self._connect_btn.setMinimumWidth(                  # Connect / Disconnect
+            self._connect_btn.fontMetrics().horizontalAdvance("Disconnect") + 20)
+        self._host_edit.setMinimumWidth(60)
+        self._serial_port_edit.setMinimumWidth(60)
+        self._file_edit.setMinimumWidth(60)
         h.addWidget(QLabel("Transport:"))
         h.addWidget(self._transport_combo)
-        for w, stretch in zip(self._live_inputs, (0, 2, 0, 0, 0, 1)):
-            h.addWidget(w, stretch=stretch)
-        for w, stretch in zip(self._replay_inputs, (0, 3, 0)):
-            h.addWidget(w, stretch=stretch)
+        h.addStretch(1)
         h.addWidget(self._connect_btn)
         h.addWidget(self._sim_btn)
+        h.addWidget(self._esp32_reset_btn)
+        for w, stretch in zip(self._live_inputs, (0, 2, 0, 0, 0, 1)):
+            addr.addWidget(w, stretch=stretch)
+        for w, stretch in zip(self._replay_inputs, (0, 3, 0)):
+            addr.addWidget(w, stretch=stretch)
 
         self._on_transport_changed(self._transport_combo.currentText())
         return box
@@ -494,6 +516,11 @@ class MainWindow(QMainWindow):
             "'as is' sends nothing. The legacy rate depends on the selects (~89 Hz for 7);\n"
             "the measured rate is shown.")
         self._mode_combo.activated.connect(lambda _i: self._on_scan_mode_changed(force=True))
+        # cut long preset names in the closed box (the list shows them whole), so the
+        # row doesn't set the panel's width
+        self._mode_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self._mode_combo.setMinimumContentsLength(10)
         self._selects_edit = QLineEdit(self._initial_selects)
         self._selects_edit.setPlaceholderText("all 8")
         self._selects_edit.setMaxLength(8)
@@ -517,7 +544,7 @@ class MainWindow(QMainWindow):
             "Doesn't power-cycle the whisker PCB, so it won't clear an ADC lock-up.")
         self._esp32_reset_btn.clicked.connect(self._on_esp32_reset_clicked)
         self._esp32_reset_btn.setEnabled(False)
-        h.addWidget(self._esp32_reset_btn)
+        _compact(self._esp32_reset_btn)       # on the transport row (_build_transport_group)
         self._show_mode_note()
         return h
 
@@ -593,7 +620,11 @@ class MainWindow(QMainWindow):
 
     def _build_view_buttons(self) -> QGroupBox:
         box = QGroupBox("Views")
-        h = QHBoxLayout(box)
+        rows = QVBoxLayout(box)
+        h = QHBoxLayout()                 # the plot windows
+        h2 = QHBoxLayout()                # the 3D windows, the map; despike, pause, reset
+        rows.addLayout(h)
+        rows.addLayout(h2)
 
         self._toggle_line = QPushButton("Line")
         self._toggle_line.setCheckable(True)
@@ -662,18 +693,27 @@ class MainWindow(QMainWindow):
         self._map_btn.setMenu(menu)
 
         h.addWidget(self._toggle_imu)
-        h.addWidget(self._toggle_dome)
-        h.addWidget(self._toggle_rov)
-        h.addWidget(self._map_btn)
-        h.addStretch(1)
-        h.addWidget(self._despike_chk)
-        h.addWidget(self._pause_btn)
-        h.addWidget(self._reset_btn)
+        h2.addWidget(self._toggle_dome)
+        h2.addWidget(self._toggle_rov)
+        h2.addWidget(self._map_btn)
+        h2.addStretch(1)
+        h2.addWidget(self._despike_chk)
+        h2.addWidget(self._pause_btn)
+        h2.addWidget(self._reset_btn)
+        _compact(self._toggle_line, self._toggle_spectrum, self._toggle_fft, self._toggle_spec,
+                 self._toggle_imu, self._toggle_dome, self._toggle_rov, self._pause_btn,
+                 self._reset_btn)
+        self._pause_btn.setMinimumWidth(                    # it says Resume when paused
+            self._pause_btn.fontMetrics().horizontalAdvance("Resume") + 20)
         return box
 
     def _build_record_row(self) -> QGroupBox:
         box = QGroupBox("Record")
-        h = QHBoxLayout(box)
+        rows = QVBoxLayout(box)
+        h = QHBoxLayout()                 # tag, Rec
+        h2 = QHBoxLayout()                # auto-stop, Mark bad
+        rows.addLayout(h)
+        rows.addLayout(h2)
 
         self._tag_edit = QLineEdit()
         self._tag_edit.setPlaceholderText("tag (alphanumerics, _ -)")
@@ -704,11 +744,13 @@ class MainWindow(QMainWindow):
         self._record_btn.setMinimumWidth(
             self._record_btn.fontMetrics().horizontalAdvance("■ Stop ROV rec 99999s") + 24)
 
+        self._tag_edit.setMinimumWidth(60)
         h.addWidget(QLabel("Tag:"))
-        h.addWidget(self._tag_edit, stretch=2)
-        h.addWidget(self._auto_stop_chk)
-        h.addWidget(self._auto_stop_spin)
+        h.addWidget(self._tag_edit, stretch=1)
         h.addWidget(self._record_btn)
+        h2.addWidget(self._auto_stop_chk)
+        h2.addWidget(self._auto_stop_spin)
+        h2.addStretch(1)
 
         # the vehicle's recording index (trials.jsonl on the Pi): flag the newest
         # recording bad, or good again; the file stays, convert skips bad ones
@@ -717,7 +759,7 @@ class MainWindow(QMainWindow):
         self._flag_btn.setEnabled(False)
         self._flag_btn.setMinimumWidth(
             self._flag_btn.fontMetrics().horizontalAdvance("Unmark bad") + 24)
-        h.addWidget(self._flag_btn)
+        h2.addWidget(self._flag_btn)
         return box
 
     def _build_status_row(self) -> QGroupBox:
@@ -738,6 +780,7 @@ class MainWindow(QMainWindow):
         self._fault_log_btn = QPushButton("Fault log")
         self._fault_log_btn.setToolTip("ESP32 / ADC faults and warnings this session")
         self._fault_log_btn.clicked.connect(self._show_fault_log)
+        _compact(self._fault_log_btn)
         h = QHBoxLayout()
         h.addWidget(self._path_label, stretch=1)
         h.addWidget(self._fault_log_btn)
@@ -998,10 +1041,92 @@ class MainWindow(QMainWindow):
 
     def _toggle_window(self, win: QMainWindow, show: bool) -> None:
         if show:
-            win.show()
-            win.raise_()
+            bring_to_front(win)
         else:
             win.hide()
+
+    # ----- the windows' Go to menu and recording indicator
+    def _view_entries(self) -> tuple:
+        """(name, panel button, the window or None) of every view, in the panel's order."""
+        return (("Line", self._toggle_line, self._line_view),
+                ("Spectrum", self._toggle_spectrum, self._spectrum_view),
+                ("FFT", self._toggle_fft, self._fft_view),
+                ("Spec", self._toggle_spec, self._spec_view),
+                ("IMU", self._toggle_imu, self._imu_view),
+                ("Dome", self._toggle_dome, self._dome_view),
+                ("ROV", self._toggle_rov, self._rov_view))
+
+    def show_view(self, name: str) -> None:
+        """Open view ``name`` if it is closed (through its panel button, so the button,
+        lazy building and everything else go as with a click) and bring it to the
+        front either way; the Go to menus use this."""
+        for n, btn, win in self._view_entries():
+            if n == name:
+                if not btn.isChecked():
+                    btn.setChecked(True)          # -> _toggle_window(win, True)
+                elif win is not None:
+                    self._toggle_window(win, True)
+                return
+        raise KeyError(name)
+
+    def _fill_goto(self, menu: QMenu) -> None:
+        """A view window's Go to menu, built as it opens: the panel, then every view
+        (checked: open)."""
+        menu.addAction("Control panel", lambda: bring_to_front(self))
+        menu.addSeparator()
+        for name, btn, win in self._view_entries():
+            act = menu.addAction(name)
+            act.setCheckable(True)
+            act.setChecked(win is not None and win.isVisible())
+            act.setEnabled(btn.isEnabled())
+            act.setToolTip(btn.toolTip())
+            act.triggered.connect(lambda _=False, n=name: self.show_view(n))
+
+    def _add_chrome(self, v: ViewWindow) -> None:
+        v.add_chrome(self._fill_goto)
+        self._rec_shown = None                    # push the current state to it too
+        self._push_rec_state()
+
+    def _chrome_views(self) -> list:
+        return [w for _n, _b, w in self._view_entries() if w is not None]
+
+    def _push_rec_state(self) -> None:
+        """Show the Rec state in every view window's indicator (from here only: the
+        Rec button's state and the recording's clock). Cheap when nothing changed, so
+        the tick calls it; it repaints once a second, or per 0.5 % of an auto-stop."""
+        tip = ""
+        if self._is_recording:
+            el = ((datetime.now() - self._record_start_dt).total_seconds()
+                  if self._record_start_dt is not None else 0.0)
+            st, total = REC_ON, self._auto_stop_s
+        elif self._rec_cmd is not None:
+            st, el, total = REC_PENDING, 0.0, 0.0
+        elif self._foreign_rec is not None:
+            r = self._foreign_rec
+            st, el, total = REC_FOREIGN, float(r.get("secs") or 0.0), 0.0
+            tip = self._record_btn.toolTip()
+        else:
+            st, el, total = REC_OFF, 0.0, 0.0
+        key = (st, int(el), int(200 * el / total) if total > 0 else 0, total, tip)
+        if key == self._rec_shown:
+            return
+        self._rec_shown = key
+        for v in self._chrome_views():
+            if v.rec_indicator is not None:
+                v.rec_indicator.set_state(st, el, total, tip)
+
+    def _rec_shortcut(self) -> None:
+        """Ctrl+R in any wavi_py window: what a click on Rec does, when it is enabled."""
+        if self._record_btn.isEnabled():
+            self._record_btn.click()
+            return
+        why = ("Ctrl+R: no recording in replay (read-only)" if self._replaying else
+               "Ctrl+R: waiting for the server's reply" if self._rec_cmd is not None else
+               "Ctrl+R: connect first to record")
+        self._note(why)
+        win = QApplication.activeWindow()
+        if isinstance(win, ViewWindow) and win is not self:
+            win.statusBar().showMessage(why, 3000)
 
     def _toggle_dome_view(self, show: bool) -> None:
         if show and self._dome_view is None:
@@ -1018,7 +1143,7 @@ class MainWindow(QMainWindow):
                 return
             self._dome_view.closed.connect(lambda: self._toggle_dome.setChecked(False))
             self._timeline_docks.append(self._dome_view.add_timeline(TimelineBar(self._replay)))
-            self._timeline_docks[-1].setVisible(self._replay.source is not None)
+            self._add_chrome(self._dome_view)
             self._dome_view.set_paused(self._is_paused)
             self._dome_view.update_imu(self._imu_t, self._imu_rows)
             if self._client is not None:
@@ -1050,7 +1175,7 @@ class MainWindow(QMainWindow):
                 return
             self._rov_view.closed.connect(lambda: self._toggle_rov.setChecked(False))
             self._timeline_docks.append(self._rov_view.add_timeline(TimelineBar(self._replay)))
-            self._timeline_docks[-1].setVisible(self._replay.source is not None)
+            self._add_chrome(self._rov_view)
             self._rov_view.update_view(self._imu_t, self._imu_rows)
         if self._rov_view is not None:
             self._toggle_window(self._rov_view, show)
@@ -1154,9 +1279,13 @@ class MainWindow(QMainWindow):
             self._dome_view.set_paused(on)
 
     def _show_timelines(self) -> None:
+        """The panel's timeline while there is a source; the windows' stay as their
+        Timeline toggle has them (hidden by default), but go when the source does."""
         on = self._replay.source is not None
-        for d in self._timeline_docks:
-            d.setVisible(on)
+        self._timeline_docks[0].setVisible(on)
+        if not on:
+            for d in self._timeline_docks[1:]:
+                d.hide()
         if on and self.height() < 480:
             self.resize(max(self.width(), 760), self.height() + 170)
 
@@ -1169,6 +1298,9 @@ class MainWindow(QMainWindow):
         def key(seq, fn) -> None:
             QShortcut(QKeySequence(seq), self, activated=fn)
         key(Qt.Key.Key_Space, lambda: self._pause_btn.isEnabled() and self._pause_btn.toggle())
+        # Ctrl+R: Rec from any wavi_py window (the view windows' own R is Reset view)
+        QShortcut(QKeySequence("Ctrl+R"), self, activated=self._rec_shortcut,
+                  context=Qt.ShortcutContext.ApplicationShortcut)
         key(Qt.Key.Key_Left, lambda: m.step(-STEP_S))
         key(Qt.Key.Key_Right, lambda: m.step(STEP_S))
         key("Shift+Left", lambda: m.step(-FINE_STEP_S))
@@ -1686,6 +1818,7 @@ class MainWindow(QMainWindow):
             if locked else
             "Stop each recording after the time in the box. With daq_server the server\n"
             "stops it itself, so it also stops if this window is gone.")
+        self._push_rec_state()
 
     # ------------------------------------------------------------------
     # the data tick
@@ -1743,6 +1876,7 @@ class MainWindow(QMainWindow):
             self._ingest(samples[pos:], first + pos, times[pos:])
         if self._is_recording:
             self._maybe_auto_stop()
+        self._push_rec_state()
 
         # Time axis: each buffered sample's time (session seconds; from the stream's
         # clocks, else the sample index since the stream start / fs).

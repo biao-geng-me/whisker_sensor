@@ -593,6 +593,8 @@ class WhiskerPlotsView(ViewWindow):
         msg = self.statusBar().currentMessage()
         if msg:
             room = self.statusBar().width() - self.fontMetrics().horizontalAdvance(msg) - 40
+            if self.rec_indicator is not None:                    # also on the right
+                room -= self.rec_indicator.width()
             self._stream_status.setMaximumWidth(max(0, room))
         else:
             self._stream_status.setMaximumWidth(16777215)          # QWIDGETSIZE_MAX
