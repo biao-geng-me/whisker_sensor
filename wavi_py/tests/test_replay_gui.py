@@ -120,9 +120,12 @@ def test_open_play_seek(app, win):
     _pump(app, lambda: False, 0.3)
     assert w._replay.state == "paused" and w._replay.position == pos and not w._is_paused
     # seek while paused: the buffers start over at the new position (preroll 2 s)
+    # (wait for this seek to be handled, its "live" mark in: if a slow run let playback
+    # pass 6.4 s before the pause, the old buffer alone would meet "> 6.4")
+    gen = w._replay_gen
     w._replay.seek(6.5)
-    assert _pump(app, lambda: w._samples_since_clear > 0
-                 and w._sig_t[-1] > 6.4, 5)
+    assert _pump(app, lambda: w._replay_gen > gen and w._replay_seek_at is None
+                 and w._samples_since_clear > 0 and w._sig_t[-1] > 6.4, 5)
     n = w._samples_since_clear
     assert w._sig_t[-n:].min() > 6.5 - 2.0 - 0.05           # nothing from before the seek
     assert w._replay.state == "paused"
