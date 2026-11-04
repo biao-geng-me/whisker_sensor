@@ -93,6 +93,7 @@ from wavi_py.config import (
 )
 from wavi_py.daq.analysis import SelSource, imu_variables, snapshot_of, whisker_variables
 from wavi_py.daq.despike import Despiker
+from wavi_py.daq.ring import Window
 from wavi_py.daq.series import IMU, WSK, ArraySeries, Series
 from wavi_py.daq.server_reader import IMU_CHANNELS
 from wavi_py.daq.spectra import SPEC_COL_HZ, SpecHistory, amp_spectra, amp_spectrum
@@ -380,8 +381,10 @@ class MainWindow(QMainWindow):
         """Size the rolling buffers for sample rate ``fs`` and clear them."""
         self._fs = float(fs)
         self._ns_tot = max(int(round(self._fs * FFT_WINDOWS_S[-1])), int(self._t_buffer_s * self._fs))
-        self._sig = np.full((self._ns_tot, self._nch), np.nan, dtype=np.float32)
-        self._sig_t = np.full(self._ns_tot, np.nan)      # the samples' times (session s)
+        # the samples and their times (session s): the newest _ns_tot, appended without
+        # moving the rest (daq/ring.py); _sig / _sig_t are its windows
+        self._ring = Window(self._ns_tot, [((self._nch,), np.float32), ((), np.float64)])
+        self._series_cache = None
         self._size_spectral()
         # Track how many real samples are sitting in `_sig` since the last
         # connect/reset. Used to feed only the populated portion to the line
@@ -390,6 +393,21 @@ class MainWindow(QMainWindow):
         self._samples_since_clear = 0
         if getattr(self, "_dome_view", None) is not None:
             self._dome_view.set_rate(self._fs)
+
+    @property
+    def _sig(self) -> np.ndarray:
+        """The rolling whisker buffer (the newest ``_ns_tot`` samples, oldest first; NaN
+        before the first ``_samples_since_clear``): a view of the ring's window."""
+        return self._ring.window(0)
+
+    @property
+    def _sig_t(self) -> np.ndarray:
+        return self._ring.window(1)
+
+    def _clear_sig(self) -> None:
+        self._ring.fill(np.nan)
+        self._samples_since_clear = 0
+        self._series_cache = None
 
     def _size_spectral(self) -> None:
         """Size (and clear) the FFT frame and the spectrogram history."""
@@ -969,15 +987,20 @@ class MainWindow(QMainWindow):
     def series(self) -> Series:
         """The plot data through the series API (``daq/series.py``): the whole
         recording in replay (once built), else the live rolling buffers, whisker
-        (``t_buffer_s``) and IMU. The live arrays move on the next tick: read at once
-        (reads copy)."""
+        (``t_buffer_s``) and IMU, as of the last tick: a snapshot (copied on the
+        first call after new data; later calls in the same tick share it), so it
+        can be kept and read later, e.g. paused. Reads copy, as always."""
         if self._store is not None:
             return self._store
-        n = self._samples_since_clear
-        names = [f"W{i // 2 + 1}_{'AB'[i % 2]}" for i in range(self._nch)]
-        return ArraySeries({WSK: (self._sig_t[len(self._sig_t) - n:], self._sig[len(self._sig) - n:]),
-                            IMU: (self._imu_t, self._imu_rows)},
-                           {WSK: names, IMU: IMU_CHANNELS})
+        if self._series_cache is None:
+            n = self._samples_since_clear
+            names = [f"W{i // 2 + 1}_{'AB'[i % 2]}" for i in range(self._nch)]
+            t, sig = self._sig_t, self._sig
+            self._series_cache = ArraySeries(
+                {WSK: (t[len(t) - n:].copy(), sig[len(sig) - n:].copy()),
+                 IMU: (self._imu_t, self._imu_rows)},        # replaced, never changed in place
+                {WSK: names, IMU: IMU_CHANNELS})
+        return self._series_cache
 
     def _connect(self, index: Optional[RecordingIndex] = None) -> None:
         try:
@@ -1013,8 +1036,7 @@ class MainWindow(QMainWindow):
         self._despike_chk.blockSignals(False)
         self._despiker = None if self._replaying else Despiker()
         self._samples_since_spec_update = 0
-        self._samples_since_clear = 0
-        self._sig.fill(np.nan)
+        self._clear_sig()
         self._spec_hist.clear()
         self._fft_map.fill(0)
         # Force the metadata-latching path in _on_tick to re-run; otherwise
@@ -1032,7 +1054,6 @@ class MainWindow(QMainWindow):
             self._rov_view.clear()
         if self._dome_view is not None:
             self._dome_view.clear_imu()
-        self._sig_t.fill(np.nan)
         self._replay_gen, self._replay_seek_at = 0, None
         self._anchor_idx, self._anchor_t = 0, 0.0
         self._esp32_cfg, self._cfg_key = None, None
@@ -1681,11 +1702,10 @@ class MainWindow(QMainWindow):
         # before the new V0 lands.
         self._last_seq = self._client.bus.total_published
         self._flush_despike()                      # before the buffer it reads is cleared
-        self._sig.fill(np.nan)
+        self._clear_sig()
         self._spec_hist.clear()
         self._fft_map.fill(0)
         self._samples_since_spec_update = 0
-        self._samples_since_clear = 0
         self._path_label.setText("Resetting V0...")
 
     def _set_auto_stop(self, secs: float) -> None:
@@ -2066,6 +2086,7 @@ class MainWindow(QMainWindow):
         if not self._client.is_running:
             self._on_link_lost()
             return
+        self._series_cache = None                  # series(): new data may come in below
         # the buses before the metadata: a replay seek mark published after a bus read
         # then refers to an index at or after what was read (pending, cut later),
         # never to samples already ingested into the old buffers
@@ -2167,15 +2188,9 @@ class MainWindow(QMainWindow):
         t_idx = self._t_of(first_idx) + np.arange(n_new) / self._fs
         t = t_idx if times is None else np.where(np.isfinite(times), times, t_idx)
 
-        # Shift the rolling buffer and append cleaned samples.
-        if n_new >= self._ns_tot:
-            self._sig[:] = cleaned[-self._ns_tot:]
-            self._sig_t[:] = t[-self._ns_tot:]
-        else:
-            self._sig[:-n_new] = self._sig[n_new:]
-            self._sig[-n_new:] = cleaned
-            self._sig_t[:-n_new] = self._sig_t[n_new:]
-            self._sig_t[-n_new:] = t
+        # Append the cleaned samples to the rolling buffer (the ring: only these move).
+        self._ring.append(cleaned, t)
+        self._series_cache = None
         if n_back:                                   # the provisional ones, patched
             m = min(n_back, self._ns_tot - n_new)
             if m > 0:
