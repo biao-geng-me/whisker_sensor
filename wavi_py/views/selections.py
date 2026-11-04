@@ -8,12 +8,18 @@ the copy of the buffers taken at Pause, ``freeze``; else a reason why not) and
 the display context (Despike, V0, scale) the Analysis windows apply.
 
 ``SelectionOverlay`` draws each selection as a shaded region in a set of plots
-(a ``LinearRegionItem`` per selection per plot, under the curves). Only the
-edges drag (the body does not, so a drag over a region still pans the plot);
-an edge drag sets the model, which moves that region in every other plot and
-redraws the Analysis windows. Right-click a region for its menu (Compare /
-Spectrum / Spectrogram / New analysis window / Delete: ``model.requested``);
-the hovered one is ``model.hovered``, which Del deletes.
+(a ``LinearRegionItem`` per selection per plot, under the curves). An edge
+drag changes that edge; a drag on the body (between the edges) moves the whole
+selection, its length kept and clamped to the source's extent (``move``), so a
+drag that starts on a body does not pan the plot (one elsewhere still does).
+Overlapping regions: the newest is on top (Z by number) and takes the drag.
+Cursors: open hand over a body, closed hand while it is dragged, the resize
+cursor over an edge. In a plot with Select on, the body takes no drag (the drag
+makes a new selection, which may overlap). Either drag sets the model, which
+moves that region in every other plot and redraws the Analysis windows.
+Right-click a region for its menu (Compare / Spectrum / Spectrogram / New
+analysis window / Delete: ``model.requested``); the hovered one is
+``model.hovered``, which Del deletes.
 
 ``attach_select`` gives a plot window the Select toggle (S) and Del: with Select
 on, a left drag in a plot makes a new selection (a per-instance wrapper of the
@@ -37,6 +43,7 @@ from wavi_py.daq.analysis import Selection, SelSource
 SEL_COLORS = ((230, 140, 0), (140, 60, 200), (0, 150, 150), (200, 60, 120),
               (110, 130, 30), (60, 100, 200), (160, 90, 40), (90, 90, 90))
 _MIN_PX = 3                       # a Select drag shorter than this makes nothing
+_EDGE_PX = 3                      # a body's hover this near an edge leaves the drag to the edge
 COMPARE, SPECTRUM, SPECTROGRAM, NEW_WINDOW = "compare", "spectrum", "spectrogram", "new"
 
 
@@ -102,6 +109,14 @@ class SelectionModel(QObject):
             sel.t0, sel.t1 = t0, t1
             self.changed.emit(sel)
 
+    def move(self, sel: Selection, t0: float) -> None:
+        """Start ``sel`` at ``t0``, its length kept, inside its bounds (a body drag)."""
+        d = sel.duration
+        if sel.bounds is not None:
+            lo, hi = sel.bounds
+            t0 = max(lo, min(t0, hi - d))
+        self.set_range(sel, t0, t0 + d)
+
     def remove(self, sel: Optional[Selection]) -> None:
         if sel is None or sel not in self._sels:
             return
@@ -148,17 +163,23 @@ class SelectionModel(QObject):
 
 
 class _Region(pg.LinearRegionItem):
-    """One selection in one plot: edges drag, the body takes hover and right-click."""
+    """One selection in one plot: the edges and the body drag (the body moves the
+    whole selection, ``SelectionModel.move``); the body takes hover and right-click."""
 
     def __init__(self, overlay: "SelectionOverlay", sel: Selection, plot: pg.PlotItem):
         c = sel_color(sel.number)
         super().__init__((sel.t0, sel.t1), movable=True, brush=pg.mkBrush(sel_color(sel.number, 45)),
                          hoverBrush=pg.mkBrush(sel_color(sel.number, 80)),
                          pen=pg.mkPen(c, width=1), hoverPen=pg.mkPen(c, width=3))
-        self.movable = False                 # the body stays (a drag pans); the edges move
+        self.movable = False                 # not the base class's body drag (see mouseDragEvent)
         self.setAcceptHoverEvents(True)
-        self.setZValue(-10)                  # under the curves
+        # under the curves; the newest on top, so it takes hover and drags where they overlap
+        self.setZValue(-10 + 1e-4 * min(sel.number, 9999))
         self._overlay, self.sel, self.plot = overlay, sel, plot
+        self._drag_from: Optional[tuple[float, float]] = None   # body drag: (t0, x) at its start
+        for line in self.lines:
+            line.setCursor(Qt.CursorShape.SizeHorCursor)
+        self._set_cursor()
         if sel.bounds is not None:
             self.setBounds(sel.bounds)
         # at the bottom: the top corners hold the Line tiles' value labels and legends
@@ -170,8 +191,45 @@ class _Region(pg.LinearRegionItem):
         t0, t1 = self.getRegion()
         self._overlay.model.set_range(self.sel, t0, t1)
 
+    def body_drags(self) -> bool:
+        """The body moves on a drag, unless its plot is in Select mode (``attach_select``)."""
+        act = getattr(self.plot.getViewBox(), "select_action", None)
+        return not (act is not None and act.isChecked())
+
+    def _set_cursor(self) -> None:
+        if self._drag_from is not None:
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+        elif self.body_drags():
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
+        else:
+            self.unsetCursor()
+
     def hoverEvent(self, ev) -> None:  # noqa: N802 — pyqtgraph naming
         self._overlay.model.set_hovered(None if ev.isExit() else self.sel)
+        if not ev.isExit() and self.body_drags() and not self._near_edge(ev.pos().x()):
+            ev.acceptDrags(Qt.MouseButton.LeftButton)    # (an edge claims its own drags)
+        self._set_cursor()
+
+    def _near_edge(self, x: float) -> bool:
+        """Within _EDGE_PX of an edge: the hover can reach the region before its edge
+        line (a point near, not on, the line), so it leaves the drag to the line."""
+        px = self.plot.getViewBox().viewPixelSize()[0]
+        return min(abs(x - v) for v in self.getRegion()) <= _EDGE_PX * px
+
+    def mouseDragEvent(self, ev) -> None:  # noqa: N802 — pyqtgraph naming
+        """A drag on the body: the selection moves by the mouse's travel in time."""
+        if ev.button() != Qt.MouseButton.LeftButton or (
+                self._drag_from is None and not (ev.isStart() and self.body_drags())):
+            return                                       # not taken: the ViewBox pans / selects
+        ev.accept()
+        if ev.isStart():
+            self._drag_from = (self.sel.t0, float(ev.buttonDownPos().x()))
+            self._set_cursor()
+        t0, x0 = self._drag_from
+        self._overlay.model.move(self.sel, t0 + float(ev.pos().x()) - x0)
+        if ev.isFinish():
+            self._drag_from = None
+            self._set_cursor()
 
     def mouseClickEvent(self, ev) -> None:  # noqa: N802 — pyqtgraph naming
         if ev.button() == Qt.MouseButton.RightButton:
@@ -252,7 +310,8 @@ def attach_select(win: QMainWindow, model: SelectionModel, viewboxes: Sequence[p
     act = QAction("Select", win, checkable=True)
     act.setShortcut(QKeySequence("S"))
     act.setToolTip("Drag in a plot to make a selection (time window) for the Analysis window;"
-                   " drag its edges to change it, right-click it for its menu [S]")
+                   " drag its edges to change it (Select off: its body to move it),"
+                   " right-click it for its menu [S]")
     tb = win.findChildren(QToolBar)[0]
     acts = tb.actions()
     nxt = acts[acts.index(after) + 1] if after in acts and acts.index(after) + 1 < len(acts) else None
@@ -268,6 +327,7 @@ def attach_select(win: QMainWindow, model: SelectionModel, viewboxes: Sequence[p
     delete.triggered.connect(lambda: model.remove(model.hovered))
     win.addAction(delete)
     for vb in viewboxes:
+        vb.select_action = act               # the regions there leave drags to Select
         _hook_drag(win, vb, model, act)
     return act
 

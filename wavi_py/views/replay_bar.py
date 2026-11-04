@@ -17,7 +17,10 @@ the model's position follows the mouse at once, ``scrubbed`` / ``positionChanged
 so the Line and IMU windows, which draw from the recording's store, move with
 it; the transport gets a short-preroll seek at most every ``SCRUB_S`` and a
 full one on release, which the windows fed by the pipeline catch up on; click
-anywhere to go there) and the loop range (Loop: ``LOOP_S`` either side of the
+anywhere to go there), the Line window's visible time span (the model's
+``view_span``: a light red band with a thin red line at its right edge, display
+only, under the playhead and taking no mouse; hidden while the Line window is
+closed) and the loop range (Loop: ``LOOP_S`` either side of the
 playhead; drag its edges), an event list (picking one goes to ``EVENT_LEAD_S``
 before it), previous / next event, and Export (``exportRequested``: the panel
 saves the loop range, see replay/export.py).
@@ -107,6 +110,7 @@ class ReplayModel(QObject):
     loopChanged = pyqtSignal(object)           # (t0, t1) or None
     liveSeekRequested = pyqtSignal(float)      # live: show this time (from the buffers)
     scrubbed = pyqtSignal(float)               # the playhead is being dragged here (mouse rate)
+    viewSpanChanged = pyqtSignal(object)       # the Line window's time span (t0, t1), or None
 
     def __init__(self) -> None:
         super().__init__()
@@ -117,6 +121,7 @@ class ReplayModel(QObject):
         self._scrub_t = 0.0
         self._scrubbing = False                # a playhead drag: the position is the mouse's
         self._loop: Optional[tuple[float, float]] = None
+        self._view_span: Optional[tuple[float, float]] = None
 
     # ----- binding
 
@@ -187,6 +192,19 @@ class ReplayModel(QObject):
     @property
     def loop(self) -> Optional[tuple[float, float]]:
         return self._loop
+
+    @property
+    def view_span(self) -> Optional[tuple[float, float]]:
+        """The Line window's visible time span (None: it is closed)."""
+        return self._view_span
+
+    def set_view_span(self, rng: Optional[tuple[float, float]]) -> None:
+        """The panel passes the Line window's X range on every change (live, it moves
+        with each redraw while following) and None when the window closes."""
+        rng = None if rng is None else (float(rng[0]), float(rng[1]))
+        if rng != self._view_span:
+            self._view_span = rng
+            self.viewSpanChanged.emit(rng)
 
     @property
     def speed(self) -> Optional[float]:
@@ -403,8 +421,14 @@ class ReplayControls(QWidget):
         self._time.setText("  ·  ".join(parts))
 
 
+# the Line window's span on the strip: a light red band and a thin, lighter red right
+# edge, so the playhead (2 px, dark red, on top) stays the one that reads as "the line"
+VIEW_SPAN_BRUSH = (255, 0, 50, 45)      # pinkish over the green armed spans, not the orange of selection 1
+VIEW_EDGE_PEN = (235, 70, 70)
+
+
 class _Strip(pg.PlotWidget):
-    """The timeline strip: depth, armed spans, event ticks, playhead, loop."""
+    """The timeline strip: depth, armed spans, event ticks, playhead, loop, view span."""
 
     def __init__(self, bar: "TimelineBar"):
         super().__init__()
@@ -432,6 +456,19 @@ class _Strip(pg.PlotWidget):
         self.loop.setZValue(5)
         self.loop.hide()
         pi.addItem(self.loop, ignoreBounds=True)
+        # the Line window's span: display only (no mouse: clicks, drags and the playhead
+        # go through); the band under everything, its edge under the loop and playhead
+        self.view_span = pg.LinearRegionItem(movable=False, brush=pg.mkBrush(*VIEW_SPAN_BRUSH),
+                                             pen=pg.mkPen(None))
+        self.view_span.setZValue(-12)
+        self.view_edge = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen(VIEW_EDGE_PEN, width=1))
+        self.view_edge.setZValue(4)
+        for it in (self.view_span, *self.view_span.lines, self.view_edge):
+            it.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+            it.setAcceptHoverEvents(False)
+        for it in (self.view_span, self.view_edge):
+            it.hide()
+            pi.addItem(it, ignoreBounds=True)
         self.head = pg.InfiniteLine(angle=90, movable=True, pen=pg.mkPen((210, 0, 0), width=2),
                                     hoverPen=pg.mkPen((255, 60, 60), width=4))
         self.head.setZValue(10)
@@ -556,6 +593,7 @@ class TimelineBar(QWidget):
         model.positionChanged.connect(self._show_position)
         model.loopChanged.connect(self._show_loop)
         model.stateChanged.connect(self._show_state)
+        model.viewSpanChanged.connect(self._show_view_span)
         self._rebuild()
 
     # ----- model -> widgets
@@ -567,6 +605,7 @@ class TimelineBar(QWidget):
         self.loop_btn.setEnabled(m.active)
         self.export_btn.setVisible(m.active)
         self.strip.head.setMovable(True)
+        self._show_view_span(m.view_span)
         if src is None:
             self.strip.depth.setData([], [])
             self.strip.set_events([], 0, 1)
@@ -609,6 +648,14 @@ class TimelineBar(QWidget):
 
     def _show_state(self, state: str) -> None:
         self.controls.setVisible(self.model.active)
+
+    def _show_view_span(self, rng) -> None:
+        on = rng is not None and self.model.source is not None
+        if on:
+            self.strip.view_span.setRegion(rng)
+            self.strip.view_edge.setValue(rng[1])
+        self.strip.view_span.setVisible(on)
+        self.strip.view_edge.setVisible(on)
 
     def _show_loop(self, rng) -> None:
         on = rng is not None

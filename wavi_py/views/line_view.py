@@ -87,6 +87,9 @@ class LineView(WhiskerPlotsView):
     # the visible time range changed (any layout); the IMU window follows it
     timeWindowChanged = pyqtSignal(float, float)
     zeroAtRequested = pyqtSignal(float)            # re-zero at this time (Zero at...)
+    # shown (True) / hidden by closing or the panel's button (False; not on minimize):
+    # the timelines' view-span band follows it
+    shownChanged = pyqtSignal(bool)
 
     TITLE = "Wavi - Line"
     X_LABEL = ("Time", "s")
@@ -207,6 +210,19 @@ class LineView(WhiskerPlotsView):
             self.statusBar().showMessage(_NOT_LIVE)
         WhiskerPlotsView._show_x(self, (x0, x1))
         self._request_render()
+
+    def time_window(self) -> tuple[float, float]:
+        """The visible time range (the current layout's X)."""
+        return self._visible_x_range()
+
+    def showEvent(self, event) -> None:  # noqa: N802 — Qt naming
+        super().showEvent(event)
+        self.shownChanged.emit(True)
+
+    def hideEvent(self, event) -> None:  # noqa: N802 — Qt naming
+        super().hideEvent(event)
+        if not event.spontaneous():                # a minimize is spontaneous: still open
+            self.shownChanged.emit(False)
 
     def _emit_time_window(self, plot, rng) -> None:
         if plot is self._current_x_plot():
