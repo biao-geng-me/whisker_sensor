@@ -21,7 +21,7 @@ reconnect. It emits, in order: ``{"k":"replay","op":"seek","gen":n,"pos":T}``
 (``t`` is the receive clock, as in every event),
 the hello, the newest info and status lines before ``T - preroll``, the lines
 from ``T - preroll`` to T at full speed, ``{"k":"replay","op":"live",...}``,
-then paced lines from T. The preroll (default ``t_buffer_s``) fills the
+then paced lines from T. The preroll (default ``DEFAULT_VIEW_SPAN_S``, 30 s) fills the
 plot buffers and spectra the moment play resumes, as a live viewer at T had
 them. The first seek (at open) also carries ``t0`` (session zero), ``unix0``
 (its wall clock) and ``v0`` (the mean of the file's first 0.25 s of scans),
@@ -51,7 +51,7 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
-from wavi_py.config import DEFAULT_T_BUFFER_S
+from wavi_py.config import DEFAULT_VIEW_SPAN_S
 from wavi_py.replay.index import RecordingIndex
 from wavi_py.transports.base import Transport
 from whisker_link import wire
@@ -63,7 +63,7 @@ SPEEDS = (0.25, 0.5, 1.0, 2.0, 4.0, 8.0)
 class ReplayTransport(Transport):
     def __init__(self, index: RecordingIndex, *, speed: Optional[float] = 1.0,
                  start_s: float = 0.0, playing: bool = False,
-                 preroll_s: float = DEFAULT_T_BUFFER_S, despike: bool = False,
+                 preroll_s: float = DEFAULT_VIEW_SPAN_S, despike: bool = False,
                  clock: Callable[[], float] = time.monotonic):
         self.index = index
         self.preroll_s = float(preroll_s)

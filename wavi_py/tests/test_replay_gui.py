@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from PyQt6.QtWidgets import QApplication, QMessageBox  # noqa: E402
 
+from wavi_py.daq.series import WSK  # noqa: E402
 from wavi_py.tests import replay_fixture as fx  # noqa: E402
 
 SHOTS = os.environ.get("WAVI_TEST_SHOTS")
@@ -92,7 +93,12 @@ def test_open_play_seek(app, win):
     # (the fitted clock puts the first scan a hair before the session zero)
     assert n > 0 and np.all(np.diff(t) > 0) and -0.01 <= t[0] and t[-1] <= w._replay.position + 0.05
     lv = w._line_view
-    assert lv._t.size > 0 and abs(lv._t[-1] - t[-1]) < 0.1
+    # the Line window draws the whole recording's store, up to the playhead
+    assert _pump(app, lambda: w._store is not None, 5)
+    assert lv.series() is w._store and abs(lv._head - w._replay.position) < 0.1
+    _pump(app, lambda: False, 0.1)
+    x0, x1 = lv._visible_x_range()               # 30 s span > the 10 s file: all of it
+    assert abs(x0 - w._store.extent(WSK)[0]) < 0.01 and abs(x1 - w._store.extent(WSK)[1]) < 0.01
     status = lv._stream_status.text()
     assert status.startswith("REPLAY 4x"), status
     # the IMU window: its own times, on the same axis

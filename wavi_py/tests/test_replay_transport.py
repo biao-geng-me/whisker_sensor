@@ -226,7 +226,7 @@ def test_pipeline(tmp_path):
         assert meta["v0_version"] == 1
         live = [m for m in seek if m[1] == "live"][0]
         _, t2, _ = c.bus.read_since_t(n0)
-        assert abs(t2[0] - (5.0 - c.t_buffer_s)) < 0.02 or t2[0] < 0.02   # preroll from 0
+        assert abs(t2[0] - (5.0 - c.preroll_s)) < 0.02 or t2[0] < 0.02   # preroll from 0
         assert abs(t2[live[2] - n0] - 5.0) < 0.02
         # commands are refused, and Rec does nothing at the source
         assert c.send_command({"cmd": "esp32", "data": "B"})
@@ -270,6 +270,6 @@ def test_real_dive_seek_play():
         print(f"\n{n} samples, last at {t_last:.2f} s, playhead {c.replay.position:.2f} s")
         assert c.replay.position >= 405.0
         assert abs(t_last - c.replay.position) < 0.3
-        assert n > 0.9 * 250 * (c.t_buffer_s + 4.0)
+        assert n > 0.9 * 250 * (c.preroll_s + 4.0)
     finally:
         c.stop()

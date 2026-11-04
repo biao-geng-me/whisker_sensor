@@ -42,6 +42,7 @@ from wavi_py.config import (
     DEFAULT_NS_READ,
     DEFAULT_NSENSOR,
     DEFAULT_T_BUFFER_S,
+    DEFAULT_VIEW_SPAN_S,
     DEFAULT_TCP_HOST,
     DEFAULT_TCP_PORT,
     DEFAULT_BAUDRATE,
@@ -132,11 +133,14 @@ class WaviClient:
         self.fs = float(fs)
         self.ns_read = int(ns_read)
         self.t_buffer_s = float(t_buffer_s)
+        # replay: a seek re-serves this much before the new position (the spectra and the
+        # Spec window's history; the Line / IMU windows draw from the whole-recording store)
+        self.preroll_s = min(self.t_buffer_s, DEFAULT_VIEW_SPAN_S)
 
         capacity = max(self.ns_read * 2, int(round(self.t_buffer_s * self.fs)))
         if transport == "replay":
-            # a seek publishes t_buffer_s of preroll at once: room for it and the next tick
-            capacity = max(capacity, int(round(1.5 * self.t_buffer_s * self.fs)))
+            # a seek publishes preroll_s at once: room for it and the next tick
+            capacity = max(capacity, int(round(1.5 * self.preroll_s * self.fs)))
         # event streams carry each sample's time (daq/clock.py)
         self.bus = SampleBus(capacity=capacity, nch=self.nch, timed=self.is_event_stream)
         # IMU rows from the server transport (RAW_IMU rate, ~100 Hz); unused otherwise.
@@ -361,7 +365,7 @@ class WaviClient:
             assert self.index is not None
             return ReplayTransport(self.index, speed=self._replay_speed,
                                    start_s=self._replay_start_s, playing=self._replay_playing,
-                                   preroll_s=self.t_buffer_s, despike=self._replay_despike)
+                                   preroll_s=self.preroll_s, despike=self._replay_despike)
         assert self._serial_port is not None
         if self._transport_kind == "esp32":
             return Esp32SerialTransport(self._serial_port)

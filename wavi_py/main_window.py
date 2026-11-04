@@ -21,6 +21,15 @@ clocks mapped onto the Pi's receive clock, ``daq/clock.py``; fitted over the
 whole file in replay), so the Line and IMU windows share one time axis (session
 seconds) and the IMU window can follow the Line window's time range.
 
+Plot data: the Line and IMU windows read through the series API
+(``daq/series.py``). Live, that is the rolling buffers (``t_buffer_s``, 90 s by
+default; the windows open on the newest ``DEFAULT_VIEW_SPAN_S``); in replay,
+once it is built in the background after the index (``_store_job``), the whole
+recording (``replay/store.py``), drawn for any span and following the
+playhead, which a timeline drag moves at mouse rate (``ReplayModel.scrubbed``)
+without waiting for the transport. ``series()`` gives the same API to other
+readers (pick-and-compare, select-for-FFT).
+
 External agent loops can subscribe to ``WaviClient.bus`` independently without
 touching this module. The GUI's slow plot redraws can never starve them — they
 poll the bus on their own thread.
@@ -71,12 +80,16 @@ from wavi_py.config import (
     DEFAULT_T_SPEC_S,
     DEFAULT_TCP_HOST,
     DEFAULT_TCP_PORT,
+    DEFAULT_VIEW_SPAN_S,
     MIN_REC_LEN_S,
 )
 from wavi_py.daq.despike import Despiker
+from wavi_py.daq.series import IMU, WSK, ArraySeries, Series
+from wavi_py.daq.server_reader import IMU_CHANNELS
 from wavi_py.daq.spectra import SPEC_COL_HZ, SpecHistory, amp_spectra, amp_spectrum
 from wavi_py.io.dat_writer import DatWriter, build_datalog_filename
 from wavi_py.replay.index import RecordingIndex
+from wavi_py.replay.store import RecordingStore
 from wavi_py.scan_mode import (DEFAULT_SELECTS, PRESETS, ModeKeeper, ScanRequest, describe_cfg,
                                legacy_nominal_hz, parse_selects)
 from wavi_py.transports.sim_transport import SimSignals
@@ -268,13 +281,13 @@ class MainWindow(QMainWindow):
         self._build_ui()
 
         # construct views up front but hidden, mirroring MATLAB behavior
-        self._line_view = LineView(self._nsensor, self._nch, self._t_buffer_s)
+        self._line_view = LineView(self._nsensor, self._nch, self._t_buffer_s, DEFAULT_VIEW_SPAN_S)
         self._spectrum_view = SpectrumView(self._nsensor, self._nch)
         self._fft_view = FftView(self._nch, self._nfreq, self._t_fft_s)
         self._spec_view = SpectrogramView(
             self._nch, self._nfreq, self._fs, self._spec_hop, self._t_spec_s, self._t_fft_s
         )
-        self._imu_view = ImuView(self._t_buffer_s)
+        self._imu_view = ImuView(self._t_buffer_s, DEFAULT_VIEW_SPAN_S)
         # the Dome and ROV views need PyOpenGL and a GL context: built on first use
         self._dome_view = None
         self._rov_view = None
@@ -311,6 +324,12 @@ class MainWindow(QMainWindow):
         # replay: playback state drives the Pause buttons
         self._replay.stateChanged.connect(self._on_replay_state)
         self._replay.seeked.connect(lambda _t: self._line_view.go_live())
+        # replay: the playhead in the Line / IMU windows (drawn from the store), at mouse
+        # rate while the timeline's playhead is dragged
+        self._store: Optional[RecordingStore] = None
+        self._store_job: Optional[dict] = None
+        self._replay.positionChanged.connect(self._on_playhead)
+        self._replay.scrubbed.connect(lambda _t: self._line_view.go_live())
         # the timeline (replay controls, depth, events): a dock in the panel and in
         # every view window, all on the one model; shown while there is a source
         self._timeline_docks = [add_timeline_dock(self, TimelineBar(self._replay))]
@@ -833,6 +852,72 @@ class MainWindow(QMainWindow):
             return
         self._index = job["index"]
         self._connect(index=self._index)
+        if self._replaying:
+            self._start_store(self._index)
+
+    def _start_store(self, index: RecordingIndex) -> None:
+        """The whole recording for the Line / IMU windows (replay/store.py; ~3 s for a
+        13 min dive, cached next to the index): a thread, then ``_poll_store_job``.
+        Until it is in, the windows draw the pipeline's buffer as live."""
+        job: dict = {"index": index, "frac": 0.0, "store": None, "error": None}
+
+        def run() -> None:
+            try:
+                job["store"] = RecordingStore.open(
+                    index, progress=lambda f: job.__setitem__("frac", f))
+            except Exception as exc:  # noqa: BLE001 — a plot aid: replay goes on without it
+                job["error"] = str(exc) or type(exc).__name__
+        self._store_job = job
+        threading.Thread(target=run, name="wavi-store", daemon=True).start()
+        QTimer.singleShot(50, self._poll_store_job)
+
+    def _poll_store_job(self) -> None:
+        job = self._store_job
+        if job is None:
+            return
+        if job["store"] is None and job["error"] is None:
+            if not self._is_recording:
+                self._progress.setValue(int(job["frac"] * 1000))
+            QTimer.singleShot(50, self._poll_store_job)
+            return
+        self._store_job = None
+        if not self._is_recording:
+            self._progress.setValue(0)
+        if job["index"] is not self._index or not self._replaying:
+            return                                   # closed (or another file) meanwhile
+        if job["error"] is not None or not job["store"].has(WSK):
+            self._note(f"Whole-recording plots unavailable ({job['error'] or 'no scans'}); "
+                       "the Line window shows the playback buffer.")
+            return
+        self._set_store(job["store"])
+        print(f"[MainWindow] {self._store.summary()}")
+
+    def _set_store(self, store: Optional[RecordingStore]) -> None:
+        self._store = store
+        despike = bool(self._despike_chk.isChecked())
+        self._line_view.set_store(store, despike)
+        self._imu_view.set_store(store if store is not None and store.has(IMU) else None)
+        if store is not None:
+            self._on_playhead(self._replay.position)
+
+    def _on_playhead(self, t: float) -> None:
+        """Replay: the playhead (poll, a seek, or a scrub at mouse rate) in Line / IMU."""
+        if self._store is not None and math.isfinite(t):
+            self._line_view.set_playhead(t)
+            self._imu_view.set_playhead(t)
+
+    def series(self) -> Series:
+        """The plot data through the series API (``daq/series.py``): the whole
+        recording in replay (once built), else the live rolling buffers, whisker
+        (``t_buffer_s``) and IMU. The live arrays move on the next tick: read at once
+        (reads copy)."""
+        if self._store is not None:
+            return self._store
+        n = self._samples_since_clear
+        names = [f"W{i // 2 + 1}_{'AB'[i % 2]}" for i in range(self._nch)]
+        return ArraySeries({WSK: (self._sig_t[len(self._sig_t) - n:], self._sig[len(self._sig) - n:]),
+                            IMU: (self._imu_t, self._imu_rows)},
+                           {WSK: names, IMU: IMU_CHANNELS})
 
     def _connect(self, index: Optional[RecordingIndex] = None) -> None:
         try:
@@ -933,6 +1018,9 @@ class MainWindow(QMainWindow):
         self._timer.start()
 
     def _disconnect(self) -> None:
+        self._store_job = None
+        if self._store is not None:
+            self._set_store(None)
         if self._is_recording:
             self._stop_recording()
         # one not ours keeps running (the status line said so); a rec_start still
@@ -1112,6 +1200,7 @@ class MainWindow(QMainWindow):
         if self._replaying:
             assert self._client is not None and self._client.replay is not None
             self._client.replay.despike = on          # re-serves from the playhead
+            self._line_view.set_despike(on)           # the store's despiked scans
             return
         if on:
             self._despiker = Despiker()
@@ -1262,23 +1351,25 @@ class MainWindow(QMainWindow):
         ``window_s`` centred on time ``t`` (session seconds; None = the newest
         ``window_s``). Local only, so it works while paused, live or in replay.
         Returns False if there is no data there."""
-        n = self._samples_since_clear
-        if n <= 0:
+        src = self.series()                   # replay: the whole recording; live: the buffer
+        ext = src.extent(WSK)
+        if ext is None:
             return False
-        ts, sig = self._sig_t[-n:], self._sig[-n:]
-        if t is None:
-            sel = ts >= ts[-1] - window_s
+        despike = self._store is not None and self._despike_chk.isChecked()
+        if t is None:                         # the newest: before the playhead in replay
+            end = min(self._replay.position, ext[1]) if self._store is not None else ext[1]
+            _, sig = src.get(WSK, slice(None), end - window_s, end, despike)
         else:
-            sel = np.abs(ts - t) <= window_s / 2
-        if not sel.any():
+            _, sig = src.get(WSK, slice(None), t - window_s / 2, t + window_s / 2, despike)
+        if not len(sig):
             return False
         with np.errstate(invalid="ignore"):
-            v0 = np.nanmean(sig[sel], axis=0)
+            v0 = np.nanmean(sig, axis=0)
         self._v0 = np.where(np.isfinite(v0), v0, self._v0).astype(np.float32)
         if self._dome_view is not None:
             self._dome_view.set_zero(self._v0)
         where = "the newest samples" if t is None else f"t = {t:.2f} s"
-        self._note(f"Re-zeroed at {where} ({int(sel.sum())} samples).")
+        self._note(f"Re-zeroed at {where} ({len(sig)} samples).")
         self._fault_log.append(f"{self._now():%Y-%m-%d %H:%M:%S}  info   re-zero at {where}")
         self._request_redraw()
         return True

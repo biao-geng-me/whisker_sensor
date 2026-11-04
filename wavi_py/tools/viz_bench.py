@@ -37,6 +37,7 @@ import cProfile
 import json
 import os
 import pstats
+import resource
 import sys
 import time
 from pathlib import Path
@@ -154,6 +155,10 @@ def main() -> None:
                     help="replay this recording instead of the Sim transport (real IMU)")
     ap.add_argument("--speed", default="1", help="replay speed (0.25 .. 8, or max)")
     ap.add_argument("--start", type=float, default=0.0, help="replay: start here (s)")
+    ap.add_argument("--full-span", action="store_true",
+                    help="Line: zoomed out to the whole buffer (replay: the recording)")
+    ap.add_argument("--t-buffer", type=float, default=0.0,
+                    help="live plot buffer seconds (default: the app's, DEFAULT_T_BUFFER_S)")
     args = ap.parse_args()
     wins = [w for w in args.windows.split(",") if w and w != "none"]
     for w in wins:
@@ -172,9 +177,10 @@ def main() -> None:
     from wavi_py.main_window import MainWindow
 
     speed = None if args.speed == "max" else float(args.speed)
+    buf = {"t_buffer_s": args.t_buffer} if args.t_buffer else {}
     if args.replay:
         mw = MainWindow(transport="replay", nsensor=16, replay_path=args.replay,
-                        replay_speed=speed, replay_start_s=args.start)
+                        replay_speed=speed, replay_start_s=args.start, **buf)
         mw.show()
         mw.open_replay(args.replay)
         t_end = time.monotonic() + 60
@@ -187,7 +193,7 @@ def main() -> None:
         mw._replay.play()
     else:
         mw = MainWindow(transport="sim", nsensor=16, fs=62.5, auto_fs=True,
-                        scan_mode=(args.fs_mode,), selects="0123457")
+                        scan_mode=(args.fs_mode,), selects="0123457", **buf)
         mw.show()
         mw._sim.preset(args.preset)
         mw._transport_combo.setCurrentText("Sim")
@@ -216,6 +222,8 @@ def main() -> None:
             lv._act_grid.setChecked(False)
         elif args.layout == "single":
             lv._maximize(0)
+        if args.full_span:
+            QTimer.singleShot(int(args.warmup * 500), lambda: lv._zoom_x(1e6))
 
     # IMU: what the control panel does for the Server transport, 100 Hz, every tick
     imu_rows = collections.deque(maxlen=int(mw._t_buffer_s * 100))
@@ -228,8 +236,10 @@ def main() -> None:
             imu_rows.append(imu_state.astype(np.float32))
         rows = np.array(imu_rows)
         n = len(rows)
+        # on the whisker time axis, so the IMU window linked to the Line window shows them
+        end = float(mw._sig_t[-1]) if np.isfinite(mw._sig_t[-1]) else 0.0
         if not mw._is_paused and mw._imu_view.isVisible():
-            mw._imu_view.update_view(np.arange(-n + 1, 1) / 100.0, rows)
+            mw._imu_view.update_view(end + np.arange(-n + 1, 1) / 100.0, rows)
 
     if "imu" in wins and not args.replay:
         imu_timer = QTimer()
@@ -288,13 +298,16 @@ def main() -> None:
             prof.disable()
         dt = time.perf_counter() - mark["t"]
         res = {"tag": args.tag, "windows": wins, "layout": args.layout, "preset": args.preset,
+               "line_span_s": round(float(np.subtract(*mw._line_view._visible_x_range()[::-1])), 1),
                "fs": mw._fs,
                "secs": round(dt, 2),
                "gui_cpu_pct": round(100 * (time.thread_time() - mark["main"]) / dt, 1),
                "proc_cpu_pct": round(100 * (time.process_time() - mark["cpu"]) / dt, 1),
                "idle_pct": round(100 * idle["s"] / dt, 1),
                "stall_worst_ms": round(1e3 * stall["worst"], 1),
-               "stall_late_pct": round(100 * stall["sum_late"] / dt, 1)}
+               "stall_late_pct": round(100 * stall["sum_late"] / dt, 1),
+               "t_buffer_s": mw._t_buffer_s,
+               "maxrss_mb": round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024, 1)}
         per = {}
         for w in wins:
             r, p = METERS[w + ".render"], METERS[w + ".paint"]

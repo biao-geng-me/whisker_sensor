@@ -18,7 +18,8 @@ import struct
 DEFAULT_FS_HZ = 80.0
 DEFAULT_NSENSOR = 9
 DEFAULT_NS_READ = 4              # samples per DAQ-thread batch
-DEFAULT_T_BUFFER_S = 30.0        # ring-buffer depth on the SampleBus
+DEFAULT_T_BUFFER_S = 90.0        # live plot buffers (and the SampleBus ring): zoom out this far
+DEFAULT_VIEW_SPAN_S = 30.0       # what the Line / IMU windows open showing (and replay's preroll)
 DEFAULT_T_FFT_S = 1.0
 DEFAULT_T_SPEC_S = 20.0
 DEFAULT_BAUDRATE = 2_000_000

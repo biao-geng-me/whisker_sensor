@@ -13,7 +13,10 @@ asks the panel to show that time from the plot buffers, ``liveSeekRequested``).
 view window and of the control panel): the controls row (replay only), a strip
 with the depth (cm, down), the armed spans (green), the events as ticks
 coloured by kind / severity (hover for the text), the playhead (drag to scrub:
-a short-preroll seek at most every ``SCRUB_S``, a full one on release; click
+the model's position follows the mouse at once, ``scrubbed`` / ``positionChanged``,
+so the Line and IMU windows, which draw from the recording's store, move with
+it; the transport gets a short-preroll seek at most every ``SCRUB_S`` and a
+full one on release, which the windows fed by the pipeline catch up on; click
 anywhere to go there) and the loop range (Loop: ``LOOP_S`` either side of the
 playhead; drag its edges), an event list (picking one goes to ``EVENT_LEAD_S``
 before it), previous / next event, and Export (``exportRequested``: the panel
@@ -103,6 +106,7 @@ class ReplayModel(QObject):
     seeked = pyqtSignal(float)                 # a seek was asked for (GUI side)
     loopChanged = pyqtSignal(object)           # (t0, t1) or None
     liveSeekRequested = pyqtSignal(float)      # live: show this time (from the buffers)
+    scrubbed = pyqtSignal(float)               # the playhead is being dragged here (mouse rate)
 
     def __init__(self) -> None:
         super().__init__()
@@ -111,6 +115,7 @@ class ReplayModel(QObject):
         self._pos = math.nan
         self._state = "closed"
         self._scrub_t = 0.0
+        self._scrubbing = False                # a playhead drag: the position is the mouse's
         self._loop: Optional[tuple[float, float]] = None
 
     # ----- binding
@@ -159,6 +164,8 @@ class ReplayModel(QObject):
         if state != self._state:
             self._state = state
             self.stateChanged.emit(state)
+        if self._scrubbing:
+            return                             # the mouse has the position until release
         if not abs(pos - self._pos) < 1e-4:
             self._pos = pos
             self.positionChanged.emit(pos)
@@ -219,15 +226,23 @@ class ReplayModel(QObject):
         self.poll()
 
     def request_seek(self, t: float, final: bool) -> None:
-        """A seek from the timeline: while dragging (``final`` False) a short-preroll
-        one at most every SCRUB_S; on release the full one."""
+        """A seek from the timeline: while dragging (``final`` False) the position
+        follows the mouse at once (``scrubbed``, ``positionChanged``) and the transport
+        gets a short-preroll seek at most every SCRUB_S; on release the full one."""
         if not final:
+            t = min(max(0.0, float(t)), self.duration)
+            self._scrubbing = self.transport is not None
+            if self._scrubbing and t != self._pos:
+                self._pos = t
+                self.scrubbed.emit(t)
+                self.positionChanged.emit(t)
             now = time.monotonic()
             if now - self._scrub_t < SCRUB_S:
                 return
             self._scrub_t = now
             self.seek(t, SCRUB_PREROLL_S)
         else:
+            self._scrubbing = False
             self.seek(t)
 
     def step(self, dt: float) -> None:

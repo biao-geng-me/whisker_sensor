@@ -36,11 +36,15 @@ from PyQt6.QtGui import QAction, QKeySequence
 
 import pyqtgraph as pg
 
+from wavi_py.config import DEFAULT_VIEW_SPAN_S
+from wavi_py.daq.series import WSK, ArraySeries, Series, peak_decimate
 from wavi_py.views.whisker_plots import GRID, STACKED, WhiskerPlotsView, gauge_html
 
 
 _LABEL_AVG_S = 0.1              # absolute-value labels: mean of the last 0.1 s
 _MIN_SPAN_S = 0.05
+_PROBE_S = 0.05                 # the probe reads the sample nearest the mouse within this
+_HEAD_PEN = pg.mkPen((230, 0, 0), width=1)   # the replay playhead (red, as on the timeline)
 _NOT_LIVE = "Not live: L goes live at this zoom, R resets the view"
 _KEYS_HELP = """\
 <table cellspacing=4>
@@ -61,31 +65,22 @@ The framed tile is the one last under the mouse. Mouse: wheel zooms time and tha
 tile's Y, drag pans, double-click shows one whisker / goes back."""
 
 
-def _peak_decimate(t: np.ndarray, y: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
-    """Min and max of each ``k``-sample block of ``y`` (N, m), interleaved.
+_peak_decimate = peak_decimate          # (the IMU view and older callers import it from here)
 
-    Two points per block keep the full envelope, so a 1 px pen draws what the
-    full data would. Blocks are aligned to the absolute sample index (t / dt)
-    so they don't shimmer as the window scrolls; the newest partial block is
-    passed through as is.
-    """
-    n = len(t)
-    if k <= 1 or n < 4 * k:
-        return t, y
-    head = -int(round(t[0] * (n - 1) / (t[-1] - t[0]))) % k
-    nb = (n - head) // k
-    end = head + nb * k
-    blocks = y[head:end].reshape(nb, k, y.shape[1])
-    yd = np.empty((2 * nb + n - end, y.shape[1]), dtype=y.dtype)
-    np.min(blocks, axis=1, out=yd[0:2 * nb:2])
-    np.max(blocks, axis=1, out=yd[1:2 * nb:2])
-    yd[2 * nb:] = y[end:]
-    tb = t[head:end].reshape(nb, k)
-    td = np.empty(len(yd))
-    td[0:2 * nb:2] = tb[:, 0]
-    td[1:2 * nb:2] = tb[:, -1]
-    td[2 * nb:] = t[end:]
-    return td, yd
+
+def follow_window(end: float, span: float, extent: tuple[float, float] | None) -> tuple[float, float]:
+    """The X range that follows ``end`` (the newest sample live, the playhead in replay)
+    at ``span``: ``end`` on the right edge. With ``extent`` (replay: the recording), it
+    stays inside it: near the start the playhead moves right across the window, and a
+    span over the whole recording shows all of it."""
+    x0, x1 = end - span, end
+    if extent is not None:
+        lo, hi = extent
+        if span >= hi - lo:
+            return lo, max(hi, lo + 1e-3)
+        if x0 < lo:
+            x0, x1 = lo, lo + span
+    return x0, x1
 
 
 class LineView(WhiskerPlotsView):
@@ -100,13 +95,19 @@ class LineView(WhiskerPlotsView):
     STACKED_CENTRE = 0.5                          # fixed Y: +-value centred on the row
     DEFAULT_FIXED = 5.0                           # +- this, in the sample units (mV)
 
-    def __init__(self, nsensor: int, nch: int, t_buffer_s: float = 30.0):
+    def __init__(self, nsensor: int, nch: int, t_buffer_s: float = 30.0,
+                 view_span_s: float = DEFAULT_VIEW_SPAN_S):
         super().__init__(nsensor, nch)
-        self._follow = True                        # live: keep X pinned to the newest data
-        self._span: float | None = None            # live time span; None = the whole buffer
-        self._x_range: tuple[float, float] | None = None
+        self._follow = True                        # keep X pinned to the newest data / playhead
+        self._view_span = float(view_span_s)       # the span it opens with, and Reset view's
+        self._span: float | None = None            # following span; None = all there is
+        self._x_range: tuple[float, float] | None = None   # live: the buffer's time window
         self._t = np.empty(0)                      # last data shown (copied), for the probe
-        self._sig = np.empty((0, self._nch), dtype=np.float32)   # raw, before V0 / scale
+        self._sig = np.empty((0, nch), dtype=np.float32)   # raw, before V0 / scale
+        self._live = ArraySeries()                 # the copy above, through the series API
+        self._store: Series | None = None          # replay: the whole recording (replay/store.py)
+        self._despike = False                      # replay: draw the store's despiked scans
+        self._head = 0.0                           # replay: the playhead (session seconds)
         self._v0 = np.zeros(self._nch, dtype=np.float32)
         self._scale = 1.0
         self._units = ""                           # absolute-value labels; see set_value_format
@@ -118,6 +119,13 @@ class LineView(WhiskerPlotsView):
         for p in (self._stacked.getPlotItem(), self._tiles[0], self._single_plot.getPlotItem()):
             p.getViewBox().sigXRangeChanged.connect(
                 lambda vb, r, p=p: self._emit_time_window(p, r))
+        self._head_lines: list[pg.InfiniteLine] = []
+        for p in self._all_plots():                # replay: the playhead in every plot
+            line = pg.InfiniteLine(angle=90, movable=False, pen=_HEAD_PEN)
+            line.setVisible(False)
+            line.setZValue(50)
+            p.addItem(line, ignoreBounds=True)
+            self._head_lines.append(line)
         self._act_grid.setChecked(True)            # grid by default (this also resets the view)
 
     # ------------------------------------------------------------------
@@ -130,8 +138,8 @@ class LineView(WhiskerPlotsView):
             self._act_live.setToolTip("Follow the newest data at the current zoom; also resumes [L]")
             self._act_live.setShortcut(QKeySequence("L"))
             self._act_live.triggered.connect(self._on_live)
-            self._act_reset.setToolTip("Whole buffer, auto Y (or the fixed range), gain 1, "
-                                       "and live again [R]")
+            self._act_reset.setToolTip("The opening span (newest 30 s), auto Y (or the fixed "
+                                       "range), gain 1, and live again [R]")
         return [self._act_live]
 
     def _stream_actions(self) -> list[QAction]:
@@ -199,6 +207,10 @@ class LineView(WhiskerPlotsView):
             self.timeWindowChanged.emit(float(rng[0]), float(rng[1]))
 
     def _full_span(self) -> float | None:
+        """How far time zooms out while following: the buffer live, the recording in replay."""
+        if self._store is not None:
+            ext = self._store.extent(WSK)
+            return None if ext is None else max(ext[1] - ext[0], _MIN_SPAN_S)
         return None if self._x_range is None else self._x_range[1] - self._x_range[0]
 
     def _zoom_x(self, f: float) -> None:
@@ -237,7 +249,8 @@ class LineView(WhiskerPlotsView):
 
     def _reset_x(self) -> None:
         self._follow = True
-        self._span = None
+        full = self._full_span()
+        self._span = None if full is not None and self._view_span >= full else self._view_span
 
     def _show_x(self, x: tuple[float, float]) -> None:
         """Carry the X view across a page switch: live window if following, else the zoom."""
@@ -251,13 +264,61 @@ class LineView(WhiskerPlotsView):
             self._apply_x_range()
 
     def _apply_x_range(self) -> None:
-        """Live: the newest ``span`` seconds (the whole buffer window if None)."""
-        if self._x_range is None:
+        """Following: the newest ``span`` seconds (all there is if None) up to the newest
+        sample live, up to the playhead in replay (``follow_window``)."""
+        if self._store is not None:
+            ext = self._store.extent(WSK)
+            if ext is None:
+                return
+            full = ext[1] - ext[0]
+            x0, x1 = follow_window(self._head, self._span or full, ext)
+        elif self._x_range is None:
             return
-        x0, x1 = self._x_range
-        if self._span is not None:
-            x0 = x1 - self._span
+        else:
+            x0, x1 = self._x_range
+            if self._span is not None and self._span < x1 - x0:
+                x0 = x1 - self._span
         self._current_x_plot().setXRange(x0, x1, padding=0)
+
+    # ------------------------------------------------------------------
+    # replay: the whole recording, the playhead
+    # ------------------------------------------------------------------
+
+    def set_store(self, store: Series | None, despike: bool = False) -> None:
+        """Replay: draw from ``store`` (the whole recording) for any time range, the
+        playhead on the right edge while following; None: back to the pushed data."""
+        self._store = store
+        self._despike = bool(despike)
+        for line in self._head_lines:
+            line.setVisible(store is not None)
+        full = self._full_span()
+        if self._span is None or (full is not None and self._span >= full):
+            self._span = None if full is not None and self._view_span >= full else self._view_span
+        self._request_render()
+
+    def set_despike(self, on: bool) -> None:
+        if bool(on) != self._despike:
+            self._despike = bool(on)
+            self._request_render()
+
+    def set_playhead(self, t: float) -> None:
+        """Replay: the playhead moved (playing, a seek, or a scrub at mouse rate)."""
+        if not np.isfinite(t) or t == self._head:
+            return
+        self._head = float(t)
+        for line in self._head_lines:
+            line.setPos(self._head)
+        if self._store is not None:
+            self._request_render()
+
+    @property
+    def following(self) -> bool:
+        return self._follow
+
+    def series(self) -> Series:
+        """What this window draws, through the series API (``daq/series.py``): the
+        store in replay, else its copy of the pushed buffer (frozen while paused)."""
+        return self._store if self._store is not None else self._live
 
     # ------------------------------------------------------------------
     # data
@@ -290,6 +351,11 @@ class LineView(WhiskerPlotsView):
         if len(t_seconds) != sig.shape[0]:
             return
 
+        self._v0 = np.asarray(v0, dtype=np.float32)
+        self._scale = float(scale)
+        if self._store is not None:              # replay: the store has it all; V0 / scale only
+            self._request_render()
+            return
         # copy: the caller's buffer is shifted in place on the next tick, also while paused
         if self._sig.shape == sig.shape:
             np.copyto(self._t, t_seconds)
@@ -297,33 +363,37 @@ class LineView(WhiskerPlotsView):
         else:
             self._t = np.array(t_seconds, dtype=float)
             self._sig = np.array(sig, dtype=np.float32)
-        self._v0 = np.asarray(v0, dtype=np.float32)
-        self._scale = float(scale)
+            self._live.set(WSK, self._t, self._sig)
 
         if x_range is not None:
             self._x_range = x_range
         self._request_render()
 
     def _has_data(self) -> bool:
-        return self._t.size > 0
+        return self.series().has(WSK)
 
     def _plot_data(self, plot: pg.PlotItem, cols: slice) -> tuple[np.ndarray, np.ndarray]:
-        """``(t, (sig - v0) * scale)`` for ``cols``, ~2 points per pixel of ``plot``."""
+        """``(t, (sig - v0) * scale)`` for ``cols`` over the visible time range, min / max
+        per pixel column of ``plot`` (``Series.envelope``: the live copy, or the replay
+        store's pyramid, so the whole recording draws as cheaply as 30 s)."""
         vb = plot.getViewBox()
         x0, x1 = vb.viewRange()[0]                # already the live window when following
-        n_vis = int(np.searchsorted(self._t, x1) - np.searchsorted(self._t, x0))
-        k = max(1, n_vis // max(1, int(vb.width())))
-        t, y = _peak_decimate(self._t, self._sig[:, cols], k)
+        t, y = self.series().envelope(WSK, cols, x0, x1, max(1, int(vb.width())), self._despike)
         return t, (y - self._v0[cols]) * self._scale
 
     def _probe_text(self, sensor: int | None, x: float) -> str:
-        if not self._t[0] <= x <= self._t[-1]:
+        src = self.series()
+        ext = src.extent(WSK)
+        if ext is None or not ext[0] <= x <= ext[1]:
             return f"t = {x:.3f} s   (no data here)"
-        i = int(np.clip(np.searchsorted(self._t, x), 0, self._t.size - 1))
+        t, y = src.get(WSK, slice(None), x - _PROBE_S, x + _PROBE_S, self._despike)
+        if not len(t):
+            return f"t = {x:.3f} s   (no data here)"
+        i = int(np.argmin(np.abs(t - x)))
         if sensor is None:
-            return f"t = {self._t[i]:.3f} s"
-        a, b = (self._sig[i, 2 * sensor:2 * sensor + 2] - self._v0[2 * sensor:2 * sensor + 2]) * self._scale
-        return f"t = {self._t[i]:.3f} s   {self._names[sensor]}   A = {a:+.4g}   B = {b:+.4g}   (minus V0)"
+            return f"t = {t[i]:.3f} s"
+        a, b = (y[i, 2 * sensor:2 * sensor + 2] - self._v0[2 * sensor:2 * sensor + 2]) * self._scale
+        return f"t = {t[i]:.3f} s   {self._names[sensor]}   A = {a:+.4g}   B = {b:+.4g}   (minus V0)"
 
     # ------------------------------------------------------------------
     # absolute-value labels
@@ -342,11 +412,15 @@ class LineView(WhiskerPlotsView):
         return f"±{self._y_top.value():g}{' ' + self._units if self._units else ''}"
 
     def _prepare_labels(self) -> None:
-        if self._t.size == 0:
-            self._vals = np.full(self._nch, np.nan)
-        else:
-            i0 = int(np.searchsorted(self._t, self._t[-1] - _LABEL_AVG_S))
-            self._vals = self._sig[i0:].mean(axis=0)
+        """The mean of the last 0.1 s: before the newest sample, or the playhead."""
+        src = self.series()
+        ext = src.extent(WSK)
+        self._vals = np.full(self._nch, np.nan)
+        if ext is not None:
+            end = min(self._head, ext[1]) if self._store is not None else ext[1]
+            _, y = src.get(WSK, slice(None), end - _LABEL_AVG_S, end, self._despike)
+            if len(y):
+                self._vals = y.mean(axis=0)
 
     def _label_html(self, sensor: int, compact: bool) -> str:
         texts = []
