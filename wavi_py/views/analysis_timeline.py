@@ -87,6 +87,7 @@ class TimelineCell(_Cell):
         vb.sigRangeChangedManually.connect(self._on_manual)
         vb.sigXRangeChanged.connect(lambda *_: self.changed.emit())   # re-decimate
         _hook_drag(self._win, vb, self.model, self._select)
+        vb.select_action = self._select      # as in Line: Select on, a body drag selects anew
         hooked = vb.mouseDragEvent
 
         def drag(ev, axis=None):

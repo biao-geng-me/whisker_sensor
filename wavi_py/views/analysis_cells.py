@@ -244,11 +244,19 @@ class _Header(QWidget):
         self.row = QHBoxLayout()
         self.row.setSpacing(6)
         v.addLayout(self.row)
+        self._v = v
         self.sub = QLabel(sub_text(None))
         self.sub.setStyleSheet("color: #555;")
         self.sub.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.sub.setVisible(sub_line)
         v.addWidget(self.sub)
+
+    def new_row(self) -> None:
+        """Further options on a second line (a narrow cell)."""
+        self.row.addStretch(1)
+        self.row = QHBoxLayout()
+        self.row.setSpacing(6)
+        self._v.insertLayout(self._v.count() - 1, self.row)
 
     def add(self, label: str, w: QWidget) -> QWidget:
         if label:
@@ -332,6 +340,7 @@ class _RowsCell(_Cell):
         self.curves: dict[tuple, pg.PlotCurveItem] = {}  # (selection number, var key) -> curve
         self.probes: dict[str, pg.InfiniteLine] = {}     # unit -> its probe line
         self._legend_key: tuple = ()
+        self._sel_labels: dict = {}                      # selection number -> its legend label
         self._auto = True                                # X follows the data
 
     def nav_plots(self) -> list[pg.PlotItem]:
@@ -404,12 +413,24 @@ class _RowsCell(_Cell):
             c = self.curves.pop(key)
             self.rows[c.unit].removeItem(c)
 
+    @staticmethod
+    def _sel_text(s) -> str:
+        return f"#{s.number}  {s.t0:.2f} .. {s.t1:.2f} s"
+
     def _legends(self, ds: Dataset, shades: dict, units: list[str]) -> None:
-        key = (tuple(v.key for v in ds.variables),
-               tuple((s.number, round(s.t0, 2), round(s.t1, 2)) for s in ds.selections))
+        """Rebuilt when the variables or selections change; an edge drag only re-labels
+        (a rebuild per drag step would cost more than the curves)."""
+        key = (tuple(v.key for v in ds.variables), tuple(s.number for s in ds.selections),
+               tuple(units))
         if key == self._legend_key:
+            for s in ds.selections:
+                lab = self._sel_labels.get(s.number)
+                text = self._sel_text(s)
+                if lab is not None and lab.text != text:
+                    lab.setText(text)
             return
         self._legend_key = key
+        self._sel_labels = {}
         for i, u in enumerate(units):
             p = self.rows[u]
             if p.legend is None:
@@ -423,7 +444,8 @@ class _RowsCell(_Cell):
             if i == 0:
                 for s in ds.selections:
                     p.legend.addItem(pg.PlotDataItem(pen=pg.mkPen(sel_color(s.number), width=3)),
-                                     f"#{s.number}  {s.t0:.2f} .. {s.t1:.2f} s")
+                                     self._sel_text(s))
+                    self._sel_labels[s.number] = p.legend.items[-1][1]
 
     def probe_items(self, plot: pg.PlotItem):
         unit = next((u for u, p in self.rows.items() if p is plot), None)
@@ -500,7 +522,7 @@ class WaveCell(_RowsCell):
             return None
         pt = vb.mapSceneToView(scene_pos)
         px_x, px_y = vb.viewPixelSize()
-        best, best_d = None, PICK_PX + 1e-9
+        best, best_d = None, (PICK_PX + 1e-9, np.inf)
         for key, c in self.curves.items():
             if c.unit != unit or not c.isVisible():
                 continue
@@ -516,6 +538,9 @@ class WaveCell(_RowsCell):
                 continue
             lo, hi = float(seg.min()), float(seg.max())
             d = 0.0 if lo <= pt.y() <= hi else min(abs(pt.y() - lo), abs(pt.y() - hi)) / px_y
+            # overlapping traces (both span the point): the one whose nearest sample is nearest
+            j = int(min(max(0, np.searchsorted(x, pt.x())), len(x) - 1))
+            d = (d, abs(float(y[j]) - pt.y()) / px_y if np.isfinite(y[j]) else np.inf)
             if d < best_d:
                 best, best_d = key, d
         return best
@@ -593,6 +618,7 @@ class SpectrumCell(_RowsCell):
         self.detrend_box.addItems(["mean", "linear", "none"])
         self.detrend_box.setToolTip("Removed before the window: the mean (default), a"
                                     " fitted line, or nothing (the DC bin then shows the level)")
+        h.new_row()
         self.log_f = h.add("", QCheckBox("log f"))
         self.log_a = h.add("", QCheckBox("log amp"))
         self.log_a.setToolTip("Log amplitude axis")
@@ -948,6 +974,7 @@ class CursorCell(_Cell):
         self.columns: dict[int, tuple] = {}              # cursor number -> (f, amp, centre)
         self._auto = True
         self._unit = ""
+        self._legend_nums: list = []
 
     def nav_plots(self) -> list[pg.PlotItem]:
         return [self.plot] if self._pages.currentIndex() == 1 else []
@@ -976,6 +1003,7 @@ class CursorCell(_Cell):
                 self.plot.removeItem(c)
             self.curves, self.columns = {}, {}
             self.plot.legend.clear()
+            self._legend_nums = []
             return
         inputs = (id(spec.data), spec.db, tuple(cursors), self._auto)
         if inputs == self._last:
@@ -991,7 +1019,11 @@ class CursorCell(_Cell):
         for n in [n for n in self.curves if n not in nums]:
             self.plot.removeItem(self.curves.pop(n))
         self.columns = {}
-        self.plot.legend.clear()
+        relabel = sorted(nums) == self._legend_nums      # a drag: same cursors, new labels
+        if not relabel:
+            self.plot.legend.clear()
+            self._legend_nums = sorted(nums)
+        labels = {}
         for n, t in sorted(cursors):
             col = spectrogram_column(spec.data, t)
             c = self.curves.get(n)
@@ -1000,12 +1032,19 @@ class CursorCell(_Cell):
                 self.plot.addItem(c)
             if col is None:
                 c.setData([], [])
-                self.plot.legend.addItem(c, f"{n}  t = {t:.2f} s: outside the tile")
+                labels[n] = (c, f"{n}  t = {t:.2f} s: outside the tile")
                 continue
             self.columns[n] = col
             f, a, centre = col
             c.setData(f, to_db(a) if spec.db else a)
-            self.plot.legend.addItem(c, f"{n}  t = {t:.2f} s (segment at {centre:.2f} s)")
+            labels[n] = (c, f"{n}  t = {t:.2f} s (segment at {centre:.2f} s)")
+        if relabel:
+            for (_sample, lab), n in zip(self.plot.legend.items, sorted(labels)):
+                if lab.text != labels[n][1]:
+                    lab.setText(labels[n][1])
+        else:
+            for n in sorted(labels):
+                self.plot.legend.addItem(*labels[n])
         if self._auto:
             f = spec.data[1]
             if len(f):

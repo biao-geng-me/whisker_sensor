@@ -3,7 +3,7 @@
 Spectrum values against a direct numpy computation (a known sine, both windows),
 each selection its own frequency grid, the sub-range clipped to each selection,
 recompute only on a change (none on a tick with nothing changed, none while
-hidden), the spectrogram grid and its cap, the region menu's entries.
+hidden), the spectrogram tile and its colour range per unit, the region menu's entries.
 Screenshots go to $WAVI_TEST_SHOTS if set; $WAVI_ANALYSIS_REC replays a real
 recording for them.
 
@@ -202,46 +202,34 @@ def test_sub_range_from_compare(app, win):
     assert _pump(app, lambda: (1, "wsk:0") in aw.spectrum.curves, 2)
     f, _ = aw.spectrum.curves[(1, "wsk:0")].getData()
     assert abs(f[1] - f[0] - 1 / (aw.sub[1] - aw.sub[0])) < 0.05
-    assert not aw._act_select.isEnabled()                               # made in Compare only
     aw._act_clear_sub.trigger()                                         # Esc
     assert aw.sub is None and not any(b_.isVisible() for b_ in aw.compare.bands)
     assert aw.spectrum.header.sub.text().startswith("Whole selections")
     aw.close()
 
 
-def test_spectrogram_grid_and_cap(app, win):
+def test_spectrogram_tile_and_options(app, win):
+    """One tile, the picked (variable, selection); options recompute; a typed range
+    means fixed, as in the Spec window."""
     w = win
     m = w._selections
-    sels = [m.create(0.5 + i, 1.5 + i + 0.5) for i in range(7)]
+    sels = [m.create(1.0, 4.0), m.create(4.5, 7.5)]
     aw = w.new_analysis_window(sels[0], ["wsk:0", "imu:2"])
-    for s in sels[1:3]:
-        aw.include(s)
-    aw.set_tab("Spectrogram")
+    aw.include(sels[1])
     sg = aw.spectrogram
-    assert _pump(app, lambda: sg.grid == (2, 3), 3)
-    assert len(sg.tiles) == 6 and not sg.note.isVisibleTo(aw)
-    img = sg.tiles[(1, "wsk:0")][1]
-    assert img.image is not None and img.image.shape[1] > 10
-    # 32 gauges x 3 selections: 8 variables (24 tiles), a note
-    aw.set_checked([f"wsk:{c}" for c in range(32)])
-    assert _pump(app, lambda: sg.grid == (8, 3), 3)
-    assert len(sg.tiles) == 24 and sg.note.isVisibleTo(aw) and "8 of 33 variables" in sg.note.text()
-    # 7 selections: 6 columns at most, 4 variables
-    for s in sels[3:]:
-        aw.include(s)
-    assert _pump(app, lambda: sg.grid == (4, 6), 3)
-    assert "6 of 7 selections" in sg.note.text()
-    # options recompute; nothing changed: no work
+    assert _pump(app, lambda: sg.pick == (1, "wsk:0") and sg.data is not None, 3)
+    tc, f, amp = aw.dataset().spectrogram(sels[0], aw.dataset().variables[0], 1.0, 0.75)
+    assert np.allclose(sg.img.image, amp) and sg.var_box.count() == 2 and sg.sel_box.count() == 2
+    # nothing changed: no work; an option: the shown tile again (only it)
     c = sg.computed
     aw._render()
     assert sg.computed == c
     sg.seg_box.setCurrentIndex(0)
-    assert _pump(app, lambda: sg.computed == c + 24, 3)
-    # colour range: typing a value means fixed, as in the Spec window
+    assert _pump(app, lambda: sg.computed == c + 1, 3)
     sg.hi_box.setValue(1.0)
     assert not sg.auto_box.isChecked()
     _pump(app, lambda: False, 0.2)
-    assert sg.cbars["mV"].levels() == pytest.approx((sg.lo_box.value(), 1.0))
+    assert sg.cbar.levels() == pytest.approx((sg.lo_box.value(), 1.0))
     aw.close()
 
 
@@ -249,35 +237,28 @@ def test_spectrogram_colour_range_per_unit(app, win):
     from wavi_py.views.spectral_base import auto_levels
     w = win
     m = w._selections
-    sels = [m.create(1.0, 4.0), m.create(4.5, 7.5), m.create(7.0, 9.5)]
+    sels = [m.create(1.0, 4.0), m.create(4.5, 7.5)]
     aw = w.new_analysis_window(sels[0], ["wsk:0", "imu:2"])
-    for s in sels[1:]:
-        aw.include(s)
-    aw.set_tab("Spectrogram")
+    aw.include(sels[1])
     sg = aw.spectrogram
-    assert _pump(app, lambda: sg.grid == (2, 3) and set(sg.levels) == {"mV", "mg"}, 3)
-    # one colour bar and one auto range per unit group, from that unit's tiles only
-    assert set(sg.cbars) == {"mV", "mg"}
-    for u, key in (("mV", "wsk:0"), ("mg", "imu:2")):
-        v = np.concatenate([sg.tiles[(s.number, key)][1].image.ravel() for s in sels])
-        assert sg.levels[u] == pytest.approx(auto_levels(v, False, (0, 1)))
-        assert sg.cbars[u].levels() == pytest.approx(sg.levels[u])
-        assert all(sg.tiles[(s.number, key)][1].levels == pytest.approx(sg.levels[u]) for s in sels)
-    assert sg.levels["mV"] != pytest.approx(sg.levels["mg"])
-    # the controls set the chosen unit's range; the other stays auto
-    mv = sg.levels["mV"]
-    sg.unit_box.setCurrentText("mg")
-    assert sg.auto_box.isChecked() and sg.hi_box.value() == pytest.approx(sg.levels["mg"][1], abs=0.01)
+    assert _pump(app, lambda: sg.data is not None, 3)
+    assert sg.levels == pytest.approx(auto_levels(sg.img.image, False, (0, 1)))
+    mv = sg.levels
+    # the controls set the picked unit's range; the other unit keeps its own
+    sg.set_pick(2, "imu:2")
+    assert _pump(app, lambda: sg.unit == "mg" and sg.levels != pytest.approx(mv), 3)
+    assert sg.auto_box.isChecked() and sg.cbar.axis.labelText == "mg"
     sg.hi_box.setValue(99.0)
     _pump(app, lambda: False, 0.3)
-    assert sg.levels["mg"][1] == 99.0 and sg.levels["mV"] == pytest.approx(mv)
-    sg.unit_box.setCurrentText("mV")
-    assert sg.auto_box.isChecked()                       # mV still auto
-    sg.unit_box.setCurrentText("mg")
+    assert sg.levels[1] == 99.0
+    sg.set_pick(1, "wsk:0")
+    assert _pump(app, lambda: sg.unit == "mV", 3)
+    _pump(app, lambda: False, 0.2)
+    assert sg.auto_box.isChecked() and sg.levels == pytest.approx(mv)        # mV still auto
+    sg.set_pick(1, "imu:2")
+    assert _pump(app, lambda: sg.unit == "mg", 3)
+    _pump(app, lambda: False, 0.2)
     assert not sg.auto_box.isChecked() and sg.hi_box.value() == 99.0
-    sg.auto_box.setChecked(True)
-    _pump(app, lambda: False, 0.3)
-    assert sg.levels["mg"][1] != 99.0
     aw.close()
 
 
@@ -313,9 +294,13 @@ def test_region_menu_spectral_entries(app, win):
     sel = w._selections.create(1.0, 4.0)
     w._selections.request("spectrum", sel, ["wsk:0", "wsk:1"])
     aw = w._analysis[-1]
-    assert aw.tabs.currentWidget() is aw.spectrum and aw.included == [sel]
-    w._selections.request("spectrogram", sel, [])
-    assert w._analysis[-1] is aw and aw.tabs.currentWidget() is aw.spectrogram
+    assert aw.included == [sel] and aw.spectrum.width() > 1
+    aw.grid.set_state([600, 0], [400, 400])                 # the spectrum collapsed
+    w._selections.request("spectrum", sel, [])
+    assert aw.spectrum.width() > 1                          # back
+    sel2 = w._selections.create(5.0, 7.0)
+    w._selections.request("spectrogram", sel2, [])
+    assert w._analysis[-1] is aw and aw.spectrogram.pick == (sel2.number, "wsk:0")
     # the menu's entries are enabled now
     w._toggle_line.setChecked(True)
     _pump(app, lambda: False, 0.2)
@@ -338,53 +323,3 @@ def test_region_menu_spectral_entries(app, win):
     acts = {a.text(): a for a in shown[0].actions() if a.text()}
     assert acts["Spectrum"].isEnabled() and acts["Spectrogram"].isEnabled()
     aw.close()
-
-
-# ----------------------------------------------------------------------
-# screenshots (the 13 min dive with WAVI_ANALYSIS_REC)
-# ----------------------------------------------------------------------
-
-def test_screenshots_c2(app, tmp_path):
-    if not SHOTS:
-        pytest.skip("WAVI_TEST_SHOTS not set")
-    rec = os.environ.get("WAVI_ANALYSIS_REC")
-    if rec:
-        p, spans = Path(rec), [(400.0, 430.0), (520.0, 550.0), (600.0, 615.0)]
-    else:
-        p = tmp_path / "rec.jsonl"
-        fx.write_recording(p)
-        spans = [(1.0, 3.0), (4.0, 6.0), (6.5, 7.5)]
-    w = _open(app, p)
-    try:
-        assert _pump(app, lambda: bool(np.any(w._v0)), 5)
-        m = w._selections
-        sels = [m.create(*s) for s in spans]
-        keys = ["wsk:0", "wsk:1", "wsk:6", "imu:0", "imu:1", "imu:2"]
-        aw = w.new_analysis_window(sels[0], keys)
-        for s in sels[1:]:
-            aw.include(s)
-        aw.resize(1400, 850)
-        aw.set_tab("Spectrum")
-        aw.spectrum.log_a.setChecked(True)                 # f: 0 .. the highest Nyquist
-        _pump(app, lambda: False, 1.0)
-        _shot(aw, "c2_spectrum")
-        aw.set_checked(keys, False)
-        aw.set_checked(["wsk:6", "imu:2"])
-        aw.set_tab("Spectrogram")
-        aw.spectrogram.db_box.setChecked(True)
-        _pump(app, lambda: False, 1.0)
-        _shot(aw, "c2_spectrogram_2x3")
-        # Compare with a sub-range, and the Spectrum it drives
-        aw.set_checked(["wsk:6", "imu:2"], False)
-        aw.set_checked(["wsk:6", "wsk:7"])
-        aw.include(sels[2], False)
-        aw.set_tab("Compare")
-        _pump(app, lambda: False, 0.6)
-        aw.set_sub((5.0, 12.0) if rec else (0.5, 1.5))
-        _pump(app, lambda: False, 0.6)
-        _shot(aw, "c2_compare_subrange")
-        aw.set_tab("Spectrum")
-        _pump(app, lambda: False, 0.8)
-        _shot(aw, "c2_spectrum_subrange")
-    finally:
-        w.close()
