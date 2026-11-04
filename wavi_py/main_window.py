@@ -1693,6 +1693,32 @@ class MainWindow(QMainWindow):
         self._request_redraw()
         return True
 
+    def _sync_bus_meta(self) -> bool:
+        """Bus metadata, every tick (with or without new samples: a replay opened
+        paused publishes its V0 before any scan is played). t0_unix latches once per
+        connection; V0 can refresh on Reset (v0_version detects that cheaply). True
+        if V0 changed."""
+        meta = self._client.bus.get_metadata()
+        if self._t0_unix is None and "t0_unix" in meta:
+            self._t0_unix = float(meta["t0_unix"])
+        v0_version = int(meta.get("v0_version", 0))
+        if v0_version == self._last_v0_version or "V0" not in meta:
+            return False
+        self._v0 = np.asarray(meta["V0"], dtype=np.float32)
+        self._last_v0_version = v0_version
+        self._selections.set_context(v0=self._v0)
+        if v0_version > 1:
+            self._path_label.setText(f"Reset complete (V0 v{v0_version}).")
+        return True
+
+    def _push_v0(self) -> None:
+        """A new V0 on a tick without samples: into the Line window now (from the buffer
+        if it has any, else with no data: replay draws from the store)."""
+        if self._samples_since_clear > 0:
+            self._request_redraw()
+        else:
+            self._line_view.update_view(self._sig_t[:0], self._sig[:0], self._v0, self._scale)
+
     def _request_redraw(self) -> None:
         """Redraw the Line window from the buffer (e.g. a new V0 while paused)."""
         n = self._samples_since_clear
@@ -2114,24 +2140,13 @@ class MainWindow(QMainWindow):
         samples, times, new_seq = self._client.bus.read_since_t(self._last_seq, block=False)
         if self._client.is_event_stream:
             self._tick_server_extras()
+        v0_new = self._sync_bus_meta()
         if samples is None:
+            if v0_new:                     # e.g. a recording opened paused: zeroed before Play
+                self._push_v0()
             return
         n_new_published = new_seq - self._last_seq
         self._last_seq = new_seq
-
-        # Sync bus metadata.
-        #   t0_unix latches once per connection.
-        #   V0 can refresh on Reset; v0_version lets us cheaply detect that.
-        meta = self._client.bus.get_metadata()
-        if self._t0_unix is None and "t0_unix" in meta:
-            self._t0_unix = float(meta["t0_unix"])
-        v0_version = int(meta.get("v0_version", 0))
-        if v0_version != self._last_v0_version and "V0" in meta:
-            self._v0 = np.asarray(meta["V0"], dtype=np.float32)
-            self._last_v0_version = v0_version
-            self._selections.set_context(v0=self._v0)
-            if v0_version > 1:
-                self._path_label.setText(f"Reset complete (V0 v{v0_version}).")
 
         n_new = samples.shape[0]
         if n_new_published > n_new:

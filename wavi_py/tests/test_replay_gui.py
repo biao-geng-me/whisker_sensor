@@ -76,6 +76,35 @@ def win(app, tmp_path):
     w.close()
 
 
+def test_v0_before_play(app, win):
+    """Opened paused at 0, nothing played: the panel takes the V0 from the metadata at
+    once, so Line (and the Analysis windows) are zeroed before Play."""
+    w = win
+    w._toggle_line.setChecked(True)
+    assert _pump(app, lambda: bool(np.any(w._v0)), 5)
+    assert w._replay.state == "paused" and w._replay.position == 0.0
+    meta = w._client.bus.get_metadata()
+    v0 = np.asarray(meta["V0"], dtype=np.float32)
+    assert np.array_equal(w._v0, v0)
+    # the case that broke it: the V0 comes in on a tick with no new samples (a real
+    # recording opened paused serves none; this synthetic one serves its first scan)
+    _pump(app, lambda: False, 0.2)                        # whatever was served: read
+    assert w._client.bus.read_since_t(w._last_seq, block=False)[0] is None
+    w._v0 = np.zeros_like(w._v0)
+    w._last_v0_version = 0
+    w._line_view.update_view(w._sig_t[:0], w._sig[:0], w._v0, w._scale)
+    w._on_tick()
+    lv = w._line_view
+    assert np.array_equal(w._v0, v0) and np.array_equal(lv._v0, v0)
+    assert w._selections.v0 is w._v0
+    # Line draws from the store minus V0: the open-gauge channels aside, around zero
+    assert _pump(app, lambda: w._store is not None, 5)
+    _pump(app, lambda: False, 0.2)
+    _t, y = lv._plot_data(lv._tiles[0], slice(0, 4))
+    ok = [c for c in range(4) if c not in fx.RAILED]
+    assert len(y) and np.all(np.abs(np.median(y[:, ok], axis=0)) < 1.0)
+
+
 def test_open_play_seek(app, win):
     w = win
     assert w.windowTitle().endswith("rec.jsonl")
