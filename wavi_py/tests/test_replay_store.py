@@ -323,3 +323,17 @@ def test_scrub_moves_views_without_transport(app, win):
     m.request_seek(9.0, True)                            # release: the full seek
     assert seeks[-1] == 9.0 and not m._scrubbing
     assert replay_bar.SCRUB_S > 0.05
+
+
+def test_line_live_no_copy_until_paused(app, line):
+    """Live, the Line window reads the caller's buffer (shifted in place each tick, no
+    90 s copy); Pause freezes a copy, as the buffer keeps moving under it."""
+    t = np.arange(1000) / 250.0
+    sig = np.zeros((1000, 4), np.float32)
+    line.update_view(t, sig, np.zeros(4, np.float32), 1.0, x_range=(t[-1] - 4.0, t[-1]))
+    sig[-1] = 7.0                                        # the next tick's in-place shift
+    assert line.series().get(WSK, slice(None), t[-1], t[-1])[1][0, 0] == 7.0
+    line.set_paused(True)
+    sig[-1] = 9.0
+    assert line.series().get(WSK, slice(None), t[-1], t[-1])[1][0, 0] == 7.0
+    line.set_paused(False)

@@ -187,6 +187,12 @@ class LineView(WhiskerPlotsView):
     def _on_resumed(self) -> None:
         self._go_live()
 
+    def set_paused(self, on: bool) -> None:
+        if on and not self._paused:              # freeze what is shown: the buffer moves on
+            self._t, self._sig = self._t.copy(), self._sig.copy()
+            self._live.set(WSK, self._t, self._sig)
+        super().set_paused(on)
+
     def go_live(self) -> None:
         """Follow the newest data (keeping the zoom), e.g. after a replay seek."""
         if not self._follow:
@@ -356,14 +362,16 @@ class LineView(WhiskerPlotsView):
         if self._store is not None:              # replay: the store has it all; V0 / scale only
             self._request_render()
             return
-        # copy: the caller's buffer is shifted in place on the next tick, also while paused
-        if self._sig.shape == sig.shape:
-            np.copyto(self._t, t_seconds)
-            np.copyto(self._sig, sig)
-        else:
+        # live, the caller's buffer itself (a view: it is shifted in place by the tick
+        # that calls this next, so it always holds what was last pushed; no 90 s copy per
+        # tick); paused, a copy, as the buffer keeps moving under a paused window
+        if self._paused:
             self._t = np.array(t_seconds, dtype=float)
             self._sig = np.array(sig, dtype=np.float32)
-            self._live.set(WSK, self._t, self._sig)
+        else:
+            self._t = np.asarray(t_seconds, dtype=float)
+            self._sig = np.asarray(sig, dtype=np.float32)
+        self._live.set(WSK, self._t, self._sig)
 
         if x_range is not None:
             self._x_range = x_range
