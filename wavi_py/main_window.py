@@ -30,6 +30,13 @@ playhead, which a timeline drag moves at mouse rate (``ReplayModel.scrubbed``)
 without waiting for the transport. ``series()`` gives the same API to other
 readers (pick-and-compare, select-for-FFT).
 
+Selections and the Analysis windows (``views/selections.py``,
+``views/analysis_window.py``): one app-wide ``SelectionModel`` drawn in the Line
+and IMU plots and on every timeline strip; a new selection reads the replay
+store, or live the copy of the buffers taken at Pause (``_freeze_selections``).
+The Analysis windows are kept here (``_analysis``; closed ones are reused), the
+newest focused one takes a region's Compare.
+
 External agent loops can subscribe to ``WaviClient.bus`` independently without
 touching this module. The GUI's slow plot redraws can never starve them — they
 poll the bus on their own thread.
@@ -84,6 +91,7 @@ from wavi_py.config import (
     DEFAULT_VIEW_SPAN_S,
     MIN_REC_LEN_S,
 )
+from wavi_py.daq.analysis import SelSource, imu_variables, snapshot_of, whisker_variables
 from wavi_py.daq.despike import Despiker
 from wavi_py.daq.series import IMU, WSK, ArraySeries, Series
 from wavi_py.daq.server_reader import IMU_CHANNELS
@@ -95,9 +103,12 @@ from wavi_py.scan_mode import (DEFAULT_SELECTS, PRESETS, ModeKeeper, ScanRequest
                                legacy_nominal_hz, parse_selects)
 from wavi_py.transports.sim_transport import SimSignals
 from wavi_py.views import FftView, ImuView, LineView, SpectrogramView, SpectrumView
+from wavi_py.views.analysis_window import AnalysisWindow
 from wavi_py.views.base import (REC_FOREIGN, REC_OFF, REC_ON, REC_PENDING, ViewWindow,
                                 add_timeline_dock, alarm_label, bring_to_front, show_alarm)
 from wavi_py.views.fault_log import FaultLogView
+from wavi_py.views.selections import (COMPARE, NEW_WINDOW, SelectionModel, SelectionOverlay,
+                                      attach_select)
 from wavi_py.views.replay_bar import FINE_STEP_S, STEP_S, ReplayModel, TimelineBar, fmt_t
 from wavi_py.views.sim_panel import SimPanel
 from wavi_py.views.spectral_base import FFT_WINDOWS_S
@@ -302,6 +313,10 @@ class MainWindow(QMainWindow):
         self._rov_view = None
         # whisker positions / sensors / calibration (None: W1 .. W16, placeholder dome holes)
         self._dome_map: Optional[DomeMap] = None
+        self._selections = SelectionModel(self)
+        self._analysis: list[AnalysisWindow] = []          # open, oldest focused first
+        self._analysis_spare: list[AnalysisWindow] = []    # closed: reused by the next new one
+        self._analysis_n = 0
         self.set_dome_map(dome_map)
         for v, btn in ((self._line_view, self._toggle_line), (self._spectrum_view, self._toggle_spectrum),
                        (self._fft_view, self._toggle_fft),
@@ -353,6 +368,7 @@ class MainWindow(QMainWindow):
         self._replay.exportRequested.connect(self.export_range)
         self._live_events_t = 0.0
         self._line_view.zeroAtRequested.connect(self.zero_at)
+        self._init_selections()
         self._build_keys()
 
         # main-thread timer that drains the bus
@@ -940,6 +956,7 @@ class MainWindow(QMainWindow):
         despike = bool(self._despike_chk.isChecked())
         self._line_view.set_store(store, despike)
         self._imu_view.set_store(store if store is not None and store.has(IMU) else None)
+        self._selections.set_context(despike=despike)
         if store is not None:
             self._on_playhead(self._replay.position)
 
@@ -1003,6 +1020,9 @@ class MainWindow(QMainWindow):
         # Force the metadata-latching path in _on_tick to re-run; otherwise
         # the new bus's V0 is ignored and FFT/plots use stale offsets.
         self._v0 = np.zeros(self._nch, dtype=np.float32)
+        self._selections.clear()                     # their times meant the last source
+        self._selections.set_context(despike=self._despike_chk.isChecked(), v0=self._v0,
+                                     scale=self._scale)
         self._t0_unix = None
         self._last_v0_version = 0
         self._imu_last_seq = 0
@@ -1169,6 +1189,14 @@ class MainWindow(QMainWindow):
             act.setEnabled(btn.isEnabled())
             act.setToolTip(btn.toolTip())
             act.triggered.connect(lambda _=False, n=name: self.show_view(n))
+        menu.addSeparator()
+        for win in self._analysis:
+            act = menu.addAction(win.windowTitle().removeprefix("Wavi - "))
+            act.setCheckable(True)
+            act.setChecked(True)
+            act.triggered.connect(lambda _=False, w=win: bring_to_front(w))
+        act = menu.addAction("New analysis window", lambda: self.new_analysis_window())
+        act.setToolTip("Compare selections (every one made so far is included)")
 
     def _add_chrome(self, v: ViewWindow) -> None:
         v.add_chrome(self._fill_goto)
@@ -1176,7 +1204,120 @@ class MainWindow(QMainWindow):
         self._push_rec_state()
 
     def _chrome_views(self) -> list:
-        return [w for _n, _b, w in self._view_entries() if w is not None]
+        return [w for _n, _b, w in self._view_entries() if w is not None] + \
+            self._analysis + self._analysis_spare
+
+    # ----- selections and the Analysis windows
+    def _init_selections(self) -> None:
+        """The app-wide selections in the Line and IMU plots and on every timeline
+        strip, Select mode in the Line and IMU windows, and the Analysis windows."""
+        m = self._selections
+        m.source_fn = self._selection_source
+        lv, iv = self._line_view, self._imu_view
+        self._sel_overlays = [
+            SelectionOverlay(m, lv._all_plots(), self._line_vars_at, self),
+            SelectionOverlay(m, iv._plots, self._imu_vars_at, self),
+            SelectionOverlay(m, [d.widget().strip.getPlotItem() for d in self._timeline_docks],
+                             None, self)]
+        self._line_select = attach_select(lv, m, [p.getViewBox() for p in lv._all_plots()],
+                                          after=lv._act_zoom)
+        self._imu_select = attach_select(iv, m, [p.getViewBox() for p in iv._plots],
+                                         after=iv._act_link)
+        m.requested.connect(self._on_selection_request)
+
+    def _selection_source(self):
+        """What a new selection reads (``SelectionModel.source_fn``): the whole
+        recording in replay; live it is the copy taken at Pause (``freeze``), so
+        unpaused there is none."""
+        if self._store is not None:
+            src = self._replay.source
+            return SelSource(self._store, src.depth() if src is not None else
+                             (np.empty(0), np.empty(0)))
+        if self._replaying:
+            return "the whole-recording store is still loading"
+        if self._client is None:
+            return "connect, or open a recording, first"
+        return "pause first (a live selection is taken from the paused buffers)"
+
+    def _freeze_selections(self, on: bool) -> None:
+        """Live Pause: copy the buffers (and the depth so far) for the selections made
+        while paused (~3 MB for 90 s of 32 gauges); Resume lets go of the copy (the
+        selections made on it keep it)."""
+        if not on or self._client is None:
+            self._selections.freeze(None)
+            return
+        src = self._replay.source
+        self._selections.freeze(snapshot_of(self.series(), src.depth() if src is not None
+                                            else None))
+
+    def _line_vars_at(self, plot, scene_pos) -> list[str]:
+        """The gauges of the Line plot a region menu opened in (tile, stacked row,
+        or the single sensor)."""
+        lv = self._line_view
+        if plot in lv._tiles:
+            s = lv._tiles.index(plot)
+        elif plot is lv._single_plot.getPlotItem():
+            s = lv._single
+        else:
+            s = int(round(plot.getViewBox().mapSceneToView(scene_pos).y()))
+        if s is None or not 0 <= s < self._nsensor:
+            return []
+        return [f"wsk:{2 * s}", f"wsk:{2 * s + 1}"]
+
+    def _imu_vars_at(self, plot, scene_pos) -> list[str]:
+        """The series of the IMU row a region menu opened in (accel, gyro, attitude)."""
+        rows = self._imu_view._plots
+        if plot not in rows:
+            return []
+        r = rows.index(plot)
+        return [f"imu:{c}" for c in range(3 * r, 3 * r + 3)]
+
+    def analysis_variables(self) -> list:
+        """The variables an Analysis window lists: every gauge (by the Line window's
+        sensor names), the IMU and depth."""
+        return whisker_variables(self._nch, self._line_view._names) + imu_variables()
+
+    def new_analysis_window(self, sel=None, keys=()) -> AnalysisWindow:
+        """A new Analysis window (a closed one is reused): ``sel`` included and
+        ``keys`` checked, or without ``sel`` every selection so far included."""
+        self._analysis_n += 1
+        if self._analysis_spare:
+            win = self._analysis_spare.pop(0)
+            win.reset_state(self._analysis_n)
+        else:
+            win = AnalysisWindow(self._selections, self.analysis_variables, self._analysis_n)
+            win.closed.connect(lambda w=win: self._on_analysis_closed(w))
+            win.activated.connect(self._on_analysis_activated)
+            self._add_chrome(win)
+        self._analysis.append(win)
+        for s in ([sel] if sel is not None else self._selections.selections):
+            win.include(s)
+        win.set_checked(keys)
+        bring_to_front(win)
+        return win
+
+    def _on_analysis_closed(self, win: AnalysisWindow) -> None:
+        if win in self._analysis:
+            self._analysis.remove(win)
+            self._analysis_spare.append(win)
+
+    def _on_analysis_activated(self, win: AnalysisWindow) -> None:
+        if win in self._analysis:                 # the newest focused goes last
+            self._analysis.remove(win)
+            self._analysis.append(win)
+
+    def _on_selection_request(self, action: str, sel, keys: list) -> None:
+        """A region's menu: Compare in the newest focused Analysis window (a new one
+        if none is open), or a new window; C2 adds Spectrum / Spectrogram."""
+        if action == NEW_WINDOW or (action == COMPARE and not self._analysis):
+            self.new_analysis_window(sel, keys)
+            return
+        if action == COMPARE:
+            win = self._analysis[-1]
+            win.include(sel)
+            win.set_checked(keys)
+            win.set_tab("Compare")
+            bring_to_front(win)
 
     def _push_rec_state(self) -> None:
         """Show the Rec state in every view window's indicator (from here only: the
@@ -1277,6 +1418,7 @@ class MainWindow(QMainWindow):
             names, gauges = [f"W{w + 1}" for w in range(NUM_WHISKER)], None
         for v in (self._line_view, self._spectrum_view, self._fft_view, self._spec_view):
             v.set_whisker_names(names, gauges)
+        self._selections.dataChanged.emit()              # the variables' names
         if self._dome_view is not None:
             self._dome_view.set_dome_map(dome_map)
         if dome_map is None:
@@ -1326,6 +1468,7 @@ class MainWindow(QMainWindow):
             assert self._client is not None and self._client.replay is not None
             self._client.replay.despike = on          # re-serves from the playhead
             self._line_view.set_despike(on)           # the store's despiked scans
+            self._selections.set_context(despike=on)
             return
         if on:
             self._despiker = Despiker()
@@ -1364,6 +1507,7 @@ class MainWindow(QMainWindow):
                 self._replay.play()
             return
         self._is_paused = on
+        self._freeze_selections(on)
         if self._dome_view is not None:
             self._dome_view.set_paused(on)
 
@@ -1498,6 +1642,7 @@ class MainWindow(QMainWindow):
         with np.errstate(invalid="ignore"):
             v0 = np.nanmean(sig, axis=0)
         self._v0 = np.where(np.isfinite(v0), v0, self._v0).astype(np.float32)
+        self._selections.set_context(v0=self._v0)
         if self._dome_view is not None:
             self._dome_view.set_zero(self._v0)
         where = "the newest samples" if t is None else f"t = {t:.2f} s"
@@ -1942,6 +2087,7 @@ class MainWindow(QMainWindow):
         if v0_version != self._last_v0_version and "V0" in meta:
             self._v0 = np.asarray(meta["V0"], dtype=np.float32)
             self._last_v0_version = v0_version
+            self._selections.set_context(v0=self._v0)
             if v0_version > 1:
                 self._path_label.setText(f"Reset complete (V0 v{v0_version}).")
 
@@ -2398,7 +2544,7 @@ class MainWindow(QMainWindow):
             self._disconnect()
         finally:
             for v in (self._line_view, self._spectrum_view, self._fft_view, self._spec_view,
-                      self._imu_view, self._sim_panel, self._fault_log):
+                      self._imu_view, self._sim_panel, self._fault_log, *self._analysis):
                 v.close()
             for v in (self._dome_view, self._rov_view):
                 if v is not None:

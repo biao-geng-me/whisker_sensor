@@ -110,6 +110,14 @@ A `.dat` without its `.jsonl` (older recordings) opens too, whiskers only: it is
 
 Headless: `WaviClient(transport="replay", path="rec.jsonl", replay_speed=None)` plays a file as fast as it is read; `client.replay` is the transport (`seek`, `play`, `pause`, `speed`, `position`, `state`), `client.index` the index (events, `depth_at`, `depth_crossing`, `max_depth`).
 
+## Selections and the Analysis window
+
+**Selections.** A selection is a time window [t0, t1] on the recording's time axis, numbered and coloured. There is one set for the whole app, so every window shows the same ones. Turn on **Select** (Line and IMU toolbars, key **S**) and drag in a plot to make one; several are allowed. Each is a shaded region, labelled with its number, in every Line plot (all three layouts), every IMU row and every timeline strip. Drag an edge anywhere and it moves everywhere, and the Analysis windows redraw as you drag. The region's body doesn't drag, so a drag over a region still pans the plot. Right-click a region for **Compare**, **Spectrum** / **Spectrogram** (phase C2, disabled for now), **New analysis window** and **Delete**; **Del** deletes the one under the mouse. Replay: selections read the whole-recording store (raw or despiked, as Despike says), available once the store is in. Live: only while paused. Pause copies the buffers (the last `t_buffer_s`, ~3 MB for 90 s of 32 gauges, plus the depth so far), and the selections made during that pause read that copy, so they keep their data after Resume. An edge can't be dragged past what was copied. A new recording or stream clears the selections.
+
+**Analysis windows** (Go to → New analysis window, or a region's menu). A side panel has the **Selections** (an include box, the colour and number, t0 / t1 boxes that move the selection everywhere, ✕ to delete it) and the **Variables**: Whiskers by sensor (the dome map's names), then gauge A / B, where a sensor's box checks both; IMU accel x / y / z, gyro x / y / z, attitude roll / pitch / yaw, and depth. Each window has its own included selections, variables and tab; several can be open. From a region's menu, Compare goes to the most recently focused Analysis window (a new one if none is open), New analysis window opens another, and both pre-check that selection and the variables of the plot the menu opened in (that sensor's gauges in Line, that row's three series in IMU). A window from Go to includes every selection made so far; selections made later start unchecked. The Go to menu also lists the open Analysis windows. A hidden or closed window does no work (closing hides it, and the next new window reuses it).
+
+**Compare** stacks one row per unit (mV, m/s², deg/s, deg, cm) on a linked X axis. X is the time from each selection's start, so the selections overlay at t = 0. Colour is the variable and line style the selection (solid, dash, dot, ...); the legends name both. Gauges are drawn as the Line window draws them, (raw − V0) × scale, and the IMU in SI-like units (the IMU window's mg and mrad/s become m/s² and deg/s). The curves are min / max decimated to the plot's width from the store's pyramid (`Series.envelope`; the two edge blocks are exact samples, so nothing from outside the selection shows), so a long selection redraws as cheaply as a short one. X follows the longest selection and Y fits the data until you zoom with the mouse; **R** goes back to that. The tabs read one `Dataset` (the included selections × the checked variables, `daq/analysis.py`): `traces(n)` for Compare, and `samples(sel, var)` (every sample, through `series().channels`) for C2's Spectrum and Spectrogram. The Compare sub-range is also C2. Depth is not in the series, so it comes from the source's depth (the timeline's).
+
 ## Run (library / headless)
 
 ```python
@@ -156,6 +164,7 @@ wavi_py/
     server_reader.py   DAQ thread for daq_server's event stream (whisker + IMU buses, events)
     clock.py           device clocks onto the receive clock: fitted (replay), sliding (live)
     series.py          channels by name over [t0, t1], min / max per pixel column (live and replay)
+    analysis.py        selections, variables (units), the Analysis windows' Dataset (no Qt)
     imu_pose.py        attitude, gravity removal, translational acceleration (no Qt)
     sig_filter.py      port of wavi/SigFilter.m (scipy.signal.butter + lfilter)
     despike.py         centred Hampel despike: whole file (replay) or a stream 28 samples late (live)
@@ -186,6 +195,9 @@ wavi_py/
     dome_view.py       3D whiskers on the dome (pyqtgraph.opengl); dome_camera.py: trackball
     rov_view.py        the ROV's attitude and acceleration arrows on a BlueROV2 model
     replay_bar.py      ReplayModel + the timeline (controls, depth / events strip)
+    selections.py      the app-wide SelectionModel, its regions in the plots, Select mode
+    analysis_window.py the Analysis window: selections / variables panel, Compare (Spectrum,
+                       Spectrogram: phase C2)
     fft_view.py        FFT heatmap + per-channel bar
     spectrogram_view.py
                        frequency-stacked-by-channel ImageItem

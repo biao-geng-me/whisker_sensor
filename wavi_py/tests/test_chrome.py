@@ -104,7 +104,9 @@ def test_ctrl_r_unique(app, sim):
         b.setChecked(True)
     seq = QKeySequence("Ctrl+R")
     owners = []
-    for top in QApplication.topLevelWidgets():
+    # (closed windows of earlier tests linger as hidden top-levels: a MainWindow is never
+    # freed; a hidden window's shortcuts don't fire, so only the shown ones count)
+    for top in [t for t in QApplication.topLevelWidgets() if t.isVisible()]:
         for a in top.findChildren(QAction) + top.actions():
             if any(k == seq for k in a.shortcuts()):
                 owners.append(("action", a.text()))
@@ -266,7 +268,8 @@ def test_goto_menu(app, sim, monkeypatch):
     raised.clear()
     menu = _goto_menu(w._line_view)
     acts = {a.text(): a for a in menu.actions() if a.text()}
-    assert list(acts) == ["Control panel", "Line", "Spectrum", "FFT", "Spec", "IMU", "Dome", "ROV"]
+    assert list(acts) == ["Control panel", "Line", "Spectrum", "FFT", "Spec", "IMU", "Dome", "ROV",
+                          "New analysis window"]
     assert acts["Line"].isChecked() and not acts["FFT"].isChecked()
     # pick FFT from the Line window: opened through its panel button, raised
     acts["FFT"].trigger()
