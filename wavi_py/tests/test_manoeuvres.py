@@ -235,6 +235,19 @@ def test_alive_flags():
     assert rest["class"] == "rest" and rest["positions"]["LFL"]["alive"] is None
 
 
+def test_depth_reference_check():
+    """Depth below -DEPTH_NEG_CM (a surface pressure taken under water): no
+    near-surface flag."""
+    n = int(12 * FS)
+    t = (np.arange(n) + 0.5) / FS
+    pieces = [(0, (0, 0, 0, 0)), (5, (0.5, 0, 0, 0))]
+    e = ev_of(mn.extract(flight(12, pieces, depth_cm=np.full(n, 10.0))), "onset")
+    assert e["context"]["near_surface"] is True
+    doc = mn.extract(flight(12, pieces, depth_cm=-30.0 + t))
+    assert not doc["recording"]["depth_ok"] and doc["recording"]["depth_min_cm"] < -29
+    assert ev_of(doc, "onset")["context"]["near_surface"] is None
+
+
 def test_railed_and_flagged_quality():
     n = int(12 * FS)
     wsk = np.full((n, 32), BASE_MV)
@@ -351,6 +364,7 @@ def test_sidecar_from_a_recording(tmp_path):
     assert on["class"] == "single:surge+" and on["level_to"][0] == 0.5
     assert on["context"]["mode"] == "ALT_HOLD"
     assert on["context"]["depth_cm"] == pytest.approx(50.0, abs=1.0)
+    assert on["context"]["near_surface"] is False and r["depth_ok"]
     assert on["context"]["thrust"]["surge"] == pytest.approx(0.5, abs=0.01)
     assert on["positions"]["LBM"]["drag"]["steady"] == pytest.approx(1.0, abs=0.01)
     assert on["quality"]["adc_flagged_scans"] == 1

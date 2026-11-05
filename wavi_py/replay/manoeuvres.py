@@ -39,7 +39,9 @@ change) or ``reversal`` (an axis changes sign), windowed ``PRE_S`` before to
 Per event:
 
 - context: mode (in ALT_HOLD the heave stick is a climb-rate demand, in
-  MANUAL thrust), depth (surface-referenced) and a near-surface flag, the
+  MANUAL thrust), depth (surface-referenced) and a near-surface flag (None
+  when the depth goes below -``DEPTH_NEG_CM``: a run armed under water from
+  its start has no surface pressure, ``recording.depth_ok``), the
   rangefinder distance if any, mean roll / pitch and a level flag, the quiet
   time before (the rest before an onset; under ``QUIET_S`` the baseline is not
   clean), the pilot gain, and the thrust per axis: SERVO1..8 projected through
@@ -113,6 +115,7 @@ BAND_HZ = (1.5, 10.0)
 ALIVE_UV = 40.0                 # band RMS of drag + lift: above alive; below, in flight, lost
 REF_LP_HZ = 0.5                 # the reference's low-pass (it tracks the slow drift)
 NEAR_SURFACE_CM = 20.0
+DEPTH_NEG_CM = 10.0             # depth below -this anywhere: the surface reference is wrong
 LEVEL_DEG = 10.0                # |roll| and |pitch| under this: level
 RAIL_MV = 8388607 * MV_PER_CODE * 0.999
 
@@ -140,7 +143,7 @@ def constants() -> dict:
             "debounce_s": DEBOUNCE_S, "pre_s": PRE_S, "post_s": POST_S, "quiet_s": QUIET_S,
             "baseline_s": BASELINE_S, "pre_motion_s": PRE_MOTION_S, "peak_s": PEAK_S,
             "steady_min_s": STEADY_MIN_S, "decay_min_s": DECAY_MIN_S, "band_hz": list(BAND_HZ),
-            "alive_uv": ALIVE_UV, "ref_lp_hz": REF_LP_HZ, "near_surface_cm": NEAR_SURFACE_CM,
+            "alive_uv": ALIVE_UV, "ref_lp_hz": REF_LP_HZ, "near_surface_cm": NEAR_SURFACE_CM, "depth_neg_cm": DEPTH_NEG_CM,
             "level_deg": LEVEL_DEG, "motion_floor": MOTION_FLOOR, "dof": list(DOF), "mix": MIX.tolist(),
             "motor_direction": list(MOTOR_DIRECTION)}
 
@@ -581,6 +584,11 @@ class _Prepared:
         band = sosfiltfilt(sos, x - x.mean(axis=0), axis=0) if long and x.size else x * 0
         self.band = np.zeros((len(fl.t), nch))
         self.band[:, used] = band
+        # EventTracker's surface is the median of the first disarmed seconds: a run
+        # armed (and submerged) from its start has a wrong one; depth reads negative
+        d = fl.depth_cm
+        self.depth_min = float(np.nanmin(d)) if np.isfinite(d).any() else None
+        self.depth_ok = self.depth_min is not None and self.depth_min > -DEPTH_NEG_CM
         self.ref = None
         self.ref_names = []
         if dome is not None and dome.reference is not None:
@@ -689,7 +697,8 @@ def measure(pp: _Prepared, segs: list[Segment], j: int, kind: str) -> dict:
     ev["context"] = {
         "mode": ARDUSUB_MODES.get(m0, None if m0 < 0 else f"mode {m0}"), "mode_id": m0,
         "mode_changes": bool(len(np.unique(m)) > 1),
-        "depth_cm": _f(depth), "near_surface": bool(np.isfinite(dmin) and dmin < NEAR_SURFACE_CM),
+        "depth_cm": _f(depth), "near_surface": bool(np.isfinite(dmin) and dmin < NEAR_SURFACE_CM)
+        if pp.depth_ok else None,
         "range_m": _f(_nanmedian(fl.range_m[win])),
         "roll_deg": _f(roll), "pitch_deg": _f(pitch),
         "level": bool(np.isfinite(roll) and abs(roll) < LEVEL_DEG and abs(pitch) < LEVEL_DEG),
@@ -845,6 +854,7 @@ def extract(fl: Flight, dome: Optional[DomeMap] = None) -> dict:
             "tag": rn.tag if rn else "", "made_by": MADE_BY, "constants": constants(),
             "recording": {**fl.meta, "armed_s": _f(am.sum() / FS_HZ),
                           "rest": rest, "reference": pp.ref_names,
+                          "depth_min_cm": _f(pp.depth_min), "depth_ok": pp.depth_ok,
                           "positions": [k for k, _ in pp.positions],
                           "mix_check": mix_check(fl, segs)},
             "segments": [{"t0": _f(s.t0, 7), "t1": _f(s.t1, 7), "class": s.cls, "axes": s.axes,
