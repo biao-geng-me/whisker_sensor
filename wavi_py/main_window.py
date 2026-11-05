@@ -100,6 +100,7 @@ from wavi_py.daq.spectra import SPEC_COL_HZ, SpecHistory, amp_spectra, amp_spect
 from wavi_py.io.dat_writer import DatWriter, build_datalog_filename
 from wavi_py.replay.index import RecordingIndex
 from wavi_py.replay.store import RecordingStore
+from wavi_py.remote.qt import SyncController
 from wavi_py.scan_mode import (DEFAULT_SELECTS, PRESETS, ModeKeeper, ScanRequest, describe_cfg,
                                legacy_nominal_hz, parse_selects)
 from wavi_py.transports.sim_transport import SimSignals
@@ -828,7 +829,19 @@ class MainWindow(QMainWindow):
         self._flag_btn.setMinimumWidth(
             self._flag_btn.fontMetrics().horizontalAdvance("Unmark bad") + 24)
         h2.addWidget(self._flag_btn)
+        # cluster sync (remote/qt.py): status line + Cluster... dialog; after Stop
+        self._sync = SyncController(self, self._outpath, protect=self._sync_protect)
+        self._sync.note.connect(self._note)
+        rows.addWidget(self._sync.status_widget())
         return box
+
+    def _sync_protect(self) -> list:
+        """What sync must not upload or prune now: the recording being written,
+        the one open in replay."""
+        out = [str(self._dat_writer.path)] if self._dat_writer is not None else []
+        if self._replaying and self._index is not None:
+            out.append(str(self._index.path))
+        return out
 
     def _build_status_row(self) -> QGroupBox:
         box = QGroupBox("Status")
@@ -1895,6 +1908,7 @@ class MainWindow(QMainWindow):
             finally:
                 p = self._dat_writer.path
                 self._dat_writer = None
+                self._sync.recording_stopped(p)
                 text = f"Saved {p}"
                 if server_stopped:
                     text += f"\nROV recording {os.path.basename(rov or '')} {server_stopped}"
@@ -2609,6 +2623,7 @@ class MainWindow(QMainWindow):
         try:
             self._disconnect()
         finally:
+            self._sync.close()
             for v in (self._line_view, self._spectrum_view, self._fft_view, self._spec_view,
                       self._imu_view, self._sim_panel, self._fault_log, *self._analysis):
                 v.close()

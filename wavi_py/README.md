@@ -134,6 +134,41 @@ Headless: `WaviClient(transport="replay", path="rec.jsonl", replay_speed=None)` 
 
 **Cost.** Only what changed is recomputed, nothing while hidden and nothing in a collapsed cell. An edge drag recomputes the dragged selection's spectra and, if it is the picked tile, the spectrogram; a cursor drag only takes columns out of the spectrogram already computed; the legends are re-labelled rather than rebuilt. Measured on the 13 min dive with 3 selections × 30 s × 4 gauges (12 traces) and 3 cursors, the whole window grabbed after each step (all four cells and the timeline painted): an edge drag 34 ms median, 46 ms max per update (about 10 ms without the paint), and a cursor drag 27 ms median, so both follow the mouse at the window's 20 fps cap.
 
+## Cluster sync
+
+Recording is always local first; with **auto-upload** on, each recording goes to the lab's cluster folder after Stop (the laptop's own copies: the `.dat`, the `.jsonl`, the `.faults.txt`, and the `.notes.jsonl` / `.card.json` when there are any). Layout: `/shared/rc/whiskers/rov-recordings/YYYY-MM-DD/<stem>.*`, the date being the recording's start. The rebuildable caches (`.idx.npz`, `.store.npz`) stay local.
+
+The app uses your own OpenSSH: `ssh -o BatchMode=yes <host>`, with your key and `~/.ssh/config`. It never asks for or stores a password, and it never answers a host-key question (BatchMode fails instead). Each file is piped through ssh into `<name>.part` on the cluster; the same remote command checks its size and sha256 against the local file and only then renames it into place, group-writable (`umask 002`, `chmod g+rw`). A file the cluster already has with the same size and hash is skipped. `.notes.jsonl` is merged, not overwritten: the remote copy is fetched, the two are joined by note id, and the merged copy is written locally and uploaded. No scp: piping avoids its drive-letter (`C:\...` reads as host `C`) and remote-quoting pitfalls, so there is one code path on every OS.
+
+**Record row.** The status line reads *off*, *ok*, *uploading 2 of 5*, *queued (n, offline)* or *error: reason* (hover for details). **Cluster...** sets the host (an `~/.ssh/config` alias, e.g. `sporcsubmit.rc.rit.edu`), the folder, auto-upload, pruning and keep-N, and **Test** runs `mkdir -p <folder> && test -w <folder>` and says why it failed: no ssh on PATH, host key unknown, auth refused, timeout, not writable. The settings live in QSettings (the registry on Windows, a plist on macOS, `~/.config/wavi_py/wavi_py.conf` on Linux).
+
+**Queue.** Recordings waiting to upload are kept in `sync_state.json` in the user data dir (`%LOCALAPPDATA%\wavi_py`, `~/Library/Application Support/wavi_py`, `~/.local/share/wavi_py`), with the size, mtime and sha256 of every file verified on the cluster. The queue survives restarts; a push that fails (offline, link dropped) leaves the recording queued, a dropped transfer leaves only a `.part` that the next try overwrites, and the GUI retries every 5 min. A recording uploaded before whose files changed since (a note added, a card written later) is queued again by that retry. A push first runs the connection test unless the last one passed, so offline it only queues.
+
+**Pruning** (off by default) keeps the newest N recordings in the output folder (default 10) and deletes older local copies only when every file is verified on the cluster: the recorded upload matches the local file and a fresh remote listing confirms the size and sha256. The recording being written and the one open in replay are never touched. The first time, the GUI lists what would go and asks; saying no turns pruning off.
+
+**Command line** (same settings, queue and code; for when the GUI isn't running):
+
+```bash
+python -m wavi_py.tools.wavi_sync test
+python -m wavi_py.tools.wavi_sync push [PATH ...] [--verify]   # default: the queue + the output dir
+python -m wavi_py.tools.wavi_sync status
+python -m wavi_py.tools.wavi_sync prune [--yes]                 # lists only, unless --yes
+```
+
+`--host`, `--root`, `--dir`, `--keep` override the settings for one run (`--save` stores them). `push` leaves recordings modified in the last 20 s alone (the GUI may be writing one). Exit code 2 means offline.
+
+**One-time setup** (every OS): an ssh key that logs in without a password (with a key, RIT RC asks for no Duo), and a host entry. Then check it in a terminal: `ssh -o BatchMode=yes sporcsubmit.rc.rit.edu true` must return without a prompt (the first plain `ssh sporcsubmit.rc.rit.edu` accepts the host key).
+
+```
+# ~/.ssh/config (Windows: C:\Users\<you>\.ssh\config)
+Host sporcsubmit.rc.rit.edu
+    User <your RIT username>
+    IdentityFile ~/.ssh/id_ed25519
+```
+
+- **Linux / macOS:** `ssh-keygen -t ed25519`, then `ssh-copy-id sporcsubmit.rc.rit.edu`. A key with a passphrase needs an agent: macOS add `UseKeychain yes` and `AddKeysToAgent yes` to the host entry and run `ssh-add --apple-use-keychain ~/.ssh/id_ed25519` once; Linux desktops usually run an agent already (`ssh-add -l`).
+- **Windows 10/11:** Settings → System → Optional features → **OpenSSH Client** (usually installed; `ssh -V` in PowerShell shows it). For a key with a passphrase, start the agent once in an admin PowerShell: `Get-Service ssh-agent | Set-Service -StartupType Automatic; Start-Service ssh-agent`, then `ssh-add $env:USERPROFILE\.ssh\id_ed25519` as yourself. Create the key with `ssh-keygen -t ed25519`; Windows has no `ssh-copy-id`, so append it on the cluster: `type $env:USERPROFILE\.ssh\id_ed25519.pub | ssh sporcsubmit.rc.rit.edu "cat >> ~/.ssh/authorized_keys"`. The app finds `ssh.exe` on PATH or in `C:\Windows\System32\OpenSSH`, and runs it without a console window.
+
 ## Run (library / headless)
 
 ```python
@@ -221,10 +256,17 @@ wavi_py/
                        frequency-stacked-by-channel ImageItem
   io/
     dat_writer.py      writes the exact MATLAB-compatible .dat format
+  remote/
+    sync.py            cluster sync: test, upload (.part, sha256-checked), notes merge, queue, prune
+    proc.py            ssh without a shell: find it, timeouts, no console on Windows, failure reasons
+    config.py          the settings (QSettings, shared with the CLI), the state dir
+    qt.py              the sync worker thread, the Record row's status line, the Cluster... dialog
+    _stem.py           stem / date parser and notes merge, until replay/recname.py + notes.py merge
   examples/
     headless_control_loop.py
   tools/
     viz_bench.py       stress benchmark: the GUI on the Sim transport, any set of windows
+    wavi_sync.py       cluster sync from the command line: test, push, status, prune
     export_dome_assets.py
     export_rov_mesh.py the BlueROV2 silhouette (assets/rov) from rov-cad's tessellation
   assets/
@@ -236,6 +278,8 @@ wavi_py/
     test_replay_*.py   index / clocks / events, the replay transport, the GUI in replay, the store
     test_despike.py    despike: batch vs stream, replay switch, export, the live path
     test_rov_view.py   IMU pose math, the ROV view, the ROV mesh asset
+    test_remote_sync.py
+                       cluster sync against a fake ssh on PATH (fake_ssh.py): upload, drop, prune, CLI
 ```
 
 ## Architecture (one diagram)
