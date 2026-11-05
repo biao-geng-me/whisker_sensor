@@ -6,7 +6,8 @@ sshd runs it in the login shell, so the remote root is just a temp dir.
 ``resolve`` (ssh's own messages, exit 255), ``drop`` (an upload's connection
 dies halfway: half of stdin is passed, then the remote side is killed as sshd's
 hang-up would, exit 255), ``drop_after:N`` (the same on the Nth upload, the
-earlier ones succeed). ``FAKE_SSH_LOG``: one JSON line per call (argv).
+earlier ones succeed), ``truncate_cat`` (a download's ``cat`` returns half the
+file and exit 0). ``FAKE_SSH_LOG``: one JSON line per call (argv).
 """
 
 import json
@@ -37,6 +38,10 @@ def main() -> int:
     if mode in MSG:
         sys.stderr.write(MSG[mode].format(h=host) + "\n")
         return 255
+    if mode == "truncate_cat" and cmd.startswith("cat "):     # a download cut short, rc 0
+        out = subprocess.run(["/bin/sh", "-c", cmd], capture_output=True).stdout
+        sys.stdout.buffer.write(out[: len(out) // 2])
+        return 0
     upload = "cat > " in cmd
     drop = False
     if upload and mode == "drop":

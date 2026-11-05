@@ -530,6 +530,11 @@ class MainWindow(QMainWindow):
                                    "status; the times count samples)")
         self._browse_btn = QPushButton("Browse...")
         self._browse_btn.clicked.connect(self._choose_recording)
+        self._recs_btn = QPushButton("Recordings...")
+        self._recs_btn.setToolTip("Local and cluster recordings by date and tag, with previews"
+                                  " and notes (views/recordings_browser.py)")
+        self._recs_btn.clicked.connect(self.show_recordings)
+        self._recordings = None                      # the Recordings window, made on demand
 
         self._connect_btn = QPushButton("Connect")
         self._connect_btn.clicked.connect(self._on_connect_clicked)
@@ -542,8 +547,8 @@ class MainWindow(QMainWindow):
 
         self._live_inputs = [QLabel("Host:"), self._host_edit, QLabel("Port:"), self._port_spin,
                              QLabel("Serial:"), self._serial_port_edit]
-        self._replay_inputs = [QLabel("File:"), self._file_edit, self._browse_btn]
-        _compact(self._browse_btn, self._connect_btn, self._sim_btn)
+        self._replay_inputs = [QLabel("File:"), self._file_edit, self._browse_btn, self._recs_btn]
+        _compact(self._browse_btn, self._recs_btn, self._connect_btn, self._sim_btn)
         self._connect_btn.setMinimumWidth(                  # Connect / Disconnect
             self._connect_btn.fontMetrics().horizontalAdvance("Disconnect") + 20)
         self._host_edit.setMinimumWidth(60)
@@ -557,7 +562,7 @@ class MainWindow(QMainWindow):
         h.addWidget(self._esp32_reset_btn)
         for w, stretch in zip(self._live_inputs, (0, 2, 0, 0, 0, 1)):
             addr.addWidget(w, stretch=stretch)
-        for w, stretch in zip(self._replay_inputs, (0, 3, 0)):
+        for w, stretch in zip(self._replay_inputs, (0, 3, 0, 0)):
             addr.addWidget(w, stretch=stretch)
 
         self._on_transport_changed(self._transport_combo.currentText())
@@ -1267,6 +1272,26 @@ class MainWindow(QMainWindow):
             act.triggered.connect(lambda _=False, w=win: bring_to_front(w))
         act = menu.addAction("New analysis window", lambda: self.new_analysis_window())
         act.setToolTip("Compare selections (every one made so far is included)")
+        menu.addAction("Recordings...", self.show_recordings)
+
+    def show_recordings(self) -> None:
+        """The Recordings window (made on first use)."""
+        if self._recordings is None:
+            from wavi_py.views.recordings_browser import RecordingsBrowser
+            self._recordings = RecordingsBrowser(self._outpath, self._open_from_browser,
+                                                 protect=self._sync_protect, who=self._who)
+        bring_to_front(self._recordings)
+
+    def _open_from_browser(self, path: str) -> None:
+        if self._is_recording:
+            QMessageBox.information(self, "Open", "Stop the recording first.")
+            return
+        if self._index_job is not None:
+            return
+        if self._client is not None:
+            self._disconnect()
+        self.open_replay(path)
+        bring_to_front(self)
 
     def _add_chrome(self, v: ViewWindow) -> None:
         v.add_chrome(self._fill_goto)
@@ -2732,6 +2757,8 @@ class MainWindow(QMainWindow):
             self._disconnect()
         finally:
             self._sync.close()
+            if self._recordings is not None:
+                self._recordings.close()
             for v in (self._line_view, self._spectrum_view, self._fft_view, self._spec_view,
                       self._imu_view, self._sim_panel, self._fault_log, *self._analysis):
                 v.close()

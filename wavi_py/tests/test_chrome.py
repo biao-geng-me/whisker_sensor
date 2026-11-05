@@ -269,7 +269,7 @@ def test_goto_menu(app, sim, monkeypatch):
     menu = _goto_menu(w._line_view)
     acts = {a.text(): a for a in menu.actions() if a.text()}
     assert list(acts) == ["Control panel", "Line", "Spectrum", "FFT", "Spec", "IMU", "Dome", "ROV",
-                          "New analysis window"]
+                          "New analysis window", "Recordings..."]
     assert acts["Line"].isChecked() and not acts["FFT"].isChecked()
     # pick FFT from the Line window: opened through its panel button, raised
     acts["FFT"].trigger()

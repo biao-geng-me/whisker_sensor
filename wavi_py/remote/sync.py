@@ -198,6 +198,7 @@ class SyncState:
 
     def __init__(self, path: Optional[Path] = None):
         self.path = Path(path) if path else state_dir() / "sync_state.json"
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         self._tlock = threading.RLock()
 
     def _read(self) -> dict:

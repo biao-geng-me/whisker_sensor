@@ -148,6 +148,53 @@ class Runner:
         return Result(rc, out, err.decode("utf-8", "replace"))
 
 
+    def stream(self, host: str, remote_cmd: str, sink, timeout: float) -> Result:
+        """Run ``remote_cmd`` and hand its stdout to ``sink(chunk)`` as it comes (a
+        download); ``Result.out`` stays empty. Cancel kills it as ``run``'s."""
+        try:
+            argv = ssh_argv(self.ssh(), host, remote_cmd)
+        except SshMissing as exc:
+            return Result(-3, b"", str(exc))
+        with self._lock:
+            if self._cancelled:
+                return Result(-2, b"", "cancelled")
+            try:
+                p = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                     stderr=subprocess.PIPE, **popen_kwargs())
+            except FileNotFoundError:
+                return Result(-3, b"", f"no ssh at {argv[0]}")
+            self._proc = p
+        err: list = []
+        reader = threading.Thread(target=lambda: err.append(p.stderr.read()), daemon=True)
+        reader.start()
+        timed_out = []
+
+        def kill():
+            timed_out.append(True)
+            p.kill()
+        timer = threading.Timer(timeout, kill)
+        timer.start()
+        try:
+            while True:
+                b = p.stdout.read(1 << 20)
+                if not b:
+                    break
+                sink(b)
+            rc = p.wait()
+        except BaseException:
+            p.kill()
+            p.wait()
+            raise
+        finally:
+            timer.cancel()
+            reader.join(5)
+            with self._lock:
+                self._proc = None
+                cancelled = self._cancelled
+        rc = -2 if cancelled else -1 if timed_out else rc
+        return Result(rc, b"", (err[0] if err else b"").decode("utf-8", "replace"))
+
+
 # (stderr fragment, reason, offline): the first match wins
 _PATTERNS = (
     ("host key verification failed", "host key unknown or changed: run `ssh {host} true`"

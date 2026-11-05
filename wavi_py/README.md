@@ -188,6 +188,16 @@ Host sporcsubmit.rc.rit.edu
 - **Linux / macOS:** `ssh-keygen -t ed25519`, then `ssh-copy-id sporcsubmit.rc.rit.edu`. A key with a passphrase needs an agent: macOS add `UseKeychain yes` and `AddKeysToAgent yes` to the host entry and run `ssh-add --apple-use-keychain ~/.ssh/id_ed25519` once; Linux desktops usually run an agent already (`ssh-add -l`).
 - **Windows 10/11:** Settings → System → Optional features → **OpenSSH Client** (usually installed; `ssh -V` in PowerShell shows it). For a key with a passphrase, start the agent once in an admin PowerShell: `Get-Service ssh-agent | Set-Service -StartupType Automatic; Start-Service ssh-agent`, then `ssh-add $env:USERPROFILE\.ssh\id_ed25519` as yourself. Create the key with `ssh-keygen -t ed25519`; Windows has no `ssh-copy-id`, so append it on the cluster: `type $env:USERPROFILE\.ssh\id_ed25519.pub | ssh sporcsubmit.rc.rit.edu "cat >> ~/.ssh/authorized_keys"`. The app finds `ssh.exe` on PATH or in `C:\Windows\System32\OpenSSH`, and runs it without a console window.
 
+## Recordings browser
+
+**Recordings...** (next to Browse... in the File row, and in every view window's Go to menu) opens a window with two tabs: **Local** (the output folder and the download cache) and **Cluster** (the cluster folder of Cluster sync). Both show a tree, date → tag → recordings, newest first. A row has the recording's number in its date and tag group (#1..n by start time, counted at display time over every known recording, so it is the same in both tabs and under a filter), the start time, the duration, the card's preview strip (one pixel row per gauge, time left to right, the inferno map of the cards: dead gauges are dark lines, touches bright spans), a **BAD** badge (the reason in its tooltip), the comment count and where it lives (local, cluster, both, queued for upload). A laptop recording and the Pi's file of the same run (starts within 3 s) are one row. The Browse... dialog is unchanged.
+
+Selecting a row shows the card's numbers and the notes. A recording with a local copy takes a note here (**Add note...**); a cluster-only one's notes are read-only until it is opened. **Make card** builds a missing card of a local recording in the background; a cluster-only recording without one says in its tooltip how to make it there (`~/bin/onnode -- python -m wavi_py.tools.make_cards <folder>` from a wavi_py checkout). The filter box matches tag, file name and note text; **Hide bad** hides the flagged ones.
+
+**Open** (or a double-click) replays a local copy at once. A cluster-only recording is first downloaded into the cache in two ssh calls (the cluster's sha256 of every file, then one `cat` of them all, split by size, each file checked and only then renamed; progress and Cancel), then replayed. The 2-min pilot dive (40 MB) from sporcsubmit took 3.5 s, and 4.1 s from Open to replay. The cache is `cluster_cache` in the user data dir, capped at 20 GB: the least recently opened recordings go first, never the open one, never one with notes not yet synced. A downloaded recording is recorded as already uploaded, so sync never sends it back, and the cache is a folder sync watches: a note added to it in replay goes up with the normal sync.
+
+**Refresh** lists the cluster in one ssh call: per date folder its mtime, every file's size and mtime, and the content of every card and notes file. The catalogue is cached locally (`catalog.json` in the user data dir) and a refresh walks only the date folders whose mtime changed (every upload and notes merge ends in a rename in the folder, which changes it); the label shows its age. The same call deletes leftover `.wavi_notes.*` temporaries older than a day. Offline or not set up, the Cluster tab says why and the Local tab keeps working. A note appended on the cluster by hand (not through the sync) doesn't change the folder's mtime, so the catalogue misses it until something else there changes.
+
 ## Run (library / headless)
 
 ```python
@@ -274,6 +284,7 @@ wavi_py/
     analysis_window.py the Analysis window: panel, the 2x2 splitters, cursors, keys / Probe
     analysis_cells.py  its cells: waveform, spectrum, spectrogram (one tile), cursor spectra
     analysis_timeline.py its timeline (whole recording, the shared regions, playhead)
+    recordings_browser.py the Recordings window: local / cluster tabs, previews, notes, open
     fft_view.py        FFT heatmap + per-channel bar
     spectrogram_view.py
                        frequency-stacked-by-channel ImageItem
@@ -284,7 +295,9 @@ wavi_py/
     proc.py            ssh without a shell: find it, timeouts, no console on Windows, failure reasons
     config.py          the settings (QSettings, shared with the CLI), the state dir
     qt.py              the sync worker thread, the Record row's status line, the Cluster... dialog
-    _stem.py           stem / date parser and notes merge, until replay/recname.py + notes.py merge
+    catalog.py         the cluster's recordings in one ssh call, cached; incremental refresh
+    rows.py            the browser's rows: local + cluster, pairing, date / tag groups, #n, filter
+    cache.py           the download cache: verified download, recorded as uploaded, LRU eviction
   examples/
     headless_control_loop.py
   tools/

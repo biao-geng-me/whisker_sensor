@@ -14,7 +14,7 @@ runs. A push first tests the connection unless the last test passed; a failed
 test leaves everything queued ("queued (n, offline)"). A timer retries every
 ``RETRY_S`` while anything is queued, and also queues recordings uploaded
 before whose files changed since (a note added in replay, a card written after
-Stop). With pruning on, a push that empties the queue plans a prune; the first
+Stop), in the output dir and the download cache. With pruning on, a push that empties the queue plans a prune; the first
 time, the GUI lists what would go and asks.
 
 Status line: ``off`` / ``ok`` / ``uploading 2 of 5`` / ``queued (n, offline)`` /
@@ -161,6 +161,13 @@ class SyncController(QObject):
         if self.cfg.auto_upload and self.cfg.configured:
             self.submit("enqueue", path)
 
+    def watch_dirs(self) -> list[Path]:
+        """Where the retry looks for recordings changed since their upload: the
+        output dir, and the download cache (a note added to a downloaded
+        recording in replay goes up from there; remote/cache.py)."""
+        from wavi_py.remote.cache import cache_dir
+        return [self._local_dir, cache_dir()]
+
     def existing(self) -> list:
         """Recordings in the output folder not yet on the cluster (per the state)."""
         return not_uploaded(self._state, self._local_dir, self._protect() or ())
@@ -255,7 +262,8 @@ class SyncController(QObject):
                 self._state.enqueue(rec, "recorded")
             job = "push"
         if job == "retry":
-            requeue_changed(self._state, self._local_dir)
+            for d in self.watch_dirs():
+                requeue_changed(self._state, d)
             if not self._state.queued():
                 self._idle_status(0)
                 return
