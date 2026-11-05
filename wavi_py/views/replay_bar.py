@@ -23,7 +23,13 @@ only, under the playhead and taking no mouse; hidden while the Line window is
 closed) and the loop range (Loop: ``LOOP_S`` either side of the
 playhead; drag its edges), an event list (picking one goes to ``EVENT_LEAD_S``
 before it), previous / next event, and Export (``exportRequested``: the panel
-saves the loop range, see replay/export.py).
+saves the loop range, see replay/export.py), and Notes (``notesRequested``:
+the panel opens the notes list).
+
+Notes (``views/notes_panel.py``, the model's ``notes``, set by the panel): the
+pinned notes of the recording are amber triangles along the strip's bottom
+edge (hover for the text, click to go to the note's time); a recording marked
+bad tints the strip pink with a "BAD" label (its reason as the tooltip).
 
 ``ReplayControls`` is the compact row: play / pause, speed, step back and
 forward, the time readout (session seconds / length, the recording's wall
@@ -111,6 +117,8 @@ class ReplayModel(QObject):
     liveSeekRequested = pyqtSignal(float)      # live: show this time (from the buffers)
     scrubbed = pyqtSignal(float)               # the playhead is being dragged here (mouse rate)
     viewSpanChanged = pyqtSignal(object)       # the Line window's time span (t0, t1), or None
+    notesChanged = pyqtSignal()                # the notes model's recording / lines / offset
+    notesRequested = pyqtSignal()              # Notes on a timeline: open the notes list
 
     def __init__(self) -> None:
         super().__init__()
@@ -122,8 +130,15 @@ class ReplayModel(QObject):
         self._scrubbing = False                # a playhead drag: the position is the mouse's
         self._loop: Optional[tuple[float, float]] = None
         self._view_span: Optional[tuple[float, float]] = None
+        self.notes = None                      # views/notes_panel.NotesModel, see set_notes
 
     # ----- binding
+
+    def set_notes(self, notes) -> None:
+        """The notes model the timelines draw (its ``changed`` re-emitted here)."""
+        self.notes = notes
+        notes.changed.connect(self.notesChanged.emit)
+        self.notesChanged.emit()
 
     def attach(self, transport, index) -> None:
         """A recording opened: ``transport`` plays ``index``."""
@@ -473,10 +488,68 @@ class _Strip(pg.PlotWidget):
                                     hoverPen=pg.mkPen((255, 60, 60), width=4))
         self.head.setZValue(10)
         pi.addItem(self.head, ignoreBounds=True)
+        self.note_marks = pg.ScatterPlotItem(symbol="t1", size=12, pen=pg.mkPen((120, 70, 0), width=1),
+                                             brush=pg.mkBrush(255, 180, 0))
+        self.note_marks.setZValue(8)
+        pi.addItem(self.note_marks, ignoreBounds=True)
+        self.note_lines = pg.PlotCurveItem(connect="pairs",
+                                           pen=pg.mkPen((230, 150, 0), width=1, style=Qt.PenStyle.DashLine))
+        self.note_lines.setZValue(2)
+        pi.addItem(self.note_lines, ignoreBounds=True)
+        self.bad_label = QLabel("BAD", self)
+        self.bad_label.setStyleSheet("QLabel { color: white; background: #c00; font-weight: bold;"
+                                     " padding: 0px 4px; }")
+        self.bad_label.hide()
         self.scene().sigMouseClicked.connect(self._clicked)
         self.scene().sigMouseMoved.connect(self._hover)
         self._ev_t = np.empty(0)
         self._events: list = []
+        self._note_x = np.empty(0)                       # timeline x of the pinned notes
+        self._notes: list = []
+
+    def set_notes(self, notes: list, offset: Optional[float], bad: bool,
+                  reason: str = "") -> None:
+        """The pinned ``notes`` (note lines) at ``t + offset`` (None: not on this
+        timeline); ``bad`` tints the strip."""
+        self._notes = list(notes) if offset is not None else []
+        self._note_x = np.asarray([float(n["t"]) + offset for n in self._notes])
+        self._place_notes()
+        self.setBackground((255, 228, 228) if bad else "w")
+        self.bad_label.setVisible(bad)
+        self.bad_label.setToolTip(f"Marked bad: {reason}" if reason else "Marked bad")
+        self._place_bad_label()
+
+    def _place_notes(self) -> None:
+        """The markers 8 px above the bottom edge (whole, whatever the depth range),
+        a dashed line up from each."""
+        vb = self.getPlotItem().getViewBox()
+        top, bottom = vb.viewRange()[1]                  # inverted: bottom is the max
+        py = abs(vb.viewPixelSize()[1])
+        y = bottom - 8 * py
+        x = self._note_x
+        self.note_marks.setData(x, np.full(len(x), y))
+        self.note_lines.setData(np.repeat(x, 2), np.tile([top, y], len(x)))
+
+    def _place_bad_label(self) -> None:
+        if "bad_label" not in self.__dict__:             # a resize from PlotWidget's __init__
+            return
+        self.bad_label.adjustSize()
+        self.bad_label.move(self.width() - self.bad_label.width() - 6, 3)
+
+    def resizeEvent(self, ev) -> None:
+        super().resizeEvent(ev)
+        self._place_bad_label()
+        if "note_marks" in self.__dict__:
+            self._place_notes()
+
+    def _note_near(self, scene_pos) -> Optional[int]:
+        """The pinned note within 6 px of the mouse (x only), or None."""
+        x = self._x_at(scene_pos)
+        if x is None or not len(self._note_x):
+            return None
+        px = self.getPlotItem().getViewBox().viewPixelSize()[0]
+        i = int(np.argmin(np.abs(self._note_x - x)))
+        return i if abs(self._note_x[i] - x) <= 6 * px else None
 
     def set_events(self, events, y0: float, y1: float) -> None:
         pi = self.getPlotItem()
@@ -521,11 +594,21 @@ class _Strip(pg.PlotWidget):
             self.zoomed = False
             self._bar.show_all()
             return
-        x = self._x_at(ev.scenePos())
+        i = self._note_near(ev.scenePos())
+        x = self._note_x[i] if i is not None else self._x_at(ev.scenePos())
         if x is not None:
-            self._bar.model.request_seek(x, True)
+            self._bar.model.request_seek(float(x), True)
 
     def _hover(self, pos) -> None:
+        j = self._note_near(pos)
+        if j is not None:
+            from wavi_py.views.notes_panel import note_tooltip
+            px = self.getPlotItem().getViewBox().viewPixelSize()[0]
+            near = [n for n, x in zip(self._notes, self._note_x)
+                    if abs(x - self._note_x[j]) <= 6 * px]
+            QToolTip.showText(self.mapToGlobal(QPoint(int(self.mapFromScene(pos).x()), 0)),
+                              "\n".join(note_tooltip(n) for n in near[:12]), self)
+            return
         x = self._x_at(pos)
         if x is None or not len(self._ev_t):
             return
@@ -580,7 +663,11 @@ class TimelineBar(QWidget):
         self.export_btn.setToolTip("Save the loop range (without Loop: the Line window's time"
                                    " span) as a .jsonl clip or a .dat")
         self.export_btn.clicked.connect(model.exportRequested.emit)
-        for i, w in enumerate((self._prev, self._next, self.loop_btn, self.export_btn)):
+        self.notes_btn = QPushButton("Notes")
+        self.notes_btn.setToolTip("The recording's notes: list, add, edit, delete [N: add one]")
+        self.notes_btn.clicked.connect(model.notesRequested.emit)
+        for i, w in enumerate((self._prev, self._next, self.loop_btn, self.export_btn,
+                               self.notes_btn)):
             w.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             row.addWidget(w, i // 2, i % 2)
         side.addStretch(1)
@@ -594,6 +681,7 @@ class TimelineBar(QWidget):
         model.loopChanged.connect(self._show_loop)
         model.stateChanged.connect(self._show_state)
         model.viewSpanChanged.connect(self._show_view_span)
+        model.notesChanged.connect(self._show_notes)
         self._rebuild()
 
     # ----- model -> widgets
@@ -611,6 +699,7 @@ class TimelineBar(QWidget):
             self.strip.set_events([], 0, 1)
             self.strip.set_spans([])
             self.events.clear()
+            self._show_notes()
             return
         t, d = src.depth()
         self.strip.depth.setData(t, d)
@@ -623,6 +712,7 @@ class TimelineBar(QWidget):
         self.strip.getPlotItem().getAxis("left").setStyle(showValues=bool(len(d)))
         evs = src.events
         self.strip.set_events(evs, y0 - pad, y1 + pad)
+        self._show_notes()
         self.strip.set_spans(src.armed_spans)
         self.strip.getPlotItem().getViewBox().setLimits(xMax=max(1.0, src.duration) + 1.0)
         if not self.strip.zoomed:
@@ -632,6 +722,22 @@ class TimelineBar(QWidget):
         for e in evs:
             self.events.addItem(event_text(e), e.t)
         self._show_position(m.position)
+
+    def _show_notes(self) -> None:
+        nm = self.model.notes
+        if nm is None or nm.recording is None:
+            self.strip.set_notes([], None, False)
+            self.notes_btn.setText("Notes")
+            self.notes_btn.setEnabled(nm is not None and nm.recording is not None)
+            self.notes_btn.setStyleSheet("")
+            return
+        st = nm.state
+        on = self.model.source is not None
+        self.strip.set_notes(st.pinned, nm.offset if on else None, st.bad and on, st.reason)
+        self.notes_btn.setEnabled(True)
+        self.notes_btn.setText(f"Notes ({st.count})" + (" BAD" if st.bad else ""))
+        self.notes_btn.setStyleSheet("QPushButton { color: #b00; font-weight: bold; }"
+                                     if st.bad else "")
 
     def show_all(self) -> None:
         """The whole recording (stream so far) on the strip."""

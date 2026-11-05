@@ -281,7 +281,9 @@ def test_mark_last_recording_bad(app, rig, monkeypatch):
     assert _pump(app, lambda: not mw._is_recording and mw._rec_cmd is None, 4)
     assert _pump(app, lambda: mw._flag_btn.isEnabled(), 3)
     (rov,) = _rov_files(tmp_path)
-    assert mw._flag_btn.text() == "Mark bad" and rov.name in mw._flag_btn.toolTip()
+    # enabled at once for the local copy's notes; the Pi's file joins with its status
+    assert _pump(app, lambda: rov.name in mw._flag_btn.toolTip(), 3), mw._flag_btn.toolTip()
+    assert mw._flag_btn.text() == "Mark bad"
     from PyQt6.QtWidgets import QInputDialog
     prompts = []
     monkeypatch.setattr(QInputDialog, "getText",
@@ -296,5 +298,14 @@ def test_mark_last_recording_bad(app, rig, monkeypatch):
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
     mw._flag_btn.click()
     assert _pump(app, lambda: mw._flag_btn.text() == "Mark bad", 4)
-    assert rec_index.read(str(tmp_path / "rec" / "trials.jsonl"))[rov.name]["keep"] is True
+    # the label follows the local notes at once; the Pi's index once its ack is in
+    assert _pump(app, lambda: rec_index.read(str(tmp_path / "rec" / "trials.jsonl"))
+                 [rov.name]["keep"] is True and mw._flag_cmd is None, 4)
     assert rov.exists()
+    # the local copy's notes have both flags (replay/notes.py), and the stop wrote its card
+    from wavi_py.replay import card, notes
+    (local,) = sorted(mw._outpath.glob("st_*_flagme.jsonl"))
+    flags = [ln for ln in notes.read(notes.notes_path(local)) if ln["ev"] == "flag"]
+    assert [(f["keep"], f["text"]) for f in flags] == [(False, "drifted"), (True, "")]
+    assert _pump(app, lambda: card.read_card(card.card_path(local)) is not None, 30)
+    assert card.read_card(card.card_path(local))["tag"] == "flagme"

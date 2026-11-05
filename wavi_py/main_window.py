@@ -98,6 +98,8 @@ from wavi_py.daq.series import IMU, WSK, ArraySeries, Series
 from wavi_py.daq.server_reader import IMU_CHANNELS
 from wavi_py.daq.spectra import SPEC_COL_HZ, SpecHistory, amp_spectra, amp_spectrum
 from wavi_py.io.dat_writer import DatWriter, build_datalog_filename
+from wavi_py.replay import notes as rec_notes
+from wavi_py.replay.card import write_card_in_background
 from wavi_py.replay.index import RecordingIndex
 from wavi_py.replay.store import RecordingStore
 from wavi_py.scan_mode import (DEFAULT_SELECTS, PRESETS, ModeKeeper, ScanRequest, describe_cfg,
@@ -108,6 +110,7 @@ from wavi_py.views.analysis_window import AnalysisWindow
 from wavi_py.views.base import (REC_FOREIGN, REC_OFF, REC_ON, REC_PENDING, ViewWindow,
                                 add_timeline_dock, alarm_label, bring_to_front, show_alarm)
 from wavi_py.views.fault_log import FaultLogView
+from wavi_py.views.notes_panel import NotesDialog, NotesModel, ask_note
 from wavi_py.views.selections import (COMPARE, NEW_WINDOW, SPECTROGRAM, SPECTRUM, SelectionModel,
                                       SelectionOverlay, attach_select)
 from wavi_py.views.replay_bar import FINE_STEP_S, STEP_S, ReplayModel, TimelineBar, fmt_t
@@ -285,6 +288,13 @@ class MainWindow(QMainWindow):
         self._rec_cmd: Optional[dict] = None     # rec_start / rec_stop sent, ack pending
         self._flag_cmd: Optional[dict] = None    # rec_flag sent, ack pending
         self._who = f"wavi_py@{socket.gethostname()}"
+        # the notes of the open replay, the recording now, else the last one recorded
+        # (views/notes_panel.py); _notes_rov: that recording's file on the Pi, if any
+        self._notes = NotesModel(self._who, self)
+        self._notes.changed.connect(self._update_flag_button)
+        self._replay.set_notes(self._notes)
+        self._notes_rov: Optional[str] = None
+        self._notes_dlg: Optional[NotesDialog] = None
         self._t0_unix: Optional[float] = None    # stream start in unix time
         # live despike: the newest `pending` samples are provisional (raw) until judged,
         # 28 samples later; the .dat gets each sample once final, from index _rec_from on
@@ -370,6 +380,7 @@ class MainWindow(QMainWindow):
         self._replay.sourceChanged.connect(self._show_timelines)
         self._replay.liveSeekRequested.connect(self._show_time_from_buffer)
         self._replay.exportRequested.connect(self.export_range)
+        self._replay.notesRequested.connect(self.show_notes)
         self._live_events_t = 0.0
         self._line_view.zeroAtRequested.connect(self.zero_at)
         self._init_selections()
@@ -828,6 +839,12 @@ class MainWindow(QMainWindow):
         self._flag_btn.setMinimumWidth(
             self._flag_btn.fontMetrics().horizontalAdvance("Unmark bad") + 24)
         h2.addWidget(self._flag_btn)
+        self._note_btn = QPushButton("Note...")
+        self._note_btn.setToolTip("Add a note to the recording, at the playhead (replay) or"
+                                  " now (recording) [N]")
+        self._note_btn.clicked.connect(self.add_note)
+        self._note_btn.setEnabled(False)
+        h2.addWidget(self._note_btn)
         return box
 
     def _build_status_row(self) -> QGroupBox:
@@ -944,6 +961,8 @@ class MainWindow(QMainWindow):
             return
         self._index = job["index"]
         self._connect(index=self._index)
+        if self._replaying:
+            self._set_notes_target(Path(job["path"]), 0.0)
         if self._replaying:
             self._start_store(self._index)
 
@@ -1117,6 +1136,8 @@ class MainWindow(QMainWindow):
         self._timer.start()
 
     def _disconnect(self) -> None:
+        if self._replaying:
+            self._set_notes_target(None)
         self._store_job = None
         if self._store is not None:
             self._set_store(None)
@@ -1598,6 +1619,7 @@ class MainWindow(QMainWindow):
         key(".", lambda: m.event_step(True))
         key("[", lambda: m.speed_step(False))
         key("]", lambda: m.speed_step(True))
+        key(Qt.Key.Key_N, self.add_note)
 
     def _show_time_from_buffer(self, t: float) -> None:
         """Live: a time picked on the timeline is shown from the plot buffers (the
@@ -1853,6 +1875,9 @@ class MainWindow(QMainWindow):
         else:
             self._client.send_record_start(tag, local_copy=str(fullpath.with_suffix(".jsonl")))
 
+        lt, tl = self._client.local_copy_time(), self._client.timeline
+        self._set_notes_target(fullpath, tl.duration - lt if lt is not None and tl is not None
+                               else None, os.path.basename(self._rov_path or "") or None)
         self._update_record_button()
         self._path_label.setText(f"Recording → {fullpath}"
                                  + (f"\nROV: {self._rov_path}" if self._rov_path else ""))
@@ -1895,6 +1920,9 @@ class MainWindow(QMainWindow):
             finally:
                 p = self._dat_writer.path
                 self._dat_writer = None
+                self._notes.set_offset(None)           # the live timeline goes on without it
+                rec = Path(p).with_suffix(".jsonl")
+                write_card_in_background(rec if rec.is_file() else Path(p))
                 text = f"Saved {p}"
                 if server_stopped:
                     text += f"\nROV recording {os.path.basename(rov or '')} {server_stopped}"
@@ -2034,25 +2062,53 @@ class MainWindow(QMainWindow):
             return os.path.basename(last["path"]), last.get("keep", True) is False
         return None
 
+    def _set_notes_target(self, recording: Optional[Path], offset: Optional[float] = None,
+                          rov: Optional[str] = None) -> None:
+        """Notes, Mark bad and the timeline markers go to ``recording`` from now on
+        (``offset``: its zero on the timeline shown; ``rov``: its file on the Pi)."""
+        self._notes_rov = rov
+        self._notes.set_recording(recording, offset)
+
+    def _pi_flag_linked(self, pi: Optional[tuple]) -> bool:
+        """The Pi's newest recording (``_flag_target``) is the notes' recording, so
+        Mark bad also goes to the Pi's index; without local notes, it is the only one."""
+        if pi is None:
+            return False
+        return self._notes.recording is None or pi[0] == self._notes_rov
+
     def _update_flag_button(self) -> None:
-        b, target = self._flag_btn, self._flag_target()
-        if target is None:
+        b, pi = self._flag_btn, self._flag_target()
+        rec = self._notes.recording
+        self._note_btn.setEnabled(rec is not None)
+        if rec is None and pi is None:
             b.setText("Mark bad")
             b.setEnabled(False)
-            b.setToolTip("Flag the newest ROV recording bad in the Pi's index (trials.jsonl)")
+            b.setToolTip("Flag the recording bad (its .notes.jsonl; the ROV's also in the Pi's"
+                         " index): the open replay, the one recording now, else the last one")
             return
-        name, bad = target
+        linked = self._pi_flag_linked(pi)
+        if rec is not None:
+            st = self._notes.state
+            name, bad = self._notes.stem, st.bad
+            where = f"{name}.notes.jsonl" + (f" and the Pi's index ({pi[0]})" if linked else "")
+            why = f" ({st.reason})" if st.reason else ""
+        else:
+            name, bad = pi
+            where, why = "the Pi's index (trials.jsonl)", ""
         b.setText("Unmark bad" if bad else "Mark bad")
-        b.setEnabled(self._flag_cmd is None)
-        b.setToolTip(f"{name} is flagged bad; click to keep it again" if bad else
-                     f"Flag {name} bad in the Pi's index (trials.jsonl). The file stays;"
-                     "\nwhisker_link.convert skips it.")
+        b.setEnabled(self._flag_cmd is None or not linked)
+        b.setToolTip(f"{name} is flagged bad{why}; click to keep it again (in {where})" if bad else
+                     f"Flag {name} bad in {where}. The files stay;\nwhisker_link.convert skips"
+                     " a recording the Pi's index flags.")
 
     def _on_flag_clicked(self) -> None:
-        target = self._flag_target()
-        if target is None or self._client is None or self._flag_cmd is not None:
+        pi, rec = self._flag_target(), self._notes.recording
+        if rec is None and pi is None:
             return
-        name, bad = target
+        linked = self._pi_flag_linked(pi) and self._client is not None and self._flag_cmd is None
+        name, bad = (self._notes.stem, self._notes.state.bad) if rec is not None else pi
+        if rec is not None and linked:
+            name += f" (on the Pi: {pi[0]})"
         if bad:
             note, ok = "", QMessageBox.question(
                 self, "Keep recording", f"Keep {name} again (remove the bad flag)?"
@@ -2060,19 +2116,70 @@ class MainWindow(QMainWindow):
         else:
             note, ok = QInputDialog.getText(
                 self, "Mark recording bad",
-                f"Mark {name} bad?\nThe file stays on the Pi; convert skips it.\n\nNote (optional):")
+                f"Mark {name} bad?\nThe files stay" + ("; convert skips it." if linked else ".")
+                + "\n\nReason (optional):")
         if not ok:
             return
+        if rec is not None:
+            try:
+                self._notes.set_flag(keep=bad, text=note.strip())
+            except OSError as exc:
+                QMessageBox.critical(self, "Mark bad failed", f"{self._notes.path}: {exc}")
+                return
+        if not linked:
+            self._update_flag_button()
+            return
         acks = self._client.bus.get_metadata().get("server_acks") or {}
-        cmd = {"cmd": "rec_flag", "file": name, "keep": bad, "who": self._who}
+        cmd = {"cmd": "rec_flag", "file": pi[0], "keep": bad, "who": self._who}
         if note.strip():
             cmd["note"] = note.strip()
         if not self._client.send_command(cmd):
-            self._note("Mark bad: could not send the command.")
+            self._note("Mark bad: could not send the command to the Pi.")
             return
-        self._flag_cmd = {"sent": time.monotonic(), "file": name, "keep": bad,
+        self._flag_cmd = {"sent": time.monotonic(), "file": pi[0], "keep": bad,
                           "seen": acks.get("rec_flag", (0, None))[0]}
         self._update_flag_button()
+
+    def _note_time(self) -> Optional[float]:
+        """Seconds into the notes' recording to pin a note to: the playhead in
+        replay; while recording, now on the local copy's clock (its session time,
+        what its replay will show), else (a .dat only) the wall clock since the
+        start; None otherwise."""
+        if self._replaying:
+            t = self._replay.position
+            return float(t) if math.isfinite(t) else None
+        if self._is_recording and self._client is not None:
+            t = self._client.local_copy_time()
+            if t is None and self._record_start_dt is not None:
+                t = (datetime.now() - self._record_start_dt).total_seconds()
+            return max(0.0, t) if t is not None else None
+        return None
+
+    def add_note(self) -> None:
+        """Add note (button, N, the notes list): pinned to ``_note_time`` unless the
+        dialog's box is cleared. The time is taken when asked, not when OK'd."""
+        if self._notes.recording is None:
+            return
+        got = ask_note(self, f"Note on {self._notes.stem}", self._note_time())
+        if got is None:
+            return
+        try:
+            self._notes.add(*got)
+        except OSError as exc:
+            QMessageBox.critical(self, "Note not saved", f"{self._notes.path}: {exc}")
+
+    def _seek_note(self, t: float) -> None:
+        off = self._notes.offset
+        if off is not None and self._replay.source is not None:
+            self._replay.request_seek(t + off, True)
+
+    def show_notes(self) -> NotesDialog:
+        """The notes list (one, non-modal)."""
+        if self._notes_dlg is None:
+            self._notes_dlg = NotesDialog(self._notes, self.add_note, self._seek_note, self)
+        self._notes_dlg.show()
+        self._notes_dlg.raise_()
+        return self._notes_dlg
 
     def _tick_flag_ack(self, meta: dict) -> None:
         pend = self._flag_cmd

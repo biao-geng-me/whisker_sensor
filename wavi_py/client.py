@@ -255,6 +255,17 @@ class WaviClient:
         if isinstance(self._reader, ServerReader):
             self._reader.start_tee(path)
 
+    def local_copy_time(self) -> Optional[float]:
+        """Seconds into the local copy (``start_local_copy``) of the newest line
+        received: the copy's session time, which its replay timeline shows (up to
+        the ~0.2 s ``t`` steps back between the ESP32 and MAVLink lines); None
+        without one."""
+        r = self._reader
+        t0 = getattr(r, "tee_t0", None) if isinstance(r, ServerReader) else None
+        if t0 is None or r._tee is None or r._last_t is None:
+            return None
+        return float(r._last_t) - t0
+
     def stop_local_copy(self) -> None:
         if isinstance(self._reader, ServerReader):
             self._reader.stop_tee()
