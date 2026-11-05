@@ -13,9 +13,10 @@ The contract is the recording-manager spec (notes, cards, sync, browser).
   and sha256 checked on the cluster, then renamed; notes merged), the
   persistent queue and the pruning of local copies;
 - ``qt``: the worker thread, the status line in the Record row and the
-  "Cluster..." dialog;
-- ``_stem``: a private stem / date parser and notes merge, stand-ins for
-  ``replay/recname.py`` and ``replay/notes.py`` (task A) until those merge.
+  "Cluster..." dialog.
+
+Names and dates come from ``replay/recname.py``, the notes rules from
+``replay/notes.py``.
 
 The command line twin is ``wavi_py/tools/wavi_sync.py``.
 """

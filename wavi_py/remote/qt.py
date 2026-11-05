@@ -35,8 +35,10 @@ from PyQt6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFormLayout, 
                              QVBoxLayout, QWidget)
 
 from wavi_py.remote import config as rconfig
-from wavi_py.remote.sync import (PrunePlan, Session, SyncError, SyncState, prune_execute,
-                                 prune_plan, push_queue, recording_of, requeue_changed)
+from wavi_py.replay import recname
+from wavi_py.remote.sync import (PrunePlan, Session, SyncError, SyncState, not_uploaded,
+                                 prune_execute, prune_plan, push_queue, recording_of,
+                                 requeue_changed)
 
 RETRY_S = 300.0          # while anything is queued: test + push again
 STOP_DELAY_MS = 1500     # after Stop: sidecars written right after it get in too
@@ -49,6 +51,7 @@ class SyncController(QObject):
     status = pyqtSignal(str, str, str)          # level, text, tooltip
     note = pyqtSignal(str)                      # a one-off message for the panel label
     _plan_ready = pyqtSignal(object)            # PrunePlan, from the worker
+    _card_sig = pyqtSignal(str)                 # a card written (card.py's thread)
 
     def __init__(self, parent: QWidget, local_dir: Path,
                  protect: Callable[[], Iterable[str]] = lambda: (),
@@ -70,6 +73,7 @@ class SyncController(QObject):
         self._label: Optional[QLabel] = None
         self.status.connect(self._show)
         self._plan_ready.connect(self._on_plan)
+        self._card_sig.connect(self._on_card)
         self._thread = threading.Thread(target=self._loop, name="wavi-sync", daemon=True)
         self._thread.start()
         self._timer = QTimer(self)
@@ -100,9 +104,12 @@ class SyncController(QObject):
     def _show(self, level: str, text: str, tip: str) -> None:
         self._last_status = (level, text, tip)
         if self._label is not None:
-            self._label.setText(text)
-            self._label.setToolTip(tip or text)
-            self._label.setStyleSheet(f"QLabel {{ {_STYLE.get(level, '')} }}")
+            try:
+                self._label.setText(text)
+                self._label.setToolTip(tip or text)
+                self._label.setStyleSheet(f"QLabel {{ {_STYLE.get(level, '')} }}")
+            except RuntimeError:                  # the widget is gone (window closing)
+                self._label = None
 
     def _emit(self, level: str, text: str, tip: str = "") -> None:
         if not self._closed:
@@ -142,6 +149,26 @@ class SyncController(QObject):
         if self.cfg.auto_upload and self.cfg.configured:
             QTimer.singleShot(STOP_DELAY_MS, lambda: self.submit("enqueue", str(path)))
 
+    def card_written(self, path, err=None) -> None:
+        """``card.write_card_in_background``'s ``on_done`` (its thread): the card
+        that Stop's child process wrote a few seconds after the recording closed.
+        It goes up on its own: the recording's files never wait for it, and the
+        push it starts skips them (already there)."""
+        if err is None and not self._closed:
+            self._card_sig.emit(str(path))
+
+    def _on_card(self, path: str) -> None:
+        if self.cfg.auto_upload and self.cfg.configured:
+            self.submit("enqueue", path)
+
+    def existing(self) -> list:
+        """Recordings in the output folder not yet on the cluster (per the state)."""
+        return not_uploaded(self._state, self._local_dir, self._protect() or ())
+
+    def queue_existing(self, recs: list) -> None:
+        self._state.enqueue_many(recs, "existing")
+        self._idle_status()
+
     def submit(self, job: str, arg=None) -> None:
         if self._closed:
             return
@@ -161,7 +188,8 @@ class SyncController(QObject):
         self._jobs.put(None)
 
     def open_dialog(self) -> None:
-        dlg = ClusterDialog(self.cfg, self._parent)
+        dlg = ClusterDialog(self.cfg, self._parent, existing=self.existing,
+                            queue_existing=self.queue_existing, local_dir=self._local_dir)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         old = self.cfg
@@ -174,7 +202,7 @@ class SyncController(QObject):
             self.last_test = dlg.tested[2]
         rconfig.save(self.cfg)
         self._idle_status()
-        if self.cfg.auto_upload and self.cfg.configured:
+        if self.cfg.configured and (self.cfg.auto_upload or dlg.queued_existing):
             self.submit("push")
 
     def _on_plan(self, plan: PrunePlan) -> None:
@@ -276,8 +304,7 @@ class SyncController(QObject):
             self._plan_ready.emit(plan)
 
     def _prune(self, sess: Session, plan: PrunePlan, protect: list[str]) -> None:
-        from wavi_py.remote import _stem
-        busy = {_stem.stem_of(Path(p).name) for p in protect}
+        busy = {recname.stem_of(p) for p in protect}
         plan = PrunePlan([r for r in plan.delete if r.stem not in busy], plan.kept_unverified)
         gone = prune_execute(sess, plan)
         if gone:
@@ -290,10 +317,14 @@ class ClusterDialog(QDialog):
 
     _tested_sig = pyqtSignal(str, str, object)
 
-    def __init__(self, cfg: rconfig.SyncConfig, parent=None):
+    def __init__(self, cfg: rconfig.SyncConfig, parent=None, existing=None,
+                 queue_existing=None, local_dir=None):
         super().__init__(parent)
         self.setWindowTitle("Cluster sync")
         self._cfg = cfg
+        self._existing, self._queue_existing = existing, queue_existing
+        self._local_dir = local_dir
+        self.queued_existing = 0
         self.tested: Optional[tuple[str, str, tuple]] = None
         form = QFormLayout()
         self.host_edit = QLineEdit(cfg.host)
@@ -325,6 +356,12 @@ class ClusterDialog(QDialog):
         th = QHBoxLayout()
         th.addWidget(self.test_btn)
         th.addWidget(self.result_label, stretch=1)
+        self.existing_btn = QPushButton("Upload existing...")
+        self.existing_btn.setToolTip("Queue the recordings already in the output folder that are"
+                                     " not on the cluster yet\n(auto-upload only sends new ones)")
+        self.existing_btn.clicked.connect(self._upload_existing)
+        self.existing_btn.setVisible(existing is not None)
+        th.addWidget(self.existing_btn)
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
                               | QDialogButtonBox.StandardButton.Cancel)
         bb.accepted.connect(self.accept)
@@ -335,6 +372,27 @@ class ClusterDialog(QDialog):
         v.addWidget(bb)
         self.resize(520, self.sizeHint().height())
         self._tested_sig.connect(self._on_tested)
+
+    def _upload_existing(self) -> None:
+        recs = self._existing() if self._existing else []
+        where = self._local_dir or "the output folder"
+        if not recs:
+            QMessageBox.information(self, "Upload existing",
+                                    f"Every recording in {where} is on the cluster or queued.")
+            return
+        mb = sum(r.size for r in recs) / 1e6
+        if not self.host_edit.text().strip():
+            QMessageBox.information(self, "Upload existing", "Set the host first.")
+            return
+        text = (f"{len(recs)} recording(s) in {where} ({mb:.1f} MB) are not on the cluster"
+                f" yet:\n\n" + "\n".join(r.stem for r in recs[:15])
+                + (f"\n... and {len(recs) - 15} more" if len(recs) > 15 else "")
+                + "\n\nQueue them for upload? (They go after OK.)")
+        if QMessageBox.question(self, "Upload existing", text) != QMessageBox.StandardButton.Yes:
+            return
+        self._queue_existing(recs)
+        self.queued_existing += len(recs)
+        self.existing_btn.setText(f"Queued {self.queued_existing}")
 
     def result_config(self) -> rconfig.SyncConfig:
         c = rconfig.SyncConfig(**vars(self._cfg))

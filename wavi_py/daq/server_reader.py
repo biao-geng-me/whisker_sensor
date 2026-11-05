@@ -155,6 +155,7 @@ class ServerReader:
             # re-stamp it "now" so the file's time zero is the record start.
             hello = dict(self.hello, t=self._last_t or self.hello.get("t", 0.0))
             self._tee.write((json.dumps(hello) + "\n").encode())
+            self.tee_t0 = float(hello["t"])   # the copy's zero on the receive clock (notes)
 
     def stop_tee(self) -> None:
         with self._tee_lock:

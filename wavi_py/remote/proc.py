@@ -17,7 +17,7 @@ POSIX shell, whatever the client's OS.
   a 5 s connect timeout and keepalives, so a dead link fails in ~30 s rather
   than waiting for the call's own timeout;
 - ``run``: one call with a timeout, cancellable from another thread (the GUI
-  closing), stdin optionally an open file;
+  closing), stdin optionally an open file or bytes;
 - ``classify``: why a call failed, in words, from the exit code and stderr;
   ``offline`` says whether it was the network (retry later) or the setup.
 """
@@ -30,7 +30,7 @@ import subprocess
 import sys
 import threading
 from dataclasses import dataclass
-from typing import IO, Optional, Sequence
+from typing import IO, Optional, Sequence, Union
 
 CONNECT_TIMEOUT_S = 5
 SSH_OPTS = ("-o", "BatchMode=yes", "-o", f"ConnectTimeout={CONNECT_TIMEOUT_S}",
@@ -112,7 +112,7 @@ class Runner:
                     pass
 
     def run(self, host: str, remote_cmd: str, timeout: float,
-            stdin: Optional[IO[bytes]] = None) -> Result:
+            stdin: Union[IO[bytes], bytes, None] = None) -> Result:
         try:
             argv = ssh_argv(self.ssh(), host, remote_cmd)
         except SshMissing as exc:
@@ -120,19 +120,21 @@ class Runner:
         return self.run_argv(argv, timeout, stdin)
 
     def run_argv(self, argv: Sequence[str], timeout: float,
-                 stdin: Optional[IO[bytes]] = None) -> Result:
+                 stdin: Union[IO[bytes], bytes, None] = None) -> Result:
         with self._lock:
             if self._cancelled:
                 return Result(-2, b"", "cancelled")
+            data = stdin if isinstance(stdin, (bytes, bytearray)) else None
+            src = (subprocess.PIPE if data is not None else
+                   stdin if stdin is not None else subprocess.DEVNULL)
             try:
-                p = subprocess.Popen(list(argv), stdin=stdin if stdin is not None else
-                                     subprocess.DEVNULL, stdout=subprocess.PIPE,
+                p = subprocess.Popen(list(argv), stdin=src, stdout=subprocess.PIPE,
                                      stderr=subprocess.PIPE, **popen_kwargs())
             except FileNotFoundError:
                 return Result(-3, b"", f"no ssh at {argv[0]}")
             self._proc = p
         try:
-            out, err = p.communicate(timeout=timeout)
+            out, err = p.communicate(input=data, timeout=timeout)
             rc = p.returncode
         except subprocess.TimeoutExpired:
             p.kill()

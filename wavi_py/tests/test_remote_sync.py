@@ -27,11 +27,14 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from wavi_py.remote import _stem, config as rconfig, proc  # noqa: E402
-from wavi_py.remote.sync import (BUSY_S, Session, SyncError, SyncState,  # noqa: E402
+import threading  # noqa: E402
+
+from wavi_py.remote import config as rconfig, proc  # noqa: E402
+from wavi_py.remote.sync import (BUSY_S, PushResult, Session, SyncError, SyncState,  # noqa: E402
                                  changed_since_upload, cmd_upload, find_recordings,
-                                 prune_execute, prune_plan, push_queue, recording_of,
-                                 requeue_changed)
+                                 not_uploaded, prune_execute, prune_plan, push_queue,
+                                 recording_of, requeue_changed)
+from wavi_py.replay import notes as rnotes  # noqa: E402
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="the fake ssh is a POSIX script")
 
@@ -107,24 +110,43 @@ def make_rec(folder: Path, stem: str = LAPTOP, size: int = 300_000, notes: bytes
 
 # ----------------------------------------------------------------- names, notes
 
-def test_stem_and_date():
-    assert _stem.stem_of(f"{LAPTOP}.faults.txt") == LAPTOP
-    assert _stem.stem_of(f"{LAPTOP}.notes.jsonl") == LAPTOP
-    assert _stem.stem_of(f"{LAPTOP}.jsonl.idx.npz") == LAPTOP
-    assert _stem.stem_of(f"{LAPTOP}.dat") == LAPTOP          # the 23.86 stays
-    assert _stem.start_date(LAPTOP) == "2026-11-02"
-    assert _stem.start_date(PI) == "2026-11-03"
-    assert _stem.start_date("whisker_20261103_101500") == "2026-11-03"
-    assert _stem.start_date("random_name") is None
+def ids_of(p: Path) -> set:
+    return {ev["id"] for ev in rnotes.read(p)}
 
 
-def test_merge_notes_union_sorted_torn():
-    a = note("aa", 3) + note("bb", 1)
-    b = note("cc", 2) + note("aa", 3) + b'{"v": 1, "id": "dd", "ev"'   # a torn last line
-    m = _stem.merge_notes(a, b)
-    ids = [json.loads(x)["id"] for x in m.splitlines()]
-    assert ids == ["bb", "cc", "aa"]
-    assert _stem.merge_notes(m, a) == m                       # nothing new: same bytes
+def test_recording_dates(env):
+    f1, f2 = env.local / f"{LAPTOP}.dat", env.local / f"{PI}.jsonl"
+    f1.write_bytes(b"x")
+    f2.write_bytes(b"x")
+    recs = find_recordings(env.local)
+    assert recs[LAPTOP].date == "2026-11-02" and recs[PI].date == "2026-11-03"
+
+
+def test_append_missing_never_loses_an_append(tmp_path):
+    """notes.append_missing (the sync's local merge) against another writer
+    appending under notes.py's lock at the same time: every line of both ends up
+    in the file once, and the file is never rewritten."""
+    p = tmp_path / "x.notes.jsonl"
+    theirs = [rnotes.note(f"remote {i}") for i in range(200)]
+    mine = []
+
+    def writer():
+        for i in range(200):
+            mine.append(rnotes.append(p, rnotes.note(f"local {i}")))
+    th = threading.Thread(target=writer)
+    th.start()
+    for k in range(0, 200, 10):                  # the sync, in bits, while the GUI appends
+        rnotes.append_missing(p, theirs[: k + 10])
+    th.join()
+    n, before, st = rnotes.append_missing(p, theirs)
+    lines = rnotes.read(p)
+    assert n == 0 and before == st.st_size == p.stat().st_size
+    assert len(lines) == 400 and {e["id"] for e in lines} == {e["id"] for e in mine + theirs}
+    # a torn last line: the appended lines start on a new one
+    with open(p, "ab") as f:
+        f.write(b'{"v":1,"id":"torn"')
+    n, _, _ = rnotes.append_missing(p, [rnotes.note("after")])
+    assert n == 1 and len(rnotes.read(p)) == 401
 
 
 def test_find_recordings_excludes_caches(env):
@@ -254,20 +276,34 @@ def test_pi_stem_and_remote_partial(env):
 def test_notes_merged_both_ways(env):
     files = make_rec(env.local, notes=note("aa", 1) + note("bb", 3))
     env.sess().push(recording_of(files[0]))
-    rnotes = env.remote / "2026-11-02" / f"{LAPTOP}.notes.jsonl"
-    rnotes.write_bytes(rnotes.read_bytes() + note("cc", 2))          # added on the cluster
+    rnotes_p = env.remote / "2026-11-02" / f"{LAPTOP}.notes.jsonl"
+    assert rnotes_p.read_bytes() == files[-1].read_bytes()
+    assert stat.S_IMODE(rnotes_p.stat().st_mode) & 0o060 == 0o060
+    rnotes_p.write_bytes(rnotes_p.read_bytes() + note("cc", 2))      # added on the cluster
     lnotes = env.local / f"{LAPTOP}.notes.jsonl"
     lnotes.write_bytes(lnotes.read_bytes() + note("dd", 4))          # and here
     age(lnotes, 2 * BUSY_S)                                          # not being written
     rec = recording_of(files[0])
     assert changed_since_upload(rec, env.state.uploaded(LAPTOP)) == [lnotes.name]
     assert requeue_changed(env.state, env.local) == [LAPTOP]
+    n0 = len(env.calls())
     results, errors = push_queue(env.sess(), check_busy=False)
     assert not errors and results[0].notes_merged and results[0].uploaded == [lnotes.name]
-    ids = [json.loads(x)["id"] for x in lnotes.read_bytes().splitlines()]
-    assert ids == ["aa", "cc", "bb", "dd"]
-    assert rnotes.read_bytes() == lnotes.read_bytes()
+    assert ids_of(lnotes) == ids_of(rnotes_p) == {"aa", "bb", "cc", "dd"}
+    # the remote keeps its lines first; the local file was only appended to
+    assert [e["id"] for e in rnotes.read(rnotes_p)] == ["aa", "bb", "cc", "dd"]
+    assert [e["id"] for e in rnotes.read(lnotes)] == ["aa", "bb", "dd", "cc"]
+    assert len(env.calls()) - n0 == 2                 # the listing + one notes call
     assert not env.state.queued()
+    assert not list(rnotes_p.parent.glob(".wavi_notes.*"))
+    # nothing changed anywhere: no notes call
+    n0 = len(env.calls())
+    r = env.sess().push(recording_of(files[0]))
+    assert r.uploaded == [] and lnotes.name in r.skipped and len(env.calls()) - n0 == 1
+    # a note added on the cluster only (another laptop): pulled down by the next push
+    rnotes_p.write_bytes(rnotes_p.read_bytes() + note("ee", 5))
+    r = env.sess().push(recording_of(files[0]))
+    assert r.notes_merged and "ee" in ids_of(lnotes) and r.uploaded == []
 
 
 def test_notes_only_on_cluster_come_down(env):
@@ -276,8 +312,45 @@ def test_notes_only_on_cluster_come_down(env):
     rdir.mkdir(parents=True)
     (rdir / f"{LAPTOP}.notes.jsonl").write_bytes(note("zz", 5))
     r = env.sess().push(recording_of(files[0]))
-    assert r.notes_merged and (env.local / f"{LAPTOP}.notes.jsonl").read_bytes() == note("zz", 5)
+    assert r.notes_merged and ids_of(env.local / f"{LAPTOP}.notes.jsonl") == {"zz"}
     assert f"{LAPTOP}.notes.jsonl" not in r.uploaded                 # it was there already
+    assert not changed_since_upload(recording_of(files[0]), env.state.uploaded(LAPTOP))
+
+
+def test_two_laptops_at_once(env):
+    """Two copies of one recording (two laptops) syncing their notes at the
+    same moment: the remote lock serializes the merges, so the cluster ends with
+    both laptops' notes after that one round, and each laptop with the union of
+    itself and whatever merged before it."""
+    for k in range(5):
+        stem = f"st_2026-11-02_1639_2{k}.00_two"
+        dirs = [env.tmp / f"laptop {i} {k}" for i in (1, 2)]
+        for i, d in enumerate(dirs):
+            d.mkdir()
+            make_rec(d, stem, size=1000,
+                     notes=b"".join(note(f"L{i}n{j}", j) for j in range(30)))
+        sessions = [Session(env.cfg, SyncState(d / "state.json")) for d in dirs]
+        recs = [find_recordings(d)[stem] for d in dirs]
+        go = threading.Barrier(2)
+        errs = []
+
+        def run(s, r):
+            go.wait()
+            try:
+                s.sync_notes(r, s.remote_dir(r), {}, PushResult(r.stem))
+            except Exception as exc:  # noqa: BLE001
+                errs.append(exc)
+        ths = [threading.Thread(target=run, args=(s, r)) for s, r in zip(sessions, recs)]
+        [t.start() for t in ths]
+        [t.join() for t in ths]
+        assert not errs
+        remote = env.remote / "2026-11-02" / f"{stem}.notes.jsonl"
+        assert len(ids_of(remote)) == 60 and len(rnotes.read(remote)) == 60
+        # the second one to merge has everything; a second round gives both
+        for s, r in zip(sessions, recs):
+            s.push(find_recordings(r.dir)[stem])
+        for d in dirs:
+            assert ids_of(d / f"{stem}.notes.jsonl") == ids_of(remote)
 
 
 def test_drop_mid_transfer_keeps_part_and_queue(env, monkeypatch):
@@ -423,6 +496,17 @@ def test_controller_auto_upload(env, app, monkeypatch):
         assert _wait(app, lambda: (env.remote / "2026-11-02" / files[1].name).exists()
                      and ctl._last_status[0] == "ok"), seen
         assert any("uploading" in s for s in seen), seen
+        # the card, written seconds later by Stop's child process (card.py's
+        # thread calls on_done): it goes up on its own, the rest is skipped
+        card = env.local / f"{LAPTOP}.card.json"
+        card.write_text('{"v": 1}')
+        n0 = len(env.calls())
+        threading.Thread(target=ctl.card_written, args=(card, None)).start()
+        assert _wait(app, lambda: (env.remote / "2026-11-02" / card.name).exists()
+                     and ctl._last_status[0] == "ok"), seen
+        ups = [c for c in env.calls()[n0:] if "cat > " in " ".join(c)]
+        assert len(ups) == 1 and card.name in " ".join(ups[0])
+        ctl.card_written(env.local / "x.card.json", "failed")         # no card: nothing
         # offline: the next one stays queued
         make_rec(env.local, "st_2026-11-02_1700_00.00_b", old=False)
         monkeypatch.setenv("FAKE_SSH_MODE", "timeout")
@@ -457,5 +541,45 @@ def test_controller_off_and_dialog(env, app):
         assert dlg.result_config().host == "fakehost"
         out = Path(os.environ.get("WAVI_SHOT_DIR", env.tmp))
         dlg.grab().save(str(out / "sync_dialog.png"))
+    finally:
+        ctl.close()
+
+
+def test_upload_existing(env, app, monkeypatch):
+    """Auto-upload never sends old recordings; "Upload existing..." counts the
+    ones not on the cluster, asks, queues them, and they go after OK."""
+    from PyQt6.QtWidgets import QDialog, QMessageBox, QWidget
+    from wavi_py.remote import qt as rqt
+    stems = [f"st_2026-11-01_100{i}_00.00_old{i}" for i in range(3)]
+    for s_ in stems:
+        make_rec(env.local, s_, size=1000, old=False)
+    for p in env.local.iterdir():
+        age(p)
+    env.sess().push(find_recordings(env.local)[stems[0]])          # one is up already
+    rconfig.save(env.cfg)                                           # auto-upload off
+    w = QWidget()
+    ctl = rqt.SyncController(w, env.local, state=env.state)
+    ctl.status_widget()
+    asked = []
+    monkeypatch.setattr(QMessageBox, "question",
+                        lambda *a, **k: asked.append(a[2]) or QMessageBox.StandardButton.Yes)
+
+    def exec_(dlg):
+        dlg._upload_existing()
+        dlg.grab().save(str(Path(os.environ.get("WAVI_SHOT_DIR", env.tmp))
+                            / "sync_dialog_existing.png"))
+        return QDialog.DialogCode.Accepted
+    monkeypatch.setattr(rqt.ClusterDialog, "exec", exec_)
+    try:
+        assert [r.stem for r in ctl.existing()] == stems[1:]
+        assert [r.stem for r in not_uploaded(env.state, env.local,
+                                             protect=[str(env.local / f"{stems[1]}.dat")])] \
+            == stems[2:]                                            # in use: not offered
+        ctl.open_dialog()
+        assert "2 recording(s)" in asked[0]
+        assert _wait(app, lambda: not env.state.queued() and ctl._last_status[0] == "off")
+        for s_ in stems:
+            assert (env.remote / "2026-11-01" / f"{s_}.jsonl").exists()
+        assert ctl.existing() == []
     finally:
         ctl.close()

@@ -4,8 +4,8 @@ Layout on the cluster (the recording-manager spec)::
 
     <root>/YYYY-MM-DD/<stem>.{jsonl,dat,faults.txt,notes.jsonl,card.json}
 
-``YYYY-MM-DD`` is the recording's start date (``_stem.start_date``; the file's
-mtime for a name in neither format). Every file of the stem goes, except the
+``YYYY-MM-DD`` is the recording's start date (``replay/recname.py``; the
+file's mtime for a name in neither format). Every file of the stem goes, except the
 rebuildable caches (``.idx.npz``, ``.store.npz``) and our own temporaries.
 
 One file's upload is one ssh call: the local file is piped into
@@ -19,10 +19,23 @@ doesn't matter, and every path in them is ``shlex.quote``d.
 
 One recording (``Session.push``): one call lists the remote copies (size, and
 the sha256 when the size matches: hashing costs the cluster, not the link);
-files already there with the same size and hash are skipped. ``.notes.jsonl``
-is the one file that changes after the recording: when the remote copy
-differs it is fetched and merged with the local one by id (the union, so
-merging never conflicts), the merged copy written locally, then uploaded.
+files already there with the same size and hash are skipped.
+
+``.notes.jsonl`` is the one file that changes after the recording, on more
+than one machine (``replay/notes.py``: append-only lines, merged as the union
+by ``id``). It is synced by one ssh call (``cmd_notes``) both ways: the local
+copy goes up on stdin; on the cluster, under ``flock`` on the date folder, the
+remote copy gets the lines whose id it lacks (``awk``, keeping the remote lines
+first), is replaced atomically, and is printed back; here ``notes.
+append_missing`` appends the lines the local copy lacks, under notes.py's own
+append lock, so a note the GUI appends meanwhile is never lost and the file is
+never rewritten. Two laptops syncing the same notes at once are serialized by
+the remote lock, so neither loses the other's lines. The order of the lines
+differs between copies (each keeps its own first), so notes are compared by
+their set of ids, never by hash: "uploaded" means every local id is in the copy
+the cluster printed back. The sync runs when the local file changed since its
+record, or the remote size differs from the one seen last (a note added on
+another machine).
 
 The state (``SyncState``, a JSON file in ``config.state_dir()``):
 
@@ -60,11 +73,13 @@ from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Callable, Iterable, Optional
 
-from wavi_py.remote import _stem
 from wavi_py.remote.config import SyncConfig, state_dir
 from wavi_py.remote.proc import Result, Runner, classify
+from wavi_py.replay import notes as rnotes
+from wavi_py.replay import recname
 
-NOTES_SUFFIX = ".notes.jsonl"
+NOTES_SUFFIX = rnotes.SUFFIX
+NOTES_TIMEOUT_S = 90.0                      # incl. up to 60 s waiting for the remote lock
 MAIN_SUFFIXES = (".jsonl", ".dat")          # a stem with one of these is a recording
 TEMP_SUFFIXES = (".part", ".tmp", ".swp", "~")
 BUSY_S = 20.0                               # files modified since: still being written
@@ -93,9 +108,9 @@ class Recording:
 
     @property
     def date(self) -> str:
-        d = _stem.start_date(self.stem)
-        if d:
-            return d
+        rn = recname.parse(self.stem)
+        if rn is not None:
+            return rn.date
         mt = min((p.stat().st_mtime for p in self.files), default=time.time())
         return datetime.fromtimestamp(mt).strftime("%Y-%m-%d")
 
@@ -124,7 +139,7 @@ def _size(p: Path) -> int:
 
 
 def _is_cache(name: str) -> bool:
-    return name.endswith(_stem.CACHE_SUFFIXES)
+    return name.lower().endswith(recname.CACHE_SUFFIXES)
 
 
 def _is_temp(name: str) -> bool:
@@ -141,7 +156,7 @@ def find_recordings(folder: Path) -> dict[str, Recording]:
     for p in entries:
         if _is_temp(p.name):
             continue
-        stem = _stem.stem_of(p.name)
+        stem = recname.stem_of(p.name)
         r = groups.setdefault(stem, Recording(Path(folder), stem, [], []))
         (r.caches if _is_cache(p.name) else r.files).append(p)
     return {s: r for s, r in groups.items()
@@ -151,7 +166,7 @@ def find_recordings(folder: Path) -> dict[str, Recording]:
 def recording_of(path: os.PathLike | str) -> Optional[Recording]:
     """The recording a path (any of its files, or the stem) belongs to."""
     p = Path(path)
-    stem = _stem.stem_of(p.name)
+    stem = recname.stem_of(p.name)
     return find_recordings(p.parent).get(stem)
 
 
@@ -251,6 +266,15 @@ class SyncState:
                 q["why"] = why
         self.edit(f)
 
+    def enqueue_many(self, recs: Iterable[Recording], why: str = "") -> None:
+        recs = list(recs)
+
+        def f(d):
+            for rec in recs:
+                d["queue"].setdefault(rec.stem, {"dir": str(rec.dir), "added": time.time(),
+                                                 "tries": 0, "error": "", "why": why})
+        self.edit(f)
+
     def dequeue(self, stem: str) -> None:
         self.edit(lambda d: d["queue"].pop(stem, None))
 
@@ -338,6 +362,26 @@ def cmd_upload(rdir: str, name: str, size: int, sha: str) -> str:
         f"h=$(sha256sum < {part}); h=${{h%% *}}; "
         f"if [ \"$h\" != {shlex.quote(sha)} ]; then rm -f {part}; echo 'sha256 mismatch' >&2; exit 6; fi; "
         f"chmod g+rw {part}; mv -f {part} {final} || exit 7; echo WAVI_OK")
+
+
+# the union by id of the remote copy ($1) and the incoming one ($2): a line
+# whose "id" was seen is dropped, a torn line (not ending in "}") skipped
+_AWK_UNION = (r'{ if ($0 !~ /}[ \t\r]*$/) next; k = $0; '
+              'if (match($0, /"id" *: *"[^"]*"/)) { k = substr($0, RSTART, RLENGTH); gsub(/[ ]/, "", k) } '
+              'if (!(k in seen)) { seen[k] = 1; print } }')
+
+
+def cmd_notes(rdir: str, name: str) -> str:
+    """Merge stdin into ``rdir/name`` under ``flock`` on the folder (a lock on the
+    file itself would not survive its replacement), print the result."""
+    d, n = shlex.quote(rdir), shlex.quote(name)
+    inc, tmp = ".wavi_notes.in.$$", ".wavi_notes.tmp.$$"     # $$: the remote shell's pid
+    return _sh(
+        f"umask 002; mkdir -p {d} || exit 3; cd {d} || exit 3; "
+        f"cat > {inc} || {{ rm -f {inc}; exit 4; }}; "
+        f"( flock -w 60 9 || exit 8; touch {n} && "
+        f"awk {shlex.quote(_AWK_UNION)} {n} {inc} > {tmp} && chmod g+rw {tmp} && "
+        f"mv -f {tmp} {n} && cat {n} ) 9< . ; rc=$?; rm -f {inc} {tmp}; exit $rc")
 
 
 def cmd_cat(rpath: str) -> str:
@@ -446,52 +490,59 @@ class Session:
             return e["sha"]
         return file_sha256(p)
 
-    def _merge_notes(self, rec: Recording, rdir: str,
-                     remote: dict[str, tuple[int, Optional[str]]],
-                     local_sha: dict[str, str]) -> bool:
-        """Bring the remote notes into the local file (the union by id). True if
-        the local file changed. The upload that follows sends the merged copy."""
+    def sync_notes(self, rec: Recording, rdir: str,
+                   remote: dict[str, tuple[int, Optional[str]]], res: "PushResult") -> None:
+        """The notes both ways in one call (``cmd_notes``; see the module
+        docstring), when the local copy changed since its record or the remote
+        one's size differs from the one seen last."""
         name = rec.stem + NOTES_SUFFIX
-        r = remote.get(name)
-        if r is None:
-            return False
-        lp = rec.dir / name
-        if lp.exists() and r[1] is not None and r[1] == local_sha.get(name):
-            return False                          # the same copy on both sides
-        theirs = self.fetch(str(PurePosixPath(rdir) / name))
-        # the fetched copy is the remote one exactly: an unchanged merge then skips it
-        remote[name] = (len(theirs), hashlib.sha256(theirs).hexdigest())
+        lp, r = rec.dir / name, remote.get(name)
+        e = self.state.uploaded(rec.stem).get(name)
+        local_changed = lp.exists() and not _matches(e, lp)
+        remote_changed = r is not None and (e is None or e.get("rsize") != r[0])
+        if not (local_changed or remote_changed):
+            if lp.exists():
+                res.skipped.append(name)
+            return
         mine = lp.read_bytes() if lp.exists() else b""
-        merged = _stem.merge_notes(mine, theirs)
-        if merged == mine:
-            return False
-        # a note appended locally since the read is kept: merge it in again
-        tmp = lp.with_name(lp.name + ".tmp")
-        now = lp.read_bytes() if lp.exists() else b""
-        if now != mine:
-            merged = _stem.merge_notes(now, theirs)
-        tmp.write_bytes(merged)
-        os.replace(tmp, lp)
+        out = self._run(cmd_notes(rdir, name), NOTES_TIMEOUT_S, stdin=mine)
+        if not out.ok:
+            if out.rc == 8:
+                raise SyncError(f"{name}: the cluster's notes lock stayed busy; retried later")
+            raise self._fail(out, name)
+        theirs = rnotes.parse_lines(out.out)
+        missing = {ev["id"] for ev in rnotes.parse_lines(mine)} - {ev["id"] for ev in theirs}
+        if missing:
+            raise SyncError(f"{name}: {len(missing)} note(s) missing on the cluster after the"
+                            " merge; retried later")
+        n, before, st = rnotes.append_missing(lp, theirs)
         if lp not in rec.files:
             rec.files.append(lp)
-        return True
+        if n:
+            res.notes_merged = True
+        if local_changed:
+            res.uploaded.append(name)
+        if before == len(mine):
+            # the file was what went up (plus the lines just appended); a note
+            # appended meanwhile changes its size again, so it goes next time
+            self.state.record(rec, rdir, {name: {
+                "size": st.st_size, "mtime_ns": st.st_mtime_ns,
+                "sha": hashlib.sha256(out.out).hexdigest(), "rsize": len(out.out)}})
 
     def push(self, rec: Recording, progress: Optional[Progress] = None) -> PushResult:
-        """Upload what of ``rec`` the cluster doesn't have (verified), merging the
-        notes. Raises SyncError; whatever was verified before it stays recorded."""
+        """Upload what of ``rec`` the cluster doesn't have (verified), then sync
+        the notes. Raises SyncError; whatever was verified before stays recorded."""
         res = PushResult(rec.stem)
         rdir = self.remote_dir(rec)
         uploaded = self.state.uploaded(rec.stem)
-        names = {p.name for p in rec.files} | {rec.stem + NOTES_SUFFIX}
-        sizes = {n: _size(rec.dir / n) for n in sorted(names)}
+        notes_name = rec.stem + NOTES_SUFFIX
+        files = [p for p in rec.files if p.name != notes_name]
+        sizes = {p.name: _size(p) for p in files}
+        sizes[notes_name] = 0                     # listed (its size), never hashed
         remote = self.remote_state(rdir, sizes)
-        sha = {p.name: self._local_sha(p, uploaded) for p in rec.files}
-        if self._merge_notes(rec, rdir, remote, sha):
-            res.notes_merged = True
-            np_ = rec.dir / (rec.stem + NOTES_SUFFIX)
-            sha[np_.name] = file_sha256(np_)
+        sha = {p.name: self._local_sha(p, uploaded) for p in files}
         todo, done = [], {}
-        for p in rec.files:
+        for p in files:
             size, mt = _stat_key(p)
             r = remote.get(p.name)
             if r is not None and r[0] == size and r[1] == sha[p.name]:
@@ -513,21 +564,32 @@ class Session:
             res.uploaded.append(p.name)
             res.bytes += size
         res.secs = time.monotonic() - t0
+        self.sync_notes(rec, rdir, remote, res)
         return res
 
     def verified_on_cluster(self, rec: Recording) -> tuple[bool, str]:
         """Every file of ``rec``: the record matches it, and the cluster has the
-        same size and sha256 now (one listing call)."""
+        same size and sha256 now (one listing call); the notes: every local id is
+        in the cluster's copy (one more call)."""
         up = self.state.uploaded(rec.stem)
         missing = changed_since_upload(rec, up)
         if missing:
             return False, f"not uploaded: {', '.join(missing)}"
-        sizes = {p.name: _size(p) for p in rec.files}
-        remote = self.remote_state(self.remote_dir(rec), sizes)
-        for p in rec.files:
+        notes_name = rec.stem + NOTES_SUFFIX
+        files = [p for p in rec.files if p.name != notes_name]
+        sizes = {p.name: _size(p) for p in files}
+        rdir = self.remote_dir(rec)
+        remote = self.remote_state(rdir, sizes)
+        for p in files:
             r = remote.get(p.name)
             if r is None or r[0] != sizes[p.name] or r[1] != up[p.name].get("sha"):
                 return False, f"{p.name} differs on the cluster"
+        lp = rec.dir / notes_name
+        if lp.exists():
+            theirs = {ev["id"] for ev in rnotes.parse_lines(
+                self.fetch(str(PurePosixPath(rdir) / notes_name)))}
+            if {ev["id"] for ev in rnotes.read(lp)} - theirs:
+                return False, f"{notes_name}: notes missing on the cluster"
         return True, ""
 
 
@@ -561,6 +623,20 @@ def requeue_changed(state: SyncState, folder: Path,
     return added
 
 
+def not_uploaded(state: SyncState, folder: Path, protect: Iterable[str] = ()) -> list[Recording]:
+    """Recordings in ``folder`` with files not verified on the cluster per the
+    state (no network), not queued, not in use: "Upload existing..."."""
+    protect = {recname.stem_of(p) for p in protect if p}
+    snap = state.snapshot()
+    out = []
+    for stem, rec in sorted(find_recordings(folder).items()):
+        if stem in snap["queue"] or stem in protect or is_busy(rec):
+            continue
+        if changed_since_upload(rec, (snap["uploaded"].get(stem) or {}).get("files") or {}):
+            out.append(rec)
+    return out
+
+
 def push_queue(sess: Session, protect: Iterable[str] = (), check_busy: bool = True,
                progress: Optional[Callable[[str, int, int, str], None]] = None,
                log: Callable[[str], None] = lambda s: None) -> tuple[list[PushResult], list[str]]:
@@ -569,7 +645,7 @@ def push_queue(sess: Session, protect: Iterable[str] = (), check_busy: bool = Tr
     run goes on. ``check_busy``: skip recordings modified in the last ``BUSY_S``
     (the CLI, which can't know what the GUI is writing; the GUI passes what it
     writes in ``protect`` instead). Returns (results, errors)."""
-    protect = {_stem.stem_of(Path(p).name) for p in protect if p}
+    protect = {recname.stem_of(Path(p).name) for p in protect if p}
     results, errors = [], []
     for stem, rec in queue_recordings(sess.state):
         if rec is None:
@@ -611,7 +687,7 @@ class PrunePlan:
 
 def prune_plan(sess: Session, folder: Path, keep_n: int,
                protect: Iterable[str] = ()) -> PrunePlan:
-    protect = {_stem.stem_of(Path(p).name) for p in protect if p}
+    protect = {recname.stem_of(Path(p).name) for p in protect if p}
     recs = sorted(find_recordings(folder).values(), key=lambda r: r.mtime, reverse=True)
     plan = PrunePlan([], [])
     for rec in recs[max(0, keep_n):]:
