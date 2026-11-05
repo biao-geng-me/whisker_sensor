@@ -1273,6 +1273,7 @@ class MainWindow(QMainWindow):
         act = menu.addAction("New analysis window", lambda: self.new_analysis_window())
         act.setToolTip("Compare selections (every one made so far is included)")
         menu.addAction("Recordings...", self.show_recordings)
+        menu.addAction("Uploads...", self._sync.show_uploads)
 
     def show_recordings(self) -> None:
         """The Recordings window (made on first use)."""

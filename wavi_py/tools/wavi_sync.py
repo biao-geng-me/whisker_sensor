@@ -16,8 +16,10 @@ Flags override the settings for this run only: ``--host``, ``--root``,
 - ``push``: the given recordings (any file of each, or a folder), else the
   queue plus every recording in the local folder not yet verified on the
   cluster. Recordings modified in the last 20 s are left for later (the GUI may
-  be writing one). ``--verify`` also re-checks recordings the state says are
-  uploaded, against the cluster's size and sha256;
+  be writing one). A line per file (hashing a big one, uploading, done,
+  already there, failed) and a percentage line at most every 3 s.
+  ``--verify`` also re-checks recordings the state says are uploaded, against
+  the cluster's size and sha256;
 - ``status``: the settings, the queue, and per local recording: uploaded,
   changed since, or not yet;
 - ``prune``: list the local recordings beyond the newest N that are verified on
@@ -39,6 +41,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from wavi_py.remote import config as rconfig  # noqa: E402
+from wavi_py.remote.progress import LinePrinter  # noqa: E402
 from wavi_py.remote.sync import (Session, SyncError, SyncState, changed_since_upload,  # noqa: E402
                                  find_recordings, is_busy, prune_execute, prune_plan,
                                  push_queue, recording_of, requeue_changed)
@@ -100,11 +103,10 @@ def cmd_push(sess: Session, a) -> int:
     n = len(st.queued())
     print(f"{n} recording(s) to push to {sess.cfg.host}:{sess.cfg.root}")
 
-    def progress(stem, i, k, name):
-        print(f"  {stem}: {i}/{k} {name}", flush=True)
+    lines = LinePrinter(lambda s: print(s, flush=True))
     t0 = time.monotonic()
     try:
-        results, errors = push_queue(sess, progress=progress, log=print)
+        results, errors = push_queue(sess, log=print, on_event=lines)
     except SyncError as exc:
         print(f"OFFLINE: {exc.reason}; the rest stays queued")
         return 2

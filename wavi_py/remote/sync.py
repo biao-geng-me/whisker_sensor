@@ -51,6 +51,18 @@ The state (``SyncState``, a JSON file in ``config.state_dir()``):
 GUI and CLI may run at once: every change re-reads the file under a lock file,
 applies one edit and writes it back atomically.
 
+Progress (``SyncEvent``): ``push_queue`` and ``Session.push`` call
+``on_event(ev)`` from the thread they run in, for the recording as a whole
+(``file == ""``: queued, waiting, checking, uploading, done, failed, offline,
+removed, paused), for the run (``stem == ""``: ``run`` with ``n``, ``run_end``)
+and per file (hashing and uploading with bytes done / total,
+verifying, done, skipped, failed). Byte events come at most ``proc.EMIT_HZ``
+times a second. The GUI turns them into a Qt signal (``remote/qt.py``), the CLI
+into lines. ``stop(stem)`` is asked between files: ``"pause"`` ends the run
+(the recording stays queued, what went up stays recorded), ``"skip"`` leaves
+that recording (it was removed from the queue). Events change nothing in what
+is uploaded or verified.
+
 Pruning (off by default): local copies beyond the newest ``keep_n`` go only if
 every file is verified on the cluster: the uploaded record matches the local
 file and a remote listing confirms size and sha256 right before deleting. The
@@ -74,7 +86,7 @@ from pathlib import Path, PurePosixPath
 from typing import Callable, Iterable, Optional
 
 from wavi_py.remote.config import SyncConfig, state_dir
-from wavi_py.remote.proc import Result, Runner, classify
+from wavi_py.remote.proc import Result, Runner, Throttle, classify
 from wavi_py.replay import notes as rnotes
 from wavi_py.replay import recname
 
@@ -170,14 +182,21 @@ def recording_of(path: os.PathLike | str) -> Optional[Recording]:
     return find_recordings(p.parent).get(stem)
 
 
-def file_sha256(path: Path, chunk: int = 1 << 20) -> str:
+def file_sha256(path: Path, chunk: int = 1 << 20,
+                progress: Optional[Callable[[int, int], None]] = None) -> str:
+    """``progress(done, total)`` after every chunk (the caller throttles)."""
     h = hashlib.sha256()
     with open(path, "rb") as f:
+        total = os.fstat(f.fileno()).st_size
+        done = 0
         while True:
             b = f.read(chunk)
             if not b:
                 return h.hexdigest()
             h.update(b)
+            done += len(b)
+            if progress:
+                progress(done, total)
 
 
 def _stat_key(p: Path) -> tuple[int, int]:
@@ -421,6 +440,46 @@ class PushResult:
 
 Progress = Callable[[int, int, str], None]      # (file i (1-based), of n, name)
 
+# phases of SyncEvent, per recording (file == "") and per file
+REC_PHASES = ("queued", "waiting", "checking", "uploading", "done", "failed", "offline",
+              "removed", "paused")
+FILE_PHASES = ("queued", "hashing", "uploading", "verifying", "done", "skipped", "failed")
+FINISHED = ("done", "failed", "offline", "removed")
+
+
+@dataclass
+class SyncEvent:
+    """One step of a push, for display only (see the module docstring).
+    ``files``: on a recording's ``queued`` / ``checking``, its (name, size) list;
+    ``k`` / ``n``: the recording's place in this run; ``rdir``: its cluster folder;
+    ``bytes_sent``: on a recording's end, what this push actually sent;
+    ``info``: a remark that is not an error ("merged")."""
+    stem: str
+    phase: str
+    file: str = ""
+    done: int = 0
+    total: int = 0
+    error: str = ""
+    info: str = ""
+    k: int = 0
+    n: int = 0
+    rdir: str = ""
+    files: tuple = ()
+    bytes_sent: int = 0
+    t: float = field(default_factory=time.time)
+
+
+class Stopped(Exception):
+    """Raised between files when ``stop(stem)`` says so ("pause" / "skip")."""
+
+    def __init__(self, why: str):
+        super().__init__(why)
+        self.why = why
+
+
+def _nop(ev: SyncEvent) -> None:
+    pass
+
 
 class Session:
     def __init__(self, cfg: SyncConfig, state: Optional[SyncState] = None,
@@ -428,12 +487,23 @@ class Session:
         self.cfg = cfg
         self.state = state or SyncState()
         self.runner = runner or Runner()
+        self.on_event: Callable[[SyncEvent], None] = _nop
+        self.stop: Callable[[str], str] = lambda stem: ""
+        self.k = self.n = 0                       # the current recording's place in the run
+
+    def _ev(self, stem: str, phase: str, **kw) -> None:
+        try:
+            self.on_event(SyncEvent(stem, phase, k=self.k, n=self.n, **kw))
+        except Exception:  # noqa: BLE001 — display only
+            pass
 
     def cancel(self) -> None:
         self.runner.cancel()
 
-    def _run(self, cmd: str, timeout: float, stdin=None) -> Result:
-        return self.runner.run(self.cfg.host.strip(), cmd, timeout, stdin)
+    def _run(self, cmd: str, timeout: float, stdin=None, on_bytes=None) -> Result:
+        if on_bytes is None:
+            return self.runner.run(self.cfg.host.strip(), cmd, timeout, stdin)
+        return self.runner.run(self.cfg.host.strip(), cmd, timeout, stdin, on_bytes=on_bytes)
 
     def _fail(self, res: Result, what: str) -> SyncError:
         why, offline = classify(res, self.cfg.host)
@@ -473,10 +543,24 @@ class Session:
             raise self._fail(res, "fetch")
         return res.out
 
-    def upload_file(self, path: Path, rdir: str, size: int, sha: str) -> None:
+    def upload_file(self, path: Path, rdir: str, size: int, sha: str,
+                    stem: str = "") -> None:
         timeout = 60.0 + size / MIN_UPLOAD_RATE
+        stem = stem or recname.stem_of(path.name)
+
+        sent_all = []
+
+        def on_bytes(done, total):
+            if sent_all:                          # the closing tick after the last chunk
+                return
+            self._ev(stem, "uploading", file=path.name, done=done, total=total or size)
+            if done >= (total or size):           # the remote size + sha256 check runs now
+                sent_all.append(True)
+                self._ev(stem, "verifying", file=path.name, done=done, total=total or size)
+        self._ev(stem, "uploading", file=path.name, done=0, total=size)
         with open(path, "rb") as f:
-            res = self._run(cmd_upload(rdir, path.name, size, sha), timeout, stdin=f)
+            res = self._run(cmd_upload(rdir, path.name, size, sha), timeout, stdin=f,
+                            on_bytes=on_bytes)
         if not (res.ok and b"WAVI_OK" in res.out):
             if res.rc in (5, 6):
                 raise SyncError(f"{path.name}: verification failed on the cluster"
@@ -485,11 +569,14 @@ class Session:
 
     # ----- one recording
 
-    def _local_sha(self, p: Path, uploaded: dict[str, dict]) -> str:
+    def _local_sha(self, p: Path, uploaded: dict[str, dict], stem: str = "") -> str:
         e = uploaded.get(p.name)
         if _matches(e, p) and e.get("sha"):
             return e["sha"]
-        return file_sha256(p)
+        stem = stem or recname.stem_of(p.name)
+        tick = Throttle(lambda d, t: self._ev(stem, "hashing", file=p.name, done=d, total=t))
+        tick(0, _size(p), final=True)
+        return file_sha256(p, progress=tick)
 
     def sync_notes(self, rec: Recording, rdir: str,
                    remote: dict[str, tuple[int, Optional[str]]], res: "PushResult") -> None:
@@ -504,8 +591,10 @@ class Session:
         if not (local_changed or remote_changed):
             if lp.exists():
                 res.skipped.append(name)
+                self._ev(rec.stem, "skipped", file=name, total=_size(lp))
             return
         mine = lp.read_bytes() if lp.exists() else b""
+        self._ev(rec.stem, "uploading", file=name, done=0, total=len(mine))
         out = self._run(cmd_notes(rdir, name), NOTES_TIMEOUT_S, stdin=mine)
         if not out.ok:
             if out.rc == 8:
@@ -517,6 +606,8 @@ class Session:
             raise SyncError(f"{name}: {len(missing)} note(s) missing on the cluster after the"
                             " merge; retried later")
         n, before, st = rnotes.append_missing(lp, theirs)
+        self._ev(rec.stem, "done", file=name, done=len(mine), total=len(mine),
+                 info=f"merged, {n} note(s) came down" if n else "merged")
         if lp not in rec.files:
             rec.files.append(lp)
         if n:
@@ -540,8 +631,12 @@ class Session:
         files = [p for p in rec.files if p.name != notes_name]
         sizes = {p.name: _size(p) for p in files}
         sizes[notes_name] = 0                     # listed (its size), never hashed
+        self._ev(rec.stem, "checking", rdir=rdir, files=_file_list(rec))
         remote = self.remote_state(rdir, sizes)
-        sha = {p.name: self._local_sha(p, uploaded) for p in files}
+        sha = {}
+        for p in files:
+            self._check_stop(rec.stem)
+            sha[p.name] = self._local_sha(p, uploaded, rec.stem)
         todo, done = [], {}
         for p in files:
             size, mt = _stat_key(p)
@@ -549,24 +644,39 @@ class Session:
             if r is not None and r[0] == size and r[1] == sha[p.name]:
                 res.skipped.append(p.name)
                 done[p.name] = {"size": size, "mtime_ns": mt, "sha": sha[p.name]}
+                self._ev(rec.stem, "skipped", file=p.name, total=size)
             else:
                 todo.append(p)
         if done:
             self.state.record(rec, rdir, done)
+        if todo:
+            self._ev(rec.stem, "uploading", rdir=rdir)
         t0 = time.monotonic()
         for i, p in enumerate(todo, 1):
+            self._check_stop(rec.stem)
             if progress:
                 progress(i, len(todo), p.name)
             size, mt = _stat_key(p)
-            self.upload_file(p, rdir, size, sha[p.name])
+            try:
+                self.upload_file(p, rdir, size, sha[p.name], rec.stem)
+            except SyncError as exc:
+                self._ev(rec.stem, "failed", file=p.name, total=size, error=exc.reason)
+                raise
+            self._ev(rec.stem, "done", file=p.name, done=size, total=size)
             # recorded at once: a later failure doesn't send this file again
             self.state.record(rec, rdir, {p.name: {"size": size, "mtime_ns": mt,
                                                    "sha": sha[p.name]}})
             res.uploaded.append(p.name)
             res.bytes += size
         res.secs = time.monotonic() - t0
+        self._check_stop(rec.stem)
         self.sync_notes(rec, rdir, remote, res)
         return res
+
+    def _check_stop(self, stem: str) -> None:
+        why = self.stop(stem)
+        if why:
+            raise Stopped(why)
 
     def verified_on_cluster(self, rec: Recording) -> tuple[bool, str]:
         """Every file of ``rec``: the record matches it, and the cluster has the
@@ -597,6 +707,26 @@ class Session:
 # ---------------------------------------------------------------------------
 # queue processing and pruning (shared by the GUI worker and the CLI)
 # ---------------------------------------------------------------------------
+
+def _file_list(rec: Recording) -> tuple:
+    return tuple((p.name, _size(p)) for p in rec.files)
+
+
+def queue_events(state: SyncState, protect: Iterable[str] = ()) -> list[SyncEvent]:
+    """A ``queued`` (or ``waiting``: in use) event per queued recording, oldest
+    first, with its files and the last error: what a window shows of the queue
+    without a push running (after a restart, offline)."""
+    protect = {recname.stem_of(Path(p).name) for p in protect if p}
+    snap = state.snapshot()["queue"]
+    out = []
+    for i, (stem, q) in enumerate(sorted(snap.items(), key=lambda kv: kv[1].get("added", 0)), 1):
+        rec = find_recordings(Path(q.get("dir", "."))).get(stem)
+        files = _file_list(rec) if rec is not None else ()
+        out.append(SyncEvent(stem, "waiting" if stem in protect else "queued",
+                             k=i, n=len(snap), files=files, error=q.get("error", ""),
+                             t=q.get("last_try") or q.get("added") or time.time()))
+    return out
+
 
 def queue_recordings(state: SyncState) -> list[tuple[str, Optional[Recording]]]:
     out = []
@@ -640,40 +770,79 @@ def not_uploaded(state: SyncState, folder: Path, protect: Iterable[str] = ()) ->
 
 def push_queue(sess: Session, protect: Iterable[str] = (), check_busy: bool = True,
                progress: Optional[Callable[[str, int, int, str], None]] = None,
-               log: Callable[[str], None] = lambda s: None) -> tuple[list[PushResult], list[str]]:
+               log: Callable[[str], None] = lambda s: None,
+               on_event: Optional[Callable[[SyncEvent], None]] = None,
+               stop: Optional[Callable[[str], str]] = None
+               ) -> tuple[list[PushResult], list[str]]:
     """Every queued recording, oldest first. A network failure stops the run
     (the rest stays queued); another failure is recorded on the item and the
     run goes on. ``check_busy``: skip recordings modified in the last ``BUSY_S``
     (the CLI, which can't know what the GUI is writing; the GUI passes what it
-    writes in ``protect`` instead). Returns (results, errors)."""
+    writes in ``protect`` instead). ``on_event`` / ``stop``: see the module
+    docstring. Returns (results, errors)."""
     protect = {recname.stem_of(Path(p).name) for p in protect if p}
     results, errors = [], []
-    for stem, rec in queue_recordings(sess.state):
-        if rec is None:
-            log(f"{stem}: no longer on disk, dropped from the queue")
+    if on_event is not None:
+        sess.on_event = on_event
+    if stop is not None:
+        sess.stop = stop
+    items = queue_recordings(sess.state)
+    sess.n = len(items)
+    sess._ev("", "run")
+    for k, (stem, rec) in enumerate(items, 1):
+        sess.k = k
+        if rec is not None:
+            sess._ev(stem, "queued", files=_file_list(rec), rdir=sess.remote_dir(rec))
+    try:
+        for k, (stem, rec) in enumerate(items, 1):
+            sess.k = k
+            why = sess.stop(stem)
+            if why == "pause":
+                sess._ev(stem, "paused")
+                break
+            if why == "skip":
+                sess._ev(stem, "removed")
+                continue
+            if rec is None:
+                log(f"{stem}: no longer on disk, dropped from the queue")
+                sess.state.dequeue(stem)
+                sess._ev(stem, "removed", error="no longer on disk")
+                continue
+            if stem in protect or (check_busy and is_busy(rec)):
+                log(f"{stem}: still in use, later")
+                sess._ev(stem, "waiting", error="in use (recording or replay)")
+                continue
+            try:
+                r = sess.push(rec, (lambda i, n, name: progress(stem, i, n, name))
+                              if progress else None)
+            except Stopped as exc:
+                if exc.why == "pause":
+                    sess._ev(stem, "paused")
+                    break
+                sess._ev(stem, "removed")
+                continue
+            except SyncError as exc:
+                sess.state.note_failure(stem, exc.reason)
+                errors.append(f"{stem}: {exc.reason}")
+                sess._ev(stem, "offline" if exc.offline else "failed", error=exc.reason)
+                if exc.offline:
+                    raise
+                continue
+            except OSError as exc:                     # the local file went away mid-way
+                sess.state.note_failure(stem, str(exc))
+                errors.append(f"{stem}: {exc}")
+                sess._ev(stem, "failed", error=str(exc))
+                continue
             sess.state.dequeue(stem)
-            continue
-        if stem in protect or (check_busy and is_busy(rec)):
-            log(f"{stem}: still in use, later")
-            continue
-        try:
-            r = sess.push(rec, (lambda i, n, name: progress(stem, i, n, name))
-                          if progress else None)
-        except SyncError as exc:
-            sess.state.note_failure(stem, exc.reason)
-            errors.append(f"{stem}: {exc.reason}")
-            if exc.offline:
-                raise
-            continue
-        except OSError as exc:                     # the local file went away mid-way
-            sess.state.note_failure(stem, str(exc))
-            errors.append(f"{stem}: {exc}")
-            continue
-        sess.state.dequeue(stem)
-        results.append(r)
-        log(f"{stem}: {len(r.uploaded)} uploaded, {len(r.skipped)} already there"
-            + (", notes merged" if r.notes_merged else "")
-            + (f", {r.bytes / 1e6:.1f} MB at {r.rate / 1e6:.2f} MB/s" if r.bytes else ""))
+            results.append(r)
+            sess._ev(stem, "done", bytes_sent=r.bytes, rdir=sess.remote_dir(rec),
+                     info="notes merged" if r.notes_merged else "")
+            log(f"{stem}: {len(r.uploaded)} uploaded, {len(r.skipped)} already there"
+                + (", notes merged" if r.notes_merged else "")
+                + (f", {r.bytes / 1e6:.1f} MB at {r.rate / 1e6:.2f} MB/s" if r.bytes else ""))
+    finally:
+        sess.k = sess.n = 0
+        sess._ev("", "run_end")
     return results, errors
 
 

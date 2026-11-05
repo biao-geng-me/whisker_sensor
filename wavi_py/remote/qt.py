@@ -17,8 +17,23 @@ before whose files changed since (a note added in replay, a card written after
 Stop), in the output dir and the download cache. With pruning on, a push that empties the queue plans a prune; the first
 time, the GUI lists what would go and asks.
 
-Status line: ``off`` / ``ok`` / ``uploading 2 of 5`` / ``queued (n, offline)`` /
-``error: <reason>``; the tooltip has the details.
+Progress: the worker's ``push_queue`` reports ``SyncEvent``s (``sync.py``);
+``_post`` turns each into the ``progress`` signal (queued to the GUI thread).
+``_on_event``, connected first, folds it into ``tracker`` (``progress.py``)
+and sets the status line from it; the Uploads window (``uploads.py``) listens
+to the same signal and draws the same tracker. Nothing polls the worker.
+
+Status line: ``off`` / ``ok`` / ``uploading 3/20 st_..._tag.jsonl 45%`` (the
+recording's place in the run, the file, its bytes; elided in the middle to
+fit) / ``queued (n, offline)`` / ``paused (n queued)`` / ``error: <reason>``;
+the tooltip has the full text, a click opens the Uploads window.
+
+Retry now, Pause / Resume and Remove from queue (the window) only steer the
+existing flow: Retry now forgets the last test and submits a push; Pause is
+asked between files (``push_queue``'s ``stop``), so the file in flight
+completes and stays recorded, and no push starts until Resume (in memory: a
+restart resumes); Remove dequeues on a thread and the running push skips that
+recording at its next file. None deletes a file.
 """
 
 from __future__ import annotations
@@ -30,15 +45,17 @@ from pathlib import Path
 from typing import Callable, Iterable, Optional
 
 from PyQt6.QtCore import QObject, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout,
-                             QLabel, QLineEdit, QMessageBox, QPushButton, QSpinBox,
-                             QVBoxLayout, QWidget)
+                             QLabel, QLineEdit, QMessageBox, QPushButton, QSizePolicy,
+                             QSpinBox, QVBoxLayout, QWidget)
 
 from wavi_py.remote import config as rconfig
 from wavi_py.replay import recname
-from wavi_py.remote.sync import (PrunePlan, Session, SyncError, SyncState, not_uploaded,
-                                 prune_execute, prune_plan, push_queue, recording_of,
-                                 requeue_changed)
+from wavi_py.remote.progress import FINISHED, Tracker
+from wavi_py.remote.sync import (PrunePlan, Session, SyncError, SyncEvent, SyncState,
+                                 not_uploaded, prune_execute, prune_plan, push_queue,
+                                 queue_events, recording_of, requeue_changed)
 
 RETRY_S = 300.0          # while anything is queued: test + push again
 STOP_DELAY_MS = 1500     # after Stop: sidecars written right after it get in too
@@ -47,8 +64,60 @@ _STYLE = {"off": "color: #777;", "ok": "color: #2a7a2a;", "busy": "color: #1f5fa
           "queued": "color: #b06000;", "error": "color: #c00;"}
 
 
+class _StatusLabel(QLabel):
+    """The Record row's status line: elided in the middle to its width (the full
+    text in the tooltip), underlined under the mouse, a click opens Uploads."""
+
+    clicked = pyqtSignal()
+
+    def __init__(self, text: str = ""):
+        super().__init__()
+        self._full = text
+        self.setMinimumWidth(60)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.set_full(text)
+
+    def set_full(self, text: str) -> None:
+        self._full = text
+        self._elide()
+
+    def full_text(self) -> str:
+        return self._full
+
+    def _elide(self) -> None:
+        w = max(20, self.width() - 4)
+        super().setText(self.fontMetrics().elidedText(self._full,
+                                                      Qt.TextElideMode.ElideMiddle, w))
+
+    def resizeEvent(self, e) -> None:  # noqa: N802
+        super().resizeEvent(e)
+        self._elide()
+
+    def _underline(self, on: bool) -> None:
+        f = QFont(self.font())
+        f.setUnderline(on)
+        self.setFont(f)
+
+    def enterEvent(self, e) -> None:  # noqa: N802
+        self._underline(True)
+        super().enterEvent(e)
+
+    def leaveEvent(self, e) -> None:  # noqa: N802
+        self._underline(False)
+        super().leaveEvent(e)
+
+    def mouseReleaseEvent(self, e) -> None:  # noqa: N802
+        if e.button() == Qt.MouseButton.LeftButton and self.rect().contains(e.position().toPoint()):
+            self.clicked.emit()
+        super().mouseReleaseEvent(e)
+
+
 class SyncController(QObject):
     status = pyqtSignal(str, str, str)          # level, text, tooltip
+    progress = pyqtSignal(object)               # SyncEvent, from the worker (or a thread)
+    queue_loaded = pyqtSignal()                 # tracker.load_queue done (GUI thread)
+    _queue_sig = pyqtSignal(object)             # [SyncEvent] from refresh_queue's thread
     note = pyqtSignal(str)                      # a one-off message for the panel label
     _plan_ready = pyqtSignal(object)            # PrunePlan, from the worker
     _card_sig = pyqtSignal(str)                 # a card written (card.py's thread)
@@ -70,7 +139,13 @@ class SyncController(QObject):
         self._sess_lock = threading.Lock()
         self._closed = False
         self.last_test: Optional[tuple[bool, str, bool]] = None   # (ok, reason, offline)
-        self._label: Optional[QLabel] = None
+        self._label: Optional[_StatusLabel] = None
+        self.tracker = Tracker()
+        self.paused = False
+        self._removed: set[str] = set()           # stems Remove took out during a run
+        self._uploads = None                      # the Uploads window, made on first use
+        self.progress.connect(self._on_event)        # first: the tracker is current for the rest
+        self._queue_sig.connect(self._on_queue)
         self.status.connect(self._show)
         self._plan_ready.connect(self._on_plan)
         self._card_sig.connect(self._on_card)
@@ -81,6 +156,7 @@ class SyncController(QObject):
         self._timer.timeout.connect(self._retry)
         self._timer.start()
         self._idle_status()
+        self.refresh_queue()
         if self.cfg.auto_upload and self.cfg.configured:
             self.submit("push")                   # what was queued last session
 
@@ -90,8 +166,8 @@ class SyncController(QObject):
         w = QWidget()
         h = QHBoxLayout(w)
         h.setContentsMargins(0, 0, 0, 0)
-        self._label = QLabel("Cluster: off")
-        self._label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self._label = _StatusLabel("Cluster: off")
+        self._label.clicked.connect(self.show_uploads)
         btn = QPushButton("Cluster...")
         btn.setToolTip("Cluster sync: host, folder, auto-upload, pruning, connection test")
         btn.clicked.connect(self.open_dialog)
@@ -105,8 +181,8 @@ class SyncController(QObject):
         self._last_status = (level, text, tip)
         if self._label is not None:
             try:
-                self._label.setText(text)
-                self._label.setToolTip(tip or text)
+                self._label.set_full(text)
+                self._label.setToolTip((tip or text) + "\n(click: the Uploads window)")
                 self._label.setStyleSheet(f"QLabel {{ {_STYLE.get(level, '')} }}")
             except RuntimeError:                  # the widget is gone (window closing)
                 self._label = None
@@ -130,6 +206,10 @@ class SyncController(QObject):
             self._emit("off", "off" + (f" ({n_queued} queued)" if n_queued else ""), tip)
             return
         t = self.last_test
+        if self.paused:
+            self._emit("queued", f"paused ({n_queued} queued)" if n_queued else "paused",
+                       "Uploads paused (Uploads window: Resume)")
+            return
         if n_queued and t is not None and not t[0]:
             if t[2]:
                 self._emit("queued", f"queued ({n_queued}, offline)", t[1])
@@ -141,6 +221,115 @@ class SyncController(QObject):
         else:
             self._emit("ok", "ok", f"{where}: everything uploaded"
                        + (f"\nlast test: {t[1]}" if t else ""))
+
+    # ----- progress, the Uploads window and its actions
+
+    def _post(self, ev: SyncEvent) -> None:
+        """``push_queue``'s ``on_event`` (the worker thread)."""
+        if not self._closed:
+            self.progress.emit(ev)
+
+    def _on_event(self, ev: SyncEvent) -> None:
+        self.tracker.apply(ev)
+        st = self.tracker.status_text()
+        if st is not None and not self._closed:
+            self.status.emit("busy", "Cluster: " + st[0], st[1])
+
+    def refresh_queue(self) -> None:
+        """Read the persistent queue on a thread into the tracker (rows for what
+        is queued with no push running: after a restart, offline)."""
+        protect = [str(p) for p in (self._protect() or ()) if p]
+
+        def run():
+            try:
+                evs = queue_events(self._state, protect)
+            except Exception:  # noqa: BLE001 — a locked / unreadable state: next time
+                return
+            if not self._closed:
+                self._queue_sig.emit(evs)
+        threading.Thread(target=run, name="wavi-sync-queue", daemon=True).start()
+
+    def _on_queue(self, evs: list) -> None:
+        self.tracker.load_queue(evs)
+        self.queue_loaded.emit()
+
+    def show_uploads(self) -> None:
+        from wavi_py.remote.uploads import UploadsWindow
+        if self._uploads is None:
+            self._uploads = UploadsWindow(self)
+        self.refresh_queue()
+        w = self._uploads
+        w.show()
+        if w.isMinimized():
+            w.setWindowState(w.windowState() & ~Qt.WindowState.WindowMinimized)
+        w.raise_()
+        w.activateWindow()
+
+    def connection_state(self) -> tuple[str, str]:
+        """(level, words) for the Uploads window's header."""
+        c = self.cfg
+        if not c.configured:
+            return "off", "not set up (Cluster...)"
+        where = f"{c.host}:{c.root}"
+        if self.paused:
+            return "paused", f"paused ({where}); Resume to continue"
+        t = self.last_test
+        if self.tracker.running:
+            return "busy", f"uploading to {where}"
+        if t is None:
+            return "off", f"not tested yet ({where})" + ("" if c.auto_upload else
+                                                         "; auto-upload off")
+        if t[0]:
+            return "ok", f"ok ({where})" + ("" if c.auto_upload else "; auto-upload off")
+        nxt = ""
+        if c.auto_upload and self._timer.isActive():
+            at = time.time() + self._timer.remainingTime() / 1000.0
+            nxt = f", retrying at {time.strftime('%H:%M', time.localtime(at))}"
+        return ("offline" if t[2] else "error"), \
+            f"{'offline' if t[2] else 'error'}: {t[1]}{nxt}"
+
+    def retry_now(self) -> None:
+        """Test and push now rather than at the next retry."""
+        if not self.cfg.configured or self.paused:
+            return
+        self.last_test = None
+        self._timer.start()                       # the next automatic one is RETRY_S from now
+        self.submit("retry")
+
+    def set_paused(self, on: bool) -> None:
+        """Pause: the run stops before its next file; Resume pushes."""
+        self.paused = bool(on)
+        if not self.tracker.running:              # else the run's end sets it
+            self._idle_status(self._n_queued())
+        if not on and self.cfg.configured:
+            self.submit("push")
+
+    def _n_queued(self) -> int:
+        """From the tracker (no file read on the GUI thread)."""
+        return sum(r.phase not in FINISHED for r in self.tracker.recs.values())
+
+    def remove(self, stems) -> None:
+        """Take recordings out of the queue (a thread; no file is deleted). The
+        running push leaves them at its next file."""
+        stems = list(stems)
+        self._removed.update(stems)
+
+        def run():
+            for s in stems:
+                try:
+                    self._state.dequeue(s)
+                except SyncError:
+                    continue
+                self._post(SyncEvent(s, "removed"))
+            self.refresh_queue()
+            self._idle_status()
+        threading.Thread(target=run, name="wavi-sync-remove", daemon=True).start()
+
+    def _stop(self, stem: str) -> str:
+        """``push_queue``'s ``stop`` (the worker thread)."""
+        if self._closed or self.paused:
+            return "pause"
+        return "skip" if stem in self._removed else ""
 
     def recording_stopped(self, path) -> None:
         """After Stop (local or vehicle recording: the laptop's own files)."""
@@ -173,6 +362,7 @@ class SyncController(QObject):
         return not_uploaded(self._state, self._local_dir, self._protect() or ())
 
     def queue_existing(self, recs: list) -> None:
+        self._removed.difference_update(r.stem for r in recs)
         self._state.enqueue_many(recs, "existing")
         self._idle_status()
 
@@ -183,12 +373,18 @@ class SyncController(QObject):
         self._jobs.put((job, arg, protect))
 
     def _retry(self) -> None:
-        if self.cfg.auto_upload and self.cfg.configured and self._jobs.empty():
+        if self.cfg.auto_upload and self.cfg.configured and self._jobs.empty() \
+                and not self.paused:
             self.submit("retry")
 
     def close(self) -> None:
         self._closed = True
         self._timer.stop()
+        if self._uploads is not None:
+            try:
+                self._uploads.close()
+            except RuntimeError:
+                pass
         with self._sess_lock:
             if self._sess is not None:
                 self._sess.cancel()
@@ -196,7 +392,10 @@ class SyncController(QObject):
 
     def open_dialog(self) -> None:
         dlg = ClusterDialog(self.cfg, self._parent, existing=self.existing,
-                            queue_existing=self.queue_existing, local_dir=self._local_dir)
+                            queue_existing=self.queue_existing, local_dir=self._local_dir,
+                            uploads=self.show_uploads)
+        # modal to the control panel only, so the Uploads window it opens works
+        dlg.setWindowModality(Qt.WindowModality.WindowModal)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         old = self.cfg
@@ -259,11 +458,12 @@ class SyncController(QObject):
         if job == "enqueue":
             rec = recording_of(arg)
             if rec is not None:
+                self._removed.discard(rec.stem)
                 self._state.enqueue(rec, "recorded")
             job = "push"
         if job == "retry":
             for d in self.watch_dirs():
-                requeue_changed(self._state, d)
+                self._removed.difference_update(requeue_changed(self._state, d))
             if not self._state.queued():
                 self._idle_status(0)
                 return
@@ -276,6 +476,9 @@ class SyncController(QObject):
     def _push(self, sess: Session, protect: list[str]) -> None:
         if not self.cfg.configured:
             return
+        if self.paused:
+            self._idle_status()
+            return
         n = len(self._state.queued())
         if not n:
             self._idle_status(0)
@@ -287,18 +490,19 @@ class SyncController(QObject):
                 self._idle_status(n)
                 return
 
-        def progress(stem, i, k, name):
-            self._emit("busy", f"uploading {i} of {k}", f"{stem}\n{name}")
         t0, total = time.monotonic(), 0
         try:
-            results, errors = push_queue(sess, protect, check_busy=False, progress=progress)
+            results, errors = push_queue(sess, protect, check_busy=False,
+                                         on_event=self._post, stop=self._stop)
         except SyncError as exc:                   # the network went: stop, keep the queue
             self.last_test = (False, exc.reason, True)
             self._idle_status()
             return
         total = sum(r.bytes for r in results)
         left = len(self._state.queued())
-        if errors:
+        if self.paused:
+            self._idle_status(left)
+        elif errors:
             self._emit("error", f"error: {errors[-1]}" + (f" ({left} queued)" if left else ""),
                        "\n".join(errors))
         else:
@@ -326,7 +530,7 @@ class ClusterDialog(QDialog):
     _tested_sig = pyqtSignal(str, str, object)
 
     def __init__(self, cfg: rconfig.SyncConfig, parent=None, existing=None,
-                 queue_existing=None, local_dir=None):
+                 queue_existing=None, local_dir=None, uploads=None):
         super().__init__(parent)
         self.setWindowTitle("Cluster sync")
         self._cfg = cfg
@@ -370,6 +574,12 @@ class ClusterDialog(QDialog):
         self.existing_btn.clicked.connect(self._upload_existing)
         self.existing_btn.setVisible(existing is not None)
         th.addWidget(self.existing_btn)
+        self.uploads_btn = QPushButton("Uploads...")
+        self.uploads_btn.setToolTip("The upload queue: every recording, its files and progress")
+        self.uploads_btn.setVisible(uploads is not None)
+        if uploads is not None:
+            self.uploads_btn.clicked.connect(uploads)
+        th.addWidget(self.uploads_btn)
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
                               | QDialogButtonBox.StandardButton.Cancel)
         bb.accepted.connect(self.accept)
