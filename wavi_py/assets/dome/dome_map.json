@@ -12,10 +12,9 @@
     "W8_A": "alive, unused: slot W8 has no position (its B gauge is dead)",
     "W8_B": "dead: mux 1 select 6 (Y6)",
     "W10_A": "not scanned: on select 6, skipped by selects 0123457 (this half's select 6 is believed to work)",
-    "W10_B": "alive, unused: slot W10 has no position",
-    "W14_A": "not scanned: on select 6, skipped by selects 0123457 (this half's select 6 is believed to work)",
-    "W14_B": "alive, unused: slot W14 has no position"
+    "W14_A": "not scanned: on select 6, skipped by selects 0123457 (this half's select 6 is believed to work)"
   },
+  "reference": {"sensor_id": 13, "gauges": ["W10_B", "W14_B"], "note": "inside the dome, no whisker; A/B order unknown"},
   "positions": {
     "LBL": {"daq": {"drag": "W1_A", "lift": {"ch": "W1_B", "polarity": -1}}, "sensor_id": null, "label": "LBL", "root": [47.62, -29.46, 116.46], "axis": [0.8504, -0.5262, 0.0], "note": "CAD hole 7 (asset side R)"},
     "LBM": {"daq": {"drag": "W2_A", "lift": {"ch": "W2_B", "polarity": -1}}, "sensor_id": null, "label": "LBM", "root": [55.99, 0.0, 116.02], "axis": [1.0, 0.0, 0.0], "note": "CAD hole 9 (asset side R)"},

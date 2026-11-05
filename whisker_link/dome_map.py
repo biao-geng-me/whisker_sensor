@@ -13,6 +13,8 @@ tube axis, +y up, +x port):
       "calibration_file": "whisker_calibration.json",   # optional, relative
       "whisker_length_mm": 130.0,                       # default per position
       "unused_gauges": {"W3_B": "why"},                 # optional bookkeeping
+      "reference": {"sensor_id": 13, "gauges": ["W10_B", "W14_B"],
+                    "note": "..."},                     # optional, see below
       "positions": {
         "LFM": {"daq": {"drag": "W6_A",
                         "lift": {"ch": "W6_B", "polarity": -1}},
@@ -33,6 +35,12 @@ channel.
 Geometry: ``root`` is where the whisker leaves the dome, ``axis`` its outward
 rest direction, ``e1`` (optional) the drag direction (default: +z projected
 normal to the axis, i.e. meridional, toward the front, as in the asset).
+
+``reference`` (optional): gauges of a sensor with no whisker (inside the dome),
+which sees no flow and tracks the slow common-mode drift of the bridges
+(``wavi_py/replay/manoeuvres.py`` subtracts their mean as the drift
+correction). Its gauges may not also be a position's or unused; the
+``sensor_id`` is free-form (a number or a string).
 
 Calibration belongs to the sensor, not the position, so it lives in a
 separate file keyed by ``sensor_id`` and follows the sensor when it moves:
@@ -91,7 +99,9 @@ AXES = ("drag", "lift")
 DEFAULT_MAP = Path(__file__).resolve().parents[1] / "wavi_py" / "assets" / "dome" / "dome_map.json"
 
 _MAP_KEYS = {"format", "description", "frame", "coordinates", "polarity_note",
-             "calibration_file", "whisker_length_mm", "unused_gauges", "positions"}
+             "calibration_file", "whisker_length_mm", "unused_gauges", "reference",
+             "positions"}
+_REF_KEYS = {"sensor_id", "gauges", "note"}
 _POS_KEYS = {"daq", "sensor_id", "label", "root", "axis", "e1", "length_mm", "note"}
 _AXIS_KEYS = {"ch", "polarity", "reason"}
 _CAL_KEYS = {"format", "description", "sensors"}
@@ -159,11 +169,24 @@ class SensorCal:
     note: str = ""
 
 
+@dataclass(frozen=True)
+class Reference:
+    """The whisker-less reference sensor: its gauge channels (indices)."""
+    gauges: tuple
+    sensor_id: object = None
+    note: str = ""
+
+    @property
+    def names(self) -> list:
+        return [CHANNEL_NAMES[c] for c in self.gauges]
+
+
 @dataclass
 class DomeMap:
     positions: list                               # [Position], file order = hole order
     sensors: dict = field(default_factory=dict)   # sensor_id -> SensorCal
     unused: dict = field(default_factory=dict)    # channel index -> reason
+    reference: Optional[Reference] = None
     path: Optional[Path] = None
     calibration_path: Optional[Path] = None
 
@@ -205,6 +228,24 @@ class DomeMap:
             if c in unused:
                 raise err(f"unused_gauges: {CHANNEL_NAMES[c]} is listed twice")
             unused[c] = str(why)
+        reference = None
+        rd = doc.get("reference")
+        if rd is not None:
+            if not isinstance(rd, dict):
+                raise err("reference must be an object {\"gauges\": [\"W10_B\", ...]}")
+            _no_unknown(rd, _REF_KEYS, err, "reference")
+            gl = rd.get("gauges")
+            if not isinstance(gl, list) or not gl:
+                raise err("reference: gauges must be a non-empty list of gauge channels")
+            chans = []
+            for g in gl:
+                c = _gauge(g, err, f"reference gauge {g!r}")
+                if c in chans:
+                    raise err(f"reference: {CHANNEL_NAMES[c]} is listed twice")
+                if c in unused:
+                    raise err(f"reference: {CHANNEL_NAMES[c]} is also listed in unused_gauges")
+                chans.append(c)
+            reference = Reference(tuple(chans), rd.get("sensor_id"), str(rd.get("note", "")))
         pos_doc = doc.get("positions")
         if not isinstance(pos_doc, dict) or not pos_doc:
             raise err("positions must be a non-empty object keyed by position")
@@ -229,6 +270,8 @@ class DomeMap:
                     raise err(f"{what} {ax}: gauge {g.name} is also {by_gauge[g.ch]}")
                 if g.ch in unused:
                     raise err(f"{what} {ax}: gauge {g.name} is also listed in unused_gauges")
+                if reference is not None and g.ch in reference.gauges:
+                    raise err(f"{what} {ax}: gauge {g.name} is also the reference's")
                 by_gauge[g.ch] = f"{key} {ax}"
             sid = p.get("sensor_id")
             if sid is not None:
@@ -253,7 +296,7 @@ class DomeMap:
             length = _positive(p.get("length_mm", length0), err, f"{what} length_mm")
             positions.append(Position(key, daq, label.strip(), sid, root, axis, e1, length,
                                       str(p.get("note", ""))))
-        return cls(positions, dict(sensors or {}), unused)
+        return cls(positions, dict(sensors or {}), unused, reference)
 
     # ----- queries
     def gauge_owner(self) -> dict:

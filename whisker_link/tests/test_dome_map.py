@@ -63,17 +63,22 @@ def test_default_map_is_the_users_table():
 
 
 def test_default_map_unused_gauges_and_the_select_6_slots():
-    """Every gauge is used or listed unused; the select-6 gauges (dead on mux 1,
-    skipped by selects 0123457) are unused, and every used gauge is scanned."""
+    """Every gauge is used, the reference's or listed unused; the select-6 gauges
+    (dead on mux 1, skipped by selects 0123457) are unused, and every used gauge
+    is scanned."""
     m = dm.DomeMap.load(dm.DEFAULT_MAP)
     used = set(m.gauge_owner())
-    assert used | set(m.unused) == set(range(NCH)) and not used & set(m.unused)
+    ref = set(m.reference.gauges)
+    assert m.reference.names == ["W10_B", "W14_B"] and m.reference.sensor_id == 13
+    assert used | set(m.unused) | ref == set(range(NCH))
+    assert not used & set(m.unused) and not ref & (used | set(m.unused))
+    assert ref <= set(channels_of_selects(0b10111111))
     sel6 = {OUT_OF[a][6] - 1 for a in range(4)}
     assert {CHANNEL_NAMES[c] for c in sel6} == {"W3_B", "W8_B", "W10_A", "W14_A"}
     assert sel6 <= set(m.unused)
     assert used <= set(channels_of_selects(0b10111111))
     alive = {CHANNEL_NAMES[c] for c in set(m.unused) - sel6}
-    assert alive == {"W3_A", "W8_A", "W10_B", "W14_B"}
+    assert alive == {"W3_A", "W8_A"}
     assert all(m.unused[ch(n)].startswith("alive") for n in alive)
     assert {p.daq["drag"].ch // 2 + 1 for p in m.positions} == set(dp.LIVE_WHISKERS)
 
@@ -227,6 +232,17 @@ def test_validation_errors():
     _bad(doc(format="wavi-dome-map/1"), r"format must be")
     _bad(doc(positions={}), r"non-empty")
     _bad(doc(whisker_length_mm=-1), r"must be > 0")
+    _bad(doc(reference={"gauges": ["W7_A"]}), r"'LFU' drag: gauge W7_A is also the reference's")
+    _bad(doc(reference={"gauges": ["W3_B"]}, unused_gauges={"W3_B": "x"}), r"also listed in unused")
+    _bad(doc(reference={"gauges": ["W10_B", "W10B"]}), r"W10_B is listed twice")
+    _bad(doc(reference={"gauges": []}), r"non-empty list")
+    _bad(doc(reference={"gauges": ["W10_B"], "id": 1}), r"unknown field\(s\) 'id'")
+
+
+def test_reference_is_optional():
+    assert dm.DomeMap.from_dict(doc()).reference is None
+    m = dm.DomeMap.from_dict(doc(reference={"gauges": ["W10B"], "note": "n"}))
+    assert m.reference.gauges == (ch("W10_B"),) and m.reference.note == "n"
 
 
 def test_duplicate_keys_and_bad_files(tmp_path):
