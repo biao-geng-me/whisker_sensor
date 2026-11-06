@@ -373,7 +373,9 @@ def test_zoom_box_and_cursor_labels(app, win):
 def test_multiple_sub_ranges(app, win):
     from wavi_py.tests.test_analysis import _drag
     from wavi_py.tests.test_analysis_r2 import _Click, _window
+    from wavi_py.views.analysis_cells import SELECTION
     aw, sels = _window(app, win)                                 # 3 selections x 4 gauges
+    aw.set_color_by(SELECTION)
     wc, sp, sg = aw.compare, aw.spectrum, aw.spectrogram
     vb = wc.rows["mV"].getViewBox()
     aw._act_select.setChecked(True)
@@ -392,15 +394,15 @@ def test_multiple_sub_ranges(app, win):
     assert any(t.startswith("s1 ") for t in texts) and any(t.startswith("s2 ") for t in texts)
     assert {sp.curves[(1, "wsk:0", n)].opts["pen"].style() for n in (1, 2)} == \
         {Qt.PenStyle.SolidLine, Qt.PenStyle.DashLine}
-    # the spectrogram's picker can show either; its tile is that sub-range's
-    assert sg.sub_box.isVisible() and sg.sub_box.count() == 2
-    sg.seg_box.setCurrentIndex(0)                               # 0.25 s: several in a 1 s range
-    sg.set_pick(2, "wsk:1", 2)
-    assert _pump(app, lambda: sg.sel is sels[1] and sg.sub_n == 2 and sg.data is not None, 2)
+    # the spectrogram stays the whole selection, the sub-ranges highlighted on it
+    sg.seg_box.setCurrentIndex(0)                               # 0.25 s segments
+    sg.set_pick(2, "wsk:1")
+    assert _pump(app, lambda: sg.sel is sels[1] and sg.data is not None, 2)
     tc = sg.data[0]
-    a, b = aw.subs[1][1:]
-    assert tc[0] >= a - 1e-6 and tc[-1] <= b + 1e-6
-    assert sg.tile_name == "LBL (W1) B #2 s2"
+    assert tc[0] < aw.subs[0][1] and tc[-1] > aw.subs[1][2]
+    assert [(b.number, b.getRegion()) for b in sg.bands] == \
+        [(n, pytest.approx((a, b))) for n, a, b in aw.subs]
+    assert sg.tile_name == "LBL (W1) B #2"
     # a body drag moves it (Select off), its length kept; only its traces recompute
     aw._act_select.setChecked(False)
     band = next(bd for bd in wc.bands if bd.number == 2)
@@ -424,7 +426,7 @@ def test_multiple_sub_ranges(app, win):
     assert _pump(app, lambda: len(sp.curves) == 4 * 3, 2)
     aw._act_clear_sub.trigger()
     assert aw.subs == () and not wc.bands
-    assert _pump(app, lambda: not sg.sub_box.isVisible() and sg.sub_n == 0, 2)
+    assert _pump(app, lambda: not sg.bands, 2)
     assert _pump(app, lambda: set(sp.curves) == {(s.number, k) for s in sels
                                                  for k in ("wsk:0", "wsk:1", "wsk:2", "wsk:3")}, 2)
     assert sp.header.sub.text().startswith("Whole selections")

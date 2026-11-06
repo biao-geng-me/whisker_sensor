@@ -18,9 +18,10 @@ view's tare does).
 
 Each path is thinned to at most ``n_max`` points (every k-th sample: drag and
 lift stay paired, which a min / max envelope would not). The arrows go from the
-root to the tip at each cursor (``(number, t)``, t relative to the selection's
-zero) inside the span; without cursors, one per path to its farthest point (the
-peak bend). ``scale`` is the largest bend drawn (the ``SCALE_PCT`` percentile of each path, so one spike does not shrink the rest), in degrees (the map's common
+root to the tip at the scrub head (the Analysis window's plane head in the
+waveform, label ``HEAD``) and at each cursor (``(number, t)``, t relative to the
+selection's zero) inside the span; with neither, one per path to its farthest
+point (the peak bend). ``scale`` is the largest bend drawn (the ``SCALE_PCT`` percentile of each path, so one spike does not shrink the rest), in degrees (the map's common
 scale: all cells the same, so they compare).
 """
 
@@ -36,6 +37,7 @@ from wavi_py.daq.analysis import Dataset, Selection, position_variables
 
 ORIGIN_S = 0.25                 # the origin without V0 / baseline: median of the first this
 N_MAX = 300
+HEAD = "head"                   # the scrub head's arrow label (drawn as the main arrow, unlabelled)
 SCALE_PCT = 99.5            # the scale: this percentile of each path's bend (a spike is clipped)
 
 
@@ -91,8 +93,8 @@ def _pair(ds: Dataset, sel: Selection, vd, vl, span) -> Optional[tuple[np.ndarra
 
 
 def plane_overlay(ds: Dataset, positions: Sequence[str], cursors: Sequence = (),
-                  n_max: int = N_MAX) -> PlaneOverlay:
-    """The paths (and the arrows at ``cursors``, see ``set_arrows``)."""
+                  n_max: int = N_MAX, head: Optional[float] = None) -> PlaneOverlay:
+    """The paths (and the arrows at ``cursors`` and ``head``, see ``set_arrows``)."""
     out = PlaneOverlay(relative=not ds.baseline and ds.v0 is None)
     scale = 1.0 / ds.scale if ds.scale else 1.0
     big = 0.0
@@ -124,24 +126,29 @@ def plane_overlay(ds: Dataset, positions: Sequence[str], cursors: Sequence = (),
                 out.paths.setdefault(p, []).append(PlanePath(sel, n, deg[::k], t, deg, span))
                 big = max(big, float(np.percentile(np.hypot(deg[:, 0], deg[:, 1]), SCALE_PCT)))
     out.scale = big
-    set_arrows(out, cursors)
+    set_arrows(out, cursors, head)
     return out
 
 
-def set_arrows(ov: PlaneOverlay, cursors: Sequence = ()) -> None:
-    """``ov.arrows`` for these cursors ``(number, t)`` (cheap: the paths are kept,
-    so a cursor drag re-reads nothing)."""
+def set_arrows(ov: PlaneOverlay, cursors: Sequence = (), head: Optional[float] = None) -> None:
+    """``ov.arrows`` for these cursors ``(number, t)`` and the scrub ``head`` (t
+    relative to each selection's zero, as the cursors; its arrow has label
+    ``HEAD``) (cheap: the paths are kept, so a drag re-reads nothing). Without
+    either, one arrow per path at its peak."""
     ov.arrows = {}
+    marks = [(str(cn), float(ct)) for cn, ct in cursors]
+    if head is not None:
+        marks.append((HEAD, float(head)))
     for p, paths in ov.paths.items():
         arrows = ov.arrows.setdefault(p, [])
         for path in paths:
             t, deg = path.t, path.deg
-            if cursors:
-                for cn, ct in cursors:
-                    at = path.sel.zero + float(ct)
+            if marks:
+                for label, ct in marks:
+                    at = path.sel.zero + ct
                     if path.span[0] <= at <= path.span[1] and len(t):
                         i = int(np.clip(np.searchsorted(t, at), 0, len(t) - 1))
-                        arrows.append(PlaneArrow(path.sel, path.sub, str(cn), tuple(deg[i])))
+                        arrows.append(PlaneArrow(path.sel, path.sub, label, tuple(deg[i])))
             elif len(deg):
                 r = np.hypot(deg[:, 0], deg[:, 1])
                 arrows.append(PlaneArrow(path.sel, path.sub, "", tuple(deg[int(np.argmax(r))])))

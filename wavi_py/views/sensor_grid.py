@@ -31,7 +31,8 @@ tip path over the selections (``daq/plane_overlay.py``, ``set_overlay``): drag
 toward the side's front (``GridLayout.fwd``: right on the port side, left on
 starboard, as the Dome view's plane map), lift up, every cell on one scale (the
 largest bend, the title's ``±x°``), arrows from the root to the tip at the
-cursors (numbered) or at each path's peak. A click on the name or the plot
+scrub head (the thick one, ending in a dot) and the cursors (numbered), or
+at each path's peak. A click on the name or the plot
 toggles both axes, on a chip that axis. Rows without a position stay compact.
 
 ``paint_grid``: draws a grid into a rect (the picker, ``SensorGrid``, and the
@@ -424,7 +425,8 @@ class SensorGrid(QWidget):
         for ar in ov.arrows.get(pos, []):
             pen = QPen(self.path_pen(ar))
             pen.setStyle(Qt.PenStyle.SolidLine)
-            pen.setWidthF(2.0)
+            head = ar.label == "head"
+            pen.setWidthF(2.6 if head else 1.6)
             p.setPen(pen)
             tip = at(ar.xy)
             p.drawLine(o, tip)
@@ -437,7 +439,11 @@ class SensorGrid(QWidget):
                 head.lineTo(tip.x() - 5 * ux - 3 * uy, tip.y() - 5 * uy + 3 * ux)
                 head.closeSubpath()
                 p.fillPath(head, pen.color())
-            if ar.label:
+            if head:
+                p.setBrush(QBrush(pen.color()))
+                p.drawEllipse(tip, 2.5, 2.5)
+                p.setBrush(Qt.BrushStyle.NoBrush)
+            elif ar.label:
                 p.drawText(QPointF(tip.x() + 3, tip.y() - 3), ar.label)
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QBrush(QColor(90, 90, 90)))

@@ -38,8 +38,9 @@ The side panel holds two lists:
   included selections (Events: the highlighted events, else the picked one),
   each sub-range its own path in the sub-range's line style, in degrees of bend
   (the sensor's calibration), drag toward the side's front, lift up, every
-  cell on one scale; arrows from the root to the tip at the cursors, else at
-  each path's peak (``daq/plane_overlay.py``; the cells still toggle the
+  cell on one scale; arrows from the root to the tip at the plane head (a
+  teal line in every waveform row, dragged to scrub: ``set_plane_t``) and the
+  cursors, else at each path's peak (``daq/plane_overlay.py``; the cells still toggle the
   variables: name or plot both axes, the D / L chips one).
   Below them a tree with the rest, IMU (accel x / y / z, gyro x / y / z,
   attitude roll / pitch / yaw, depth) and ROV (the vehicle telemetry, when the
@@ -65,9 +66,11 @@ The bottom right shows the picked tile's spectrogram column at each cursor.
 Toolbar: Select (S: a drag in the waveform makes the sub-range, in the
 timeline a new selection), Clear sub-range (Esc), Zoom box (Z: a drag in the
 waveform, the spectrum, the spectrogram or the cursor spectra zooms to the box
-drawn, the waveform and spectrogram keeping one time span; R resets), Probe (P: hover readout in
+drawn, the waveform and spectrogram keeping one time span; R resets; the mouse is
+a magnifier with a + while armed), Probe (P: hover readout in
 the waveform, timeline, both spectra and the spectrogram), Reset view (R: the
-cell under the mouse, or all), Keys. The Line window's zoom / pan keys act on
+cell under the mouse, or all), F (fit the plot under the mouse to its data), Keys,
+Colour by (sensor by default in Selections mode). The Line window's zoom / pan keys act on
 the cell under the mouse (= - X, + _ Y of the row under the mouse, . , Y of all
 its rows, arrows move the data), matched by the character typed in an
 application event filter while the window is shown, as the Line window does.
@@ -137,6 +140,7 @@ from wavi_py.views.whisker_plots import _PAN_STEP, ZOOM_STEP
 CELLS = ("Compare", "Spectrum", "Spectrogram", "Cursors")   # set_tab names (region menus)
 SELECTIONS, EVENTS = "selections", "events"
 GAUGES_VIEW, POSITIONS_VIEW = "by gauge (A / B)", "by position (drag / lift)"                 # the window's source mode
+HEAD_COLOR = (0, 130, 110)                                  # the plane head: teal, no cursor's colour
 PLOTS, TIMELINE = 1, 2                                      # the Variables tree's check columns
 _KEY = Qt.ItemDataRole.UserRole
 _LIVE_POLL_MS = 1000
@@ -149,6 +153,7 @@ KEYS_HELP = """\
 <tr><td><b>Z</b></td><td>zoom box: drag a rectangle to zoom (waveform, spectra, spectrogram); off: a drag pans</td></tr>
 <tr><td><b>P</b></td><td>probe: values under the mouse (waveform, timeline, spectra, spectrogram)</td></tr>
 <tr><td><b>R</b></td><td>reset view: the cell under the mouse (outside the cells: all)</td></tr>
+<tr><td><b>F</b></td><td>fit: the plot under the mouse to its data (x and y)</td></tr>
 <tr><td><b>= &nbsp;-</b></td><td>zoom X in / out (the cell under the mouse). Keypad + - too</td></tr>
 <tr><td><b>+ &nbsp;_</b></td><td>zoom Y in / out: the row under the mouse</td></tr>
 <tr><td><b>. &nbsp;,</b></td><td>zoom Y in / out: all rows of the cell</td></tr>
@@ -515,6 +520,8 @@ class AnalysisWindow(ViewWindow):
         sl.addLayout(gv)
         self._plane_key = None                    # what the plane map's paths were read for
         self._plane_ov = None
+        self.plane_t: Optional[float] = None      # the plane head in the waveform (relative s)
+        self._head_lines: dict = {}               # id(row) -> (row, line)
         self.grids = {PLOTS: SensorGrid("Plots"), TIMELINE: SensorGrid("Timeline")}
         for col, g in self.grids.items():
             g.setToolTip("Click a sensor's name for both gauges, its A or B half for one")
@@ -555,6 +562,8 @@ class AnalysisWindow(ViewWindow):
         self.compare.xChanged.connect(self._wave_x)
         self.spectrogram.plot.getViewBox().sigXRangeChanged.connect(
             lambda _vb, r: self.compare.set_x(float(r[0]), float(r[1])))
+        if mode != EVENTS:
+            self.set_color_by(SENSOR)                 # the default (each gauge its own colour)
         self.timeline.madeSelection.connect(self.include)
         self.timeline.laneClicked.connect(self._lane_clicked)
         self.timeline.laneCompare.connect(self._lane_compare)
@@ -752,7 +761,7 @@ class AnalysisWindow(ViewWindow):
         self._request()
 
     def set_color_by(self, mode: str) -> None:
-        """Colour by ``selection`` (default) or ``sensor`` (this window's own)."""
+        """Colour by ``sensor`` (default) or ``selection`` (this window's own)."""
         mode = SENSOR if mode == SENSOR else SELECTION
         if self.color_box.currentText() != mode:
             self.color_box.setCurrentText(mode)          # comes back here
@@ -771,7 +780,7 @@ class AnalysisWindow(ViewWindow):
         self.set_checked([v.key for v in self._vars], False)
         self.set_checked([v.key for v in self._vars], False, TIMELINE)
         self._tl_edited = False
-        self.set_color_by(SELECTION)
+        self.set_color_by(SENSOR if self.mode != EVENTS else SELECTION)
         self.set_sub(None)
         self.cursors = []
         self._next_cursor = 1
@@ -983,6 +992,7 @@ class AnalysisWindow(ViewWindow):
         g.set_map(on)
         if not on:
             g.set_overlay(None)
+            self._sync_head()
         self._plane_key = None
         self._request()
 
@@ -1024,12 +1034,60 @@ class AnalysisWindow(ViewWindow):
                tuple(positions), self.subs, m.despike, id(m.v0), m.scale, id(ds.dome_map),
                self.mode == EVENTS)
         cur = [(n, t) for n, t in self.cursors]
+        if self.plane_t is None and sels:            # start mid-way through the view
+            x = self.compare.x_plot()
+            lo, hi = x.getViewBox().viewRange()[0] if x is not None else (0.0, 0.0)
+            longest = max(s.t1 - s.zero for s in sels)
+            self.plane_t = float(min(max(0.5 * (lo + hi), 0.0), longest)) if hi > lo \
+                else 0.5 * longest
         if key != self._plane_key:
             self._plane_key = key
-            self._plane_ov = plane_overlay(ds, positions, cur) if sels else None
+            self._plane_ov = plane_overlay(ds, positions, cur, head=self.plane_t) if sels else None
         elif self._plane_ov is not None:
-            set_arrows(self._plane_ov, cur)
+            set_arrows(self._plane_ov, cur, self.plane_t)
         g.set_overlay(self._plane_ov, lambda item, sels=sels: self._plane_pen(sels, item))
+        self._sync_head()
+
+    def _plane_on(self) -> bool:
+        return self.plane_box.isChecked() and self.grid_positions
+
+    def _sync_head(self) -> None:
+        """The plane head's line in every waveform row (only with the plane map on)."""
+        rows = list(self.compare.rows.values()) if self._plane_on() and self.plane_t is not None \
+            else []
+        want = {id(r): r for r in rows}
+        for k in [k for k in self._head_lines if k not in want]:
+            r, line = self._head_lines.pop(k)
+            r.removeItem(line)
+        for k, r in want.items():
+            got = self._head_lines.get(k)
+            if got is None:
+                line = pg.InfiniteLine(self.plane_t, angle=90, movable=True,
+                                       pen=pg.mkPen(HEAD_COLOR, width=2, style=Qt.PenStyle.DashLine),
+                                       hoverPen=pg.mkPen(HEAD_COLOR, width=4),
+                                       label="plane", labelOpts={"position": 0.04, "color": HEAD_COLOR,
+                                                                 "fill": (255, 255, 255, 200)})
+                line.setZValue(30)
+                line.setToolTip("The plane map's head: drag to scrub the arrows")
+                line.sigDragged.connect(self._on_head_dragged)
+                r.addItem(line, ignoreBounds=True)
+                self._head_lines[k] = (r, line)
+            elif not got[1].moving and abs(got[1].value() - self.plane_t) > 1e-12:
+                got[1].blockSignals(True)
+                got[1].setValue(self.plane_t)
+                got[1].blockSignals(False)
+
+    def set_plane_t(self, t: float) -> None:
+        """Move the plane head (relative s): the arrows follow, nothing is re-read."""
+        self.plane_t = max(0.0, float(t)) if self.mode != EVENTS else float(t)
+        self._sync_head()
+        g = self.grids[PLOTS]
+        if self._plane_ov is not None:
+            set_arrows(self._plane_ov, [(n, c) for n, c in self.cursors], self.plane_t)
+            g.update()
+
+    def _on_head_dragged(self, line) -> None:
+        self.set_plane_t(line.value())
 
     def _rebuild_vars(self) -> None:
         """The tree from ``variables_fn`` (kept checks by key); only when it changed."""
@@ -1224,6 +1282,7 @@ class AnalysisWindow(ViewWindow):
                 "=": lambda: self._zoom_x(1 / ZOOM_STEP), "-": lambda: self._zoom_x(ZOOM_STEP),
                 "+": lambda: self._zoom_y(1 / ZOOM_STEP, False), "_": lambda: self._zoom_y(ZOOM_STEP, False),
                 ".": lambda: self._zoom_y(1 / ZOOM_STEP, True), ",": lambda: self._zoom_y(ZOOM_STEP, True),
+                "f": self._fit_plot, "F": self._fit_plot,
             }.get(text)
         if action is None:
             return False
@@ -1263,6 +1322,17 @@ class AnalysisWindow(ViewWindow):
                 vb = p.getViewBox()
                 y0, y1 = vb.viewRange()[1]
                 vb.translateBy(y=dy * (y1 - y0))
+        self._request()
+
+    def _fit_plot(self) -> None:
+        """F: the plot under the mouse fits its data (x and y; outside a plot, the
+        cell's plots). The waveform's rows and the spectrogram share x, so they follow."""
+        cell, plot = self._target()
+        if cell is None:
+            return
+        for p in ([plot] if plot is not None else cell.nav_plots()):
+            p.getViewBox().autoRange(padding=0.02)
+        cell.on_manual()
         self._request()
 
     def _reset_view(self) -> None:
@@ -1523,6 +1593,7 @@ class AnalysisWindow(ViewWindow):
             self.compare.render(ov, vs, self.colors, hl,
                                 self._extra_traces(hl, vs) if ov is not None else None)
             self._sync_cursors()
+            self._sync_head()
         self._render_plane()
         ds = self.dataset()
         grid_cells = (self.spectrum, self.spectrogram, self.at_cursors)
@@ -1595,6 +1666,7 @@ class AnalysisWindow(ViewWindow):
         if _open(self.compare):
             self.compare.render(ds, shades)
             self._sync_cursors()                    # rows may have been rebuilt
+            self._sync_head()
         if _open(self.spectrum):
             self.spectrum.render(ds, shades)
         # the spectrogram feeds the cursor cell: drawn when either shows

@@ -42,7 +42,8 @@ mrad/s, deg, cm, and the ROV's).
   span, the options, Despike, that gauge's V0 / scale).
 - ``SpecgramCell`` (bottom left): ONE tile, the picked (variable, selection,
   sub-range), full cell size, relative time; the picker is three combo boxes in
-  its header (the sub-range one shows while there are sub-ranges).
+  its header; the tile is the whole selection, its sub-ranges highlighted
+  (``SpecBand``: a light veil, white dashed edges, the number).
   Colour range per unit group as in the Spec window (Auto: 1st to 99.5th
   percentile of the tile; or the min / max boxes, kept per unit and per lin /
   dB; ``spectral_base``): the controls show the picked variable's unit, so
@@ -80,7 +81,7 @@ from typing import Callable, Optional
 
 import numpy as np
 from PyQt6.QtCore import QPointF, Qt, pyqtSignal
-from PyQt6.QtGui import QBrush, QColor
+from PyQt6.QtGui import QBrush, QColor, QCursor, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QHBoxLayout, QLabel,
                              QSizePolicy, QStackedWidget, QToolButton, QVBoxLayout, QWidget)
 
@@ -416,6 +417,11 @@ class _Cell(QWidget):
         self.zoom_box = bool(on)
         for p in self._zoom_plots():
             self._apply_zoom_box(p)
+        vp = self.glw.viewport()
+        if self.zoom_box:
+            vp.setCursor(zoom_cursor())
+        else:
+            vp.unsetCursor()
 
     def _apply_zoom_box(self, p: pg.PlotItem) -> None:
         p.getViewBox().setMouseMode(pg.ViewBox.RectMode if self.zoom_box else pg.ViewBox.PanMode)
@@ -667,6 +673,55 @@ class _RowsCell(_Cell):
 
     def _probe_axes(self) -> tuple:
         return "t", "s", (lambda x: x), (lambda y: y)
+
+
+_ZOOM_CURSOR = None
+
+
+def zoom_cursor() -> QCursor:
+    """A magnifier with a + in its lens (Zoom box armed); the hot spot is the lens' centre."""
+    global _ZOOM_CURSOR
+    if _ZOOM_CURSOR is None:
+        pm = QPixmap(32, 32)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        for color, w in ((QColor(255, 255, 255), 5.0), (QColor(20, 20, 20), 2.2)):
+            p.setPen(QPen(color, w, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawEllipse(QPointF(12, 12), 8.5, 8.5)
+            p.drawLine(QPointF(18.5, 18.5), QPointF(28, 28))
+            p.drawLine(QPointF(8, 12), QPointF(16, 12))
+            p.drawLine(QPointF(12, 8), QPointF(12, 16))
+        p.setPen(QPen(QColor(20, 20, 20), 4.0, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.drawLine(QPointF(20, 20), QPointF(27, 27))         # the handle, thicker
+        p.end()
+        _ZOOM_CURSOR = QCursor(pm, 12, 12)
+    return _ZOOM_CURSOR
+
+
+class SpecBand(pg.LinearRegionItem):
+    """A sub-range on the spectrogram: display only, a light veil with white edges
+    and its number (the tile stays the whole selection)."""
+
+    def __init__(self, number: int, region: tuple):
+        super().__init__(region, movable=False, pen=pg.mkPen((255, 255, 255), width=1.5,
+                                                              style=Qt.PenStyle.DashLine))
+        self.number = number
+        self.setZValue(5)
+        for it in (self, *self.lines):
+            it.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+            it.setAcceptHoverEvents(False)
+
+    def paint(self, p, *args) -> None:
+        dev = p.transform().mapRect(self.boundingRect())
+        p.save()
+        p.resetTransform()
+        p.fillRect(dev, QBrush(QColor(255, 255, 255, 55)))
+        p.setPen(QColor(255, 255, 255))
+        p.drawText(dev.adjusted(4, 2, 0, 0), int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop),
+                   sub_name(self.number))
+        p.restore()
 
 
 class SubBand(pg.LinearRegionItem):
@@ -1106,9 +1161,6 @@ class SpecgramCell(_Cell):
         self.var_box.setToolTip("The variable shown (or click its trace in the waveform)")
         self.sel_box = h.add("", QComboBox())
         self.sel_box.setToolTip("The selection shown (or click its trace in the waveform)")
-        self.sub_box = h.add("", QComboBox())
-        self.sub_box.setToolTip("The sub-range shown (there are sub-ranges: the spectra use them)")
-        self.sub_box.hide()
         self.seg_box = h.add("Seg", QComboBox())
         self.seg_box.addItems([f"{s:g} s" for s in SEGMENTS_S])
         self.seg_box.setCurrentIndex(SEGMENTS_S.index(1.0))
@@ -1135,7 +1187,6 @@ class SpecgramCell(_Cell):
             w.currentIndexChanged.connect(lambda _i: self.changed.emit())
         self.var_box.activated.connect(self._on_picker)
         self.sel_box.activated.connect(self._on_picker)
-        self.sub_box.activated.connect(self._on_picker)
         self.db_box.toggled.connect(self._on_db)
         self.auto_box.toggled.connect(self._on_auto)
         for b in (self.lo_box, self.hi_box):
@@ -1156,7 +1207,7 @@ class SpecgramCell(_Cell):
         self.probe = probe_line(self.plot)
         hook_click(self.plot.getViewBox(), self._click)
         self.pick: Optional[tuple] = None             # (sel number, var key)
-        self.sub_n = 0                                # the picked sub-range (0: whole)
+        self.bands: list[SpecBand] = []               # the sub-ranges, highlighted
         self.var = None                               # the picked Variable / Selection
         self.sel = None
         self.levels: Optional[tuple] = None           # the range in use
@@ -1166,30 +1217,37 @@ class SpecgramCell(_Cell):
 
     # ----- the picker
 
-    def set_pick(self, number: int, key: str, sub: Optional[int] = None) -> None:
-        """Show (selection, variable) and, with ``sub``, that sub-range."""
-        if (number, key) != self.pick or (sub is not None and sub != self.sub_n):
+    def set_pick(self, number: int, key: str) -> None:
+        """Show (selection, variable): the whole selection, its sub-ranges highlighted."""
+        if (number, key) != self.pick:
             self.pick = (number, key)
-            if sub is not None:
-                self.sub_n = sub
             self.changed.emit()
 
     def _on_picker(self, _i: int) -> None:
         num, key = self.sel_box.currentData(), self.var_box.currentData()
-        sub = self.sub_box.currentData() if self.sub_box.count() else None
         if num is not None and key is not None:
-            self.set_pick(num, key, sub)
+            self.set_pick(num, key)
 
     @property
     def tile_name(self) -> str:
-        """``W1 A #2`` (`` s1`` added for a sub-range)."""
+        """``W1 A #2``."""
         if self.var is None or self.sel is None:
             return ""
-        return f"{self.var.label} #{self.sel.number}" + (f" {sub_name(self.sub_n)}"
-                                                          if self.sub_n else "")
+        return f"{self.var.label} #{self.sel.number}"
 
-    def _sub(self, ds: Dataset) -> Optional[tuple]:
-        return next((u for u in ds.subs if u[0] == self.sub_n), None)
+    def _sync_bands(self, ds: Dataset) -> None:
+        """The sub-ranges as bands (relative to the selection's zero, as the tile)."""
+        want = [(n, (a, b)) for n, a, b in ds.subs]
+        if [(b.number, b.getRegion()) for b in self.bands] == [(n, tuple(map(float, r)))
+                                                                for n, r in want]:
+            return
+        for b in self.bands:
+            self.plot.removeItem(b)
+        self.bands = []
+        for n, r in want:
+            b = SpecBand(n, r)
+            self.plot.addItem(b, ignoreBounds=True)
+            self.bands.append(b)
 
     def _sync_picker(self, ds: Dataset) -> None:
         """The combo boxes list the dataset's variables / selections; the pick falls
@@ -1200,13 +1258,9 @@ class SpecgramCell(_Cell):
         num = num if num in nums else nums[0]
         key = key if key in keys else keys[0]
         self.pick = (num, key)
-        subs = [u[0] for u in ds.subs]
-        self.sub_n = (self.sub_n if self.sub_n in subs else subs[0]) if subs else 0
-        self.sub_box.setVisible(bool(subs))
         for box, items, cur in ((self.var_box, [(v.label, v.key) for v in ds.variables], key),
                                 (self.sel_box, [(f"#{s.number}", s.number) for s in ds.selections],
-                                 num),
-                                (self.sub_box, [(sub_name(n), n) for n in subs], self.sub_n)):
+                                 num)):
             if not items:
                 box.clear()
                 continue
@@ -1310,14 +1364,13 @@ class SpecgramCell(_Cell):
         """The picked tile's ``Dataset.spectrogram`` (cached by its inputs)."""
         seg = SEGMENTS_S[self.seg_box.currentIndex()]
         ovl = OVERLAPS[self.ovl_box.currentIndex()]
-        k = (self.sel.number, self.var.key, self.sub_n)
-        sub = self._sub(ds)
-        key = _input_key(ds, self.sel, self.var, seg, ovl, sub=sub)
+        k = (self.sel.number, self.var.key)
+        key = _input_key(ds, self.sel, self.var, seg, ovl, sub=None)
         hit = self._cache.get(k)
         if hit is None or hit[0] != key:
             self.computed += 1
-            hit = (key, ds.spectrogram(self.sel, self.var, seg, ovl, sub=sub))
-            live = {(s.number, v.key, u[0] if u else 0) for s, v, u in ds.triples()}
+            hit = (key, ds.spectrogram(self.sel, self.var, seg, ovl, sub=None))
+            live = {(s.number, v.key) for s, v in ds.pairs()}
             self._cache = {kk: vv for kk, vv in self._cache.items() if kk in live}
             self._cache[k] = hit
         return hit[1]
@@ -1327,11 +1380,11 @@ class SpecgramCell(_Cell):
         num, key = self.pick
         self.sel = next(s for s in ds.selections if s.number == num)
         self.var = next(v for v in ds.variables if v.key == key)
+        self._sync_bands(ds)
         seg = SEGMENTS_S[self.seg_box.currentIndex()]
         ovl = OVERLAPS[self.ovl_box.currentIndex()]
         st = self._range(self.unit)
-        inputs = (self.pick, self.sub_n, _input_key(ds, self.sel, self.var, seg, ovl,
-                                                    sub=self._sub(ds)),
+        inputs = (self.pick, _input_key(ds, self.sel, self.var, seg, ovl, sub=None),
                   self.db, st["auto"], None if st["auto"] else st[self.db])
         if inputs == self._last:
             return

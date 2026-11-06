@@ -273,8 +273,12 @@ def test_two_analysis_windows(app, win):
     w._on_analysis_activated(w1)
     m.request("compare", b, [])
     assert w1.included == [a, b] and w2.included == [b]
-    # colour = the selection's (its region's), shade = the variable within the row
+    # colour by sensor is the default; by selection: the selection's (its region's)
+    # colour, shade = the variable within the row
+    from wavi_py.views.analysis_cells import SELECTION, SENSOR
     from wavi_py.views.selections import sel_color
+    assert w1.color_by == SENSOR == w2.color_by
+    w1.set_color_by(SELECTION)
     w1._render()
     col = {k: c.opts["pen"].color() for k, c in w1.compare.curves.items()}
     assert col[(1, "imu:0")].hslHue() == sel_color(1).hslHue() != col[(2, "imu:0")].hslHue()
