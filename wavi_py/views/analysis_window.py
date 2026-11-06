@@ -32,6 +32,15 @@ The side panel holds two lists:
   the dome's positions, the halves drag and lift (``pos:<position>:<axis>``:
   read through each recording's dome map, polarity applied), so one choice
   reads the same place on the dome in recordings wired differently.
+  "Plane map" (next to the combo; it turns on the position view) makes the
+  Plots grid the Dome view's plane map in small, without taking a cell of the
+  2x2: each position's cell grows into a plot of its tip path over the
+  included selections (Events: the highlighted events, else the picked one),
+  each sub-range its own path in the sub-range's line style, in degrees of bend
+  (the sensor's calibration), drag toward the side's front, lift up, every
+  cell on one scale; arrows from the root to the tip at the cursors, else at
+  each path's peak (``daq/plane_overlay.py``; the cells still toggle the
+  variables: name or plot both axes, the D / L chips one).
   Below them a tree with the rest, IMU (accel x / y / z, gyro x / y / z,
   attitude roll / pitch / yaw, depth) and ROV (the vehicle telemetry, when the
   source has it, with the pilot's demand and the thrust projected per axis:
@@ -100,8 +109,8 @@ from pathlib import Path
 from typing import Callable, Optional, Sequence
 
 from PyQt6.QtCore import QEvent, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QAction, QColor, QCursor, QIcon, QKeySequence, QPixmap
-from PyQt6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication, QComboBox,
+from PyQt6.QtGui import QAction, QColor, QCursor, QIcon, QKeySequence, QPen, QPixmap
+from PyQt6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication, QCheckBox, QComboBox,
                              QDoubleSpinBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox,
                              QSplitter, QSplitterHandle, QToolBar, QToolButton, QTreeWidget,
                              QTreeWidgetItem, QVBoxLayout, QWidget)
@@ -110,9 +119,10 @@ import numpy as np
 import pyqtgraph as pg
 
 from wavi_py.daq.analysis import DEPTH, POS, ROV, Dataset, Selection, Variable
+from wavi_py.daq.plane_overlay import plane_overlay, set_arrows
 from wavi_py.daq.series import IMU, WSK
 from wavi_py.replay import eventset as evs
-from wavi_py.views.analysis_cells import (SELECTION, SENSOR, CursorCell, CursorLines,
+from wavi_py.views.analysis_cells import (SELECTION, SENSOR, CursorCell, CursorLines, line_style,
                                           SpecgramCell, SpectrumCell, WaveCell, shades_of)
 from wavi_py.views.analysis_timeline import TimelineCell, timeline_source_of
 from wavi_py.views.base import ViewWindow
@@ -490,7 +500,21 @@ class AnalysisWindow(ViewWindow):
                                   " (drag / lift, through each recording's dome map)")
         self.grid_view.setCurrentText(POSITIONS_VIEW if mode == EVENTS else GAUGES_VIEW)
         self.grid_view.currentTextChanged.connect(lambda _t: self._rebuild_grids())
-        sl.addWidget(self.grid_view)
+        self.plane_box = QCheckBox("Plane map")
+        self.plane_box.setToolTip(
+            "The Plots grid as the Dome view's plane map: each position's tip path over the"
+            " included selections (sub-ranges: each its own), in degrees of bend, drag toward"
+            " the side's front, lift up, all cells on one scale; arrows to the tip at the"
+            " cursors, else at each path's peak. Without V0 a path starts at the selection's"
+            " first 0.25 s. Turns on the position view")
+        self.plane_box.toggled.connect(self._on_plane_toggled)
+        gv = QHBoxLayout()
+        gv.setContentsMargins(0, 0, 0, 0)
+        gv.addWidget(self.grid_view, 1)
+        gv.addWidget(self.plane_box)
+        sl.addLayout(gv)
+        self._plane_key = None                    # what the plane map's paths were read for
+        self._plane_ov = None
         self.grids = {PLOTS: SensorGrid("Plots"), TIMELINE: SensorGrid("Timeline")}
         for col, g in self.grids.items():
             g.setToolTip("Click a sensor's name for both gauges, its A or B half for one")
@@ -936,6 +960,9 @@ class AnalysisWindow(ViewWindow):
                     g = p.daq.get(ax) if p is not None else None
                     if g is None or g.ch is None or int(g.ch) in grid.dead:
                         off.add(2 * sn + j)
+        if not pos and self.plane_box.isChecked():
+            self.plane_box.setChecked(False)          # the plane map is the position view's
+        self._plane_key = None
         for g in self.grids.values():
             g.positions, g.pos_off = pos, off
             g.set_grid(grid)
@@ -946,6 +973,63 @@ class AnalysisWindow(ViewWindow):
         self.compare.grid = self.spectrum.grid = grid
         self._sync_grids()
         self._request()
+
+    # ----- the plane map (the Plots grid, position view)
+
+    def _on_plane_toggled(self, on: bool) -> None:
+        if on and not self.grid_positions:
+            self.grid_view.setCurrentText(POSITIONS_VIEW)
+        g = self.grids[PLOTS]
+        g.set_map(on)
+        if not on:
+            g.set_overlay(None)
+        self._plane_key = None
+        self._request()
+
+    def _plane_selections(self) -> list:
+        """What the plane map draws: the included selections; Events: the highlighted
+        events, else the picked one."""
+        if self.mode != EVENTS:
+            return list(self.included)
+        ov = self.overlay
+        if ov is None:
+            return []
+        by = ov.by_number
+        got = [by[n] for n in self.highlighted() if n in by]
+        pick = self.picked_event_selection()
+        return got or ([pick] if pick is not None else [])
+
+    def _plane_pen(self, sels: list, item) -> QPen:
+        if self.mode == EVENTS:
+            c = QColor(self.colors.get(item.sel.group, QColor(60, 60, 60)))
+        else:
+            c = QColor(sel_color(item.sel.number))
+        nums = [n for n, _a, _b in self.subs]
+        style = (line_style(nums.index(item.sub)) if item.sub in nums else Qt.PenStyle.SolidLine)
+        return QPen(c, 1.3, style)
+
+    def _render_plane(self) -> None:
+        g = self.grids[PLOTS]
+        if not (self.plane_box.isChecked() and g.map and self.grid_positions):
+            return
+        sels = self._plane_selections()
+        positions = [n for s, n in enumerate(g.grid.names) if g.position_of(2 * s)]
+        m = self.model
+        if self.mode == EVENTS:
+            ds = Dataset(sels, [], baseline=True)
+        else:
+            ds = Dataset(sels, [], despike=m.despike, v0=m.v0, scale=m.scale, subs=self.subs,
+                         dome_map=self._position_map())
+        key = (tuple((id(s), s.t0, s.t1, s.align, id(s.source), id(s.dome_map)) for s in sels),
+               tuple(positions), self.subs, m.despike, id(m.v0), m.scale, id(ds.dome_map),
+               self.mode == EVENTS)
+        cur = [(n, t) for n, t in self.cursors]
+        if key != self._plane_key:
+            self._plane_key = key
+            self._plane_ov = plane_overlay(ds, positions, cur) if sels else None
+        elif self._plane_ov is not None:
+            set_arrows(self._plane_ov, cur)
+        g.set_overlay(self._plane_ov, lambda item, sels=sels: self._plane_pen(sels, item))
 
     def _rebuild_vars(self) -> None:
         """The tree from ``variables_fn`` (kept checks by key); only when it changed."""
@@ -1439,6 +1523,7 @@ class AnalysisWindow(ViewWindow):
             self.compare.render(ov, vs, self.colors, hl,
                                 self._extra_traces(hl, vs) if ov is not None else None)
             self._sync_cursors()
+        self._render_plane()
         ds = self.dataset()
         grid_cells = (self.spectrum, self.spectrogram, self.at_cursors)
         if not ds.selections or not ds.variables:
@@ -1494,6 +1579,7 @@ class AnalysisWindow(ViewWindow):
             got = self._manoeuvres_fn()
             self.timeline.set_manoeuvres(got[1] if got else None)
             self.timeline.render(src, self.timeline_dataset())
+        self._render_plane()
         ds = self.dataset()
         grid_cells = (self.compare, self.spectrum, self.spectrogram, self.at_cursors)
         if not ds.selections or not ds.variables:

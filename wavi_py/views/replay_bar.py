@@ -26,6 +26,15 @@ before it), previous / next event, and Export (``exportRequested``: the panel
 saves the loop range, see replay/export.py), and Notes (``notesRequested``:
 the panel opens the notes list).
 
+ROV lanes (``ROV ▾`` on the side, or a right-click on the strip): the vehicle
+telemetry (``replay/rov.py``, the source's ``rov()``: pilot demand, thrusters,
+thrust per axis, current, climb, heading, vibration, and the flight-mode band)
+as optional rows under the strip, one row per unit (``_Lane``: x linked to the
+strip, its own playhead, click to go there, double-click for all of it, hover
+for the values at the mouse). Each timeline has its own choice; the last one
+made is kept (``timeline/rov_lanes`` in the app settings) and new timelines
+start on it. A recording without the telemetry shows none (the choice is kept).
+
 Notes (``views/notes_panel.py``, the model's ``notes``, set by the panel): the
 pinned notes of the recording are amber triangles along the strip's bottom
 edge (hover for the text, click to go to the note's time); a recording marked
@@ -50,8 +59,9 @@ from typing import Optional
 import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtCore import QObject, QPoint, Qt, pyqtSignal
-from PyQt6.QtWidgets import (QComboBox, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-                             QSizePolicy, QToolTip, QVBoxLayout, QWidget)
+from PyQt6.QtGui import QAction, QColor
+from PyQt6.QtWidgets import (QComboBox, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMenu, QPushButton,
+                             QSizePolicy, QToolButton, QToolTip, QVBoxLayout, QWidget)
 
 from wavi_py.transports.replay_transport import SPEEDS
 
@@ -588,6 +598,10 @@ class _Strip(pg.PlotWidget):
         return float(vb.mapSceneToView(scene_pos).x())
 
     def _clicked(self, ev) -> None:
+        if ev.button() == Qt.MouseButton.RightButton:
+            self._bar.lanes_menu().popup(ev.screenPos().toPoint())
+            ev.accept()
+            return
         if ev.button() != Qt.MouseButton.LeftButton:
             return
         if ev.double():                                  # back to the whole recording
@@ -621,6 +635,162 @@ class _Strip(pg.PlotWidget):
                               "\n".join(event_text(e) for e in near[:12]), self)
 
 
+# ----------------------------------------------------------------------
+# ROV lanes: the vehicle telemetry under the strip
+# ----------------------------------------------------------------------
+
+LANE_H = 54                     # px of a lane (its y labels don't overlap)
+LANE_AXIS_W = 42                # the strip's left axis width: the x axes line up
+LANE_COLORS = ((40, 90, 170), (210, 90, 0), (20, 130, 60), (150, 30, 30), (110, 60, 160),
+               (0, 120, 130), (130, 110, 0), (190, 70, 140))
+LANES_SETTING = "timeline/rov_lanes"
+_MODE_KEY = "rov:mode"
+
+
+def _saved_lanes() -> list[str]:
+    try:
+        from wavi_py.remote.config import _settings
+        v = _settings().value(LANES_SETTING)
+    except Exception:                                    # noqa: BLE001 — a setting, never fatal
+        return []
+    if not v:
+        return []
+    return [k for k in (v if isinstance(v, list) else str(v).split(",")) if k]
+
+
+def _save_lanes(keys: list[str]) -> None:
+    try:
+        from wavi_py.remote.config import _settings
+        st = _settings()
+        st.setValue(LANES_SETTING, ",".join(keys))
+        st.sync()
+    except Exception:                                    # noqa: BLE001
+        pass
+
+
+class _Lane(pg.PlotWidget):
+    """One unit's row of ROV variables (or the mode band) under the strip."""
+
+    def __init__(self, bar: "TimelineBar", unit: str):
+        super().__init__()
+        self._bar, self.unit = bar, unit
+        self.setBackground("w")
+        self.setFixedHeight(LANE_H)
+        pi = self.getPlotItem()
+        pi.hideButtons()
+        pi.setMenuEnabled(False)
+        pi.setMouseEnabled(x=True, y=False)
+        pi.showGrid(x=True, y=unit != "mode", alpha=0.25)
+        pi.hideAxis("bottom")
+        ax = pi.getAxis("left")
+        ax.enableAutoSIPrefix(False)
+        ax.setWidth(LANE_AXIS_W)
+        pi.setLabel("left", "mode" if unit == "mode" else unit)
+        pi.setXLink(bar.strip.getPlotItem())
+        self.head = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen((210, 0, 0), width=2))
+        self.head.setZValue(10)
+        pi.addItem(self.head, ignoreBounds=True)
+        self.curves: list[tuple[str, str, pg.PlotDataItem, np.ndarray, np.ndarray]] = []
+        self._band: list = []
+        self.scene().sigMouseClicked.connect(self._clicked)
+        self.scene().sigMouseMoved.connect(self._hover)
+
+    def set_curves(self, items: list[tuple[str, str, np.ndarray, np.ndarray]]) -> None:
+        """[(key, label, t, y)]: one curve each, coloured in order."""
+        pi = self.getPlotItem()
+        for _k, _l, c, _t, _y in self.curves:
+            pi.removeItem(c)
+        self.curves = []
+        lo, hi = math.inf, -math.inf
+        for i, (key, label, t, y) in enumerate(items):
+            c = pi.plot(t, y, pen=pg.mkPen(LANE_COLORS[i % len(LANE_COLORS)], width=1.3))
+            c.setDownsampling(auto=True, method="peak")
+            c.setClipToView(True)
+            self.curves.append((key, label, c, np.asarray(t), np.asarray(y)))
+            fin = np.asarray(y)[np.isfinite(y)]
+            if len(fin):
+                lo, hi = min(lo, float(fin.min())), max(hi, float(fin.max()))
+        if self.unit in ("pilot", "thrust"):             # -1 .. +1: the stick's range
+            lo, hi = min(lo, -1.0) if math.isfinite(lo) else -1.0, max(hi, 1.0) if math.isfinite(hi) else 1.0
+        if not math.isfinite(lo):
+            lo, hi = 0.0, 1.0
+        if hi - lo < 1e-9:
+            lo, hi = lo - 0.5, hi + 0.5
+        pad = 0.06 * (hi - lo)
+        pi.setYRange(lo - pad, hi + pad, padding=0)
+        self.setToolTip("\n".join(f"{lab}" for _k, lab, *_ in self.curves))
+
+    def set_modes(self, modes, gain) -> None:
+        """The flight-mode band: one labelled span per mode, the pilot gain as a step."""
+        from wavi_py.views.analysis_timeline import MODE_COLORS, _MODE_OTHER
+        pi = self.getPlotItem()
+        for it in self._band:
+            pi.removeItem(it)
+        self._band = []
+        self._modes = list(modes)
+        for t0, t1, name in modes:
+            r = pg.LinearRegionItem((t0, t1), movable=False, pen=pg.mkPen(None),
+                                    brush=pg.mkBrush(*MODE_COLORS.get(name, _MODE_OTHER), 230))
+            r.setZValue(-5)
+            for ln in r.lines:
+                ln.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+            r.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+            pi.addItem(r, ignoreBounds=True)
+            lab = pg.TextItem(name, color=(60, 60, 60), anchor=(0, 0))
+            lab.setPos(t0, 1.0)
+            pi.addItem(lab, ignoreBounds=True)
+            self._band += [r, lab]
+        gt, gy = gain
+        if len(gt):
+            c = pi.plot(gt, gy, pen=pg.mkPen((40, 40, 40), width=1.5))
+            self._band.append(c)
+        pi.setYRange(0.0, 1.0, padding=0.05)
+        self.getPlotItem().getAxis("left").setTicks([[(0, "0"), (0.5, "gain"), (1, "1")]])
+
+    def _x_at(self, scene_pos) -> Optional[float]:
+        vb = self.getPlotItem().getViewBox()
+        if not vb.sceneBoundingRect().contains(scene_pos):
+            return None
+        return float(vb.mapSceneToView(scene_pos).x())
+
+    def _clicked(self, ev) -> None:
+        if ev.button() == Qt.MouseButton.RightButton:
+            self._bar.lanes_menu().popup(ev.screenPos().toPoint())
+            ev.accept()
+            return
+        if ev.button() != Qt.MouseButton.LeftButton:
+            return
+        if ev.double():
+            self._bar.strip.zoomed = False
+            self._bar.show_all()
+            return
+        x = self._x_at(ev.scenePos())
+        if x is not None:
+            self._bar.model.request_seek(x, True)
+
+    def text_at(self, x: float) -> str:
+        """The values at time ``x``: one line per curve (the mode band: the mode)."""
+        if self.unit == "mode":
+            name = next((n for a, b, n in getattr(self, "_modes", []) if a <= x <= b), None)
+            return f"{fmt_t(x)}  mode {name}" if name else f"{fmt_t(x)}"
+        lines = [fmt_t(x)]
+        for _k, label, _c, t, y in self.curves:
+            if not len(t):
+                continue
+            i = int(np.clip(np.searchsorted(t, x), 0, len(t) - 1))
+            if i > 0 and abs(t[i - 1] - x) < abs(t[i] - x):
+                i -= 1
+            lines.append(f"{label}: {y[i]:.3g} {self.unit}")
+        return "\n".join(lines)
+
+    def _hover(self, pos) -> None:
+        x = self._x_at(pos)
+        if x is None:
+            return
+        QToolTip.showText(self.mapToGlobal(QPoint(int(self.mapFromScene(pos).x()), 0)),
+                          self.text_at(x), self)
+
+
 class TimelineBar(QWidget):
     """The timeline of the shared model (see the module doc); one per window."""
 
@@ -635,7 +805,16 @@ class TimelineBar(QWidget):
         h = QHBoxLayout()
         v.addLayout(h)
         self.strip = _Strip(self)
-        h.addWidget(self.strip, stretch=1)
+        col = QVBoxLayout()                # the strip over the ROV lanes
+        col.setSpacing(0)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.addWidget(self.strip)
+        self._lane_box = QVBoxLayout()
+        self._lane_box.setSpacing(0)
+        col.addLayout(self._lane_box)
+        h.addLayout(col, stretch=1)
+        self.lanes: dict[str, _Lane] = {}               # unit -> its lane (shown ones)
+        self.rov_keys: list[str] = _saved_lanes()        # the ROV variables chosen
         side = QVBoxLayout()
         h.addLayout(side)
         self.events = QComboBox()
@@ -666,8 +845,15 @@ class TimelineBar(QWidget):
         self.notes_btn = QPushButton("Notes")
         self.notes_btn.setToolTip("The recording's notes: list, add, edit, delete [N: add one]")
         self.notes_btn.clicked.connect(model.notesRequested.emit)
+        self.rov_btn = QToolButton()
+        self.rov_btn.setText("ROV ▾")
+        self.rov_btn.setToolTip("ROV lanes: show the vehicle telemetry (pilot, thrusters,"
+                                " current, mode, ...) under the strip [or right-click the strip]")
+        self.rov_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.rov_btn.clicked.connect(lambda: self.lanes_menu().exec(
+            self.rov_btn.mapToGlobal(QPoint(0, self.rov_btn.height()))))
         for i, w in enumerate((self._prev, self._next, self.loop_btn, self.export_btn,
-                               self.notes_btn)):
+                               self.notes_btn, self.rov_btn)):
             w.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             row.addWidget(w, i // 2, i % 2)
         side.addStretch(1)
@@ -700,6 +886,7 @@ class TimelineBar(QWidget):
             self.strip.set_spans([])
             self.events.clear()
             self._show_notes()
+            self._build_lanes()
             return
         t, d = src.depth()
         self.strip.depth.setData(t, d)
@@ -721,7 +908,82 @@ class TimelineBar(QWidget):
         self.events.addItem(f"Events ({len(evs)})" if evs else "No events", None)
         for e in evs:
             self.events.addItem(event_text(e), e.t)
+        self._build_lanes()
         self._show_position(m.position)
+
+    # ----- ROV lanes
+
+    def _rov(self):
+        src = self.model.source
+        fn = getattr(src, "rov", None) if src is not None else None
+        try:
+            return fn() if callable(fn) else None
+        except Exception:                                # noqa: BLE001 — a lane, never fatal
+            return None
+
+    def lanes_menu(self) -> QMenu:
+        """The ROV variables there are, checkable, by group (applied at once)."""
+        menu = QMenu(self)
+        menu.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        rov = self._rov()
+        avail = rov.variables() if rov else []
+        if not avail:
+            a = menu.addAction("No ROV telemetry in this source")
+            a.setEnabled(False)
+        groups: dict[str, QMenu] = {}
+        for key, label, unit, group in avail:
+            sub = groups.get(group)
+            if sub is None:
+                sub = groups[group] = menu.addMenu(group)
+            a = QAction(label if key != _MODE_KEY else "flight mode / gain", sub)
+            a.setCheckable(True)
+            a.setChecked(key in self.rov_keys)
+            a.toggled.connect(lambda on, k=key: self.set_rov_keys(
+                [x for x in self.rov_keys if x != k] + ([k] if on else [])))
+            sub.addAction(a)
+        menu.addSeparator()
+        clear = menu.addAction("Hide all ROV lanes")
+        clear.setEnabled(bool(self.rov_keys))
+        clear.triggered.connect(lambda: self.set_rov_keys([]))
+        return menu
+
+    def set_rov_keys(self, keys) -> None:
+        """Show these ROV variables (``rov:<name>``, ``rov:mode`` the band) as lanes."""
+        keys = list(dict.fromkeys(keys))
+        if keys == self.rov_keys:
+            return
+        self.rov_keys = keys
+        _save_lanes(keys)
+        self._build_lanes()
+        self._show_position(self.model.position)
+
+    def _build_lanes(self) -> None:
+        rov = self._rov() if self.rov_keys else None
+        avail = {k: (lab, u) for k, lab, u, _g in (rov.variables() if rov else [])}
+        by_unit: dict[str, list] = {}
+        for k in self.rov_keys:
+            if k in avail:
+                by_unit.setdefault(avail[k][1], []).append(k)
+        for u in list(self.lanes):
+            if u not in by_unit:
+                lane = self.lanes.pop(u)
+                self._lane_box.removeWidget(lane)
+                lane.deleteLater()
+        order = ["mode"] + [u for u in by_unit if u != "mode"]
+        for u in order:
+            if u not in by_unit:
+                continue
+            lane = self.lanes.get(u)
+            if lane is None:
+                lane = self.lanes[u] = _Lane(self, u)
+            if u == "mode":
+                lane.set_modes(rov.modes, rov.series("rov:gain"))
+            else:
+                lane.set_curves([(k, avail[k][0], *rov.series(k)) for k in by_unit[u]])
+        self.lanes = {u: self.lanes[u] for u in order if u in self.lanes}   # top to bottom
+        for i, lane in enumerate(self.lanes.values()):
+            self._lane_box.insertWidget(i, lane)
+        self.rov_btn.setText(f"ROV ({len(self.lanes)}) ▾" if self.lanes else "ROV ▾")
 
     def _show_notes(self) -> None:
         nm = self.model.notes
@@ -746,7 +1008,11 @@ class TimelineBar(QWidget):
         self.strip.getPlotItem().setXRange(0, dur, padding=0.01)
 
     def _show_position(self, t: float) -> None:
-        if self._dragging or not math.isfinite(t):
+        if not math.isfinite(t):
+            return
+        for lane in self.lanes.values():
+            lane.head.setValue(t)
+        if self._dragging:
             return
         self.strip.head.blockSignals(True)
         self.strip.head.setValue(t)
