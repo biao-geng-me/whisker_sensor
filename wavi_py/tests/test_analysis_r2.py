@@ -248,11 +248,12 @@ def test_picker_and_click_to_pick(app, win):
     _click(vb, x[i], y[i])
     assert [n for n, _t in aw.cursors] == [1] and aw.cursors[0][1] == pytest.approx(x[i], abs=1e-6)
     assert sg.pick == (2, "wsk:1")
-    # far from every trace: nothing
+    # away from every trace: a cursor too (the pick stays)
     lo, hi = vb.viewRange()[1]
     vb.setYRange(hi + 50 * (hi - lo), hi + 60 * (hi - lo), padding=0)
     _click(vb, 1.0)
-    assert sg.pick == (2, "wsk:1") and len(aw.cursors) == 1
+    assert sg.pick == (2, "wsk:1") and len(aw.cursors) == 2
+    assert aw.cursors[1][1] == pytest.approx(1.0, abs=1e-6)
     # the pick falls back when its variable is unchecked
     aw.set_checked(["wsk:1"], False)
     assert _pump(app, lambda: sg.pick[1] == "wsk:0", 2)
@@ -375,12 +376,16 @@ def test_timeline_row_height(app, win):
     aw.close()
 
 
-def test_spectrum_log_amplitude_default(app, win):
+def test_spectrum_linear_default_and_log(app, win):
     aw, sels = _window(app, win)
     sp = aw.spectrum
-    assert sp.log_a.isChecked()
+    assert not sp.log_a.isChecked()                                  # linear by default
     assert _pump(app, lambda: (1, "wsk:0") in sp.curves, 2)
     f, a = aw.dataset().spectrum(sels[0], aw.dataset().variables[0], *sp.options)
+    _, y = sp.curves[(1, "wsk:0")].getData()
+    assert np.allclose(y, a)
+    sp.log_a.setChecked(True)
+    assert _pump(app, lambda: sp.rows["mV"].getAxis("left").logMode, 2)
     _, y = sp.curves[(1, "wsk:0")].getData()
     with np.errstate(divide="ignore"):
         assert np.allclose(y, np.where(a > 0, np.log10(a), np.nan), equal_nan=True)
@@ -438,25 +443,55 @@ def test_keys_and_probe(app, win, monkeypatch):
     # R: reset (all cells, the mouse being outside them)
     aw._reset_view()
     assert aw.compare._auto and not aw.timeline.zoomed
-    # Probe: values under the mouse in the waveform, the timeline, the spectrum
+    # Probe: every trace's value at the mouse, marked and labelled next to it
     aw._act_probe.setChecked(True)
     _pump(app, lambda: False, 0.3)
     vb = aw.compare.rows["mV"].getViewBox()
     aw._on_mouse(aw.compare, vb.mapViewToScene(QPointF(1.0, 0.0)))
-    msg = aw.statusBar().currentMessage()
-    assert msg.startswith("t = 1") and "#1" in msg and "mV" in msg
+    h = aw._hovers[aw.compare]
+    n = sum(1 for c in aw.compare.curves.values() if c.unit == "mV")
+    assert n >= 3 and h.shown[0].startswith("t = 1") and len(h.shown) == 1 + n   # one per trace
+    assert all("#" in t and "mV" in t for t in h.shown[1:])
+    r = h._rows[id(aw.compare.rows["mV"])]
+    assert r.dots.isVisible() and len(r.dots.data) == n and all(t.isVisible() for t in r.labels[:n])
+    ys = sorted(t.pos().y() for t in r.labels[:n])                            # pushed apart
+    assert min(np.diff(ys)) >= 0.9 * 13 * abs(vb.viewPixelSize()[1])
     assert aw.compare.probes["mV"].isVisible() and aw.compare.probes["mV"].value() == pytest.approx(1.0)
+    assert not aw.statusBar().currentMessage()
     tvb = aw.timeline.x_plot().getViewBox()
     aw._on_mouse(aw.timeline, tvb.mapViewToScene(QPointF(3.0, tvb.viewRange()[1][0])))
-    msg = aw.statusBar().currentMessage()
-    assert msg.startswith("t = 3") and not aw.compare.probes["mV"].isVisible()
+    assert aw._hovers[aw.timeline].shown[0].startswith("t = 3")
+    assert not aw.compare.probes["mV"].isVisible() and not r.dots.isVisible()
     svb = aw.spectrum.rows["mV"].getViewBox()
     aw._on_mouse(aw.spectrum, svb.mapViewToScene(QPointF(12.0, 0.0)))
-    msg = aw.statusBar().currentMessage()
-    assert msg.startswith("f = 12") and "W1 A #1" in msg
-    sp = aw.spectrogram.plot.getViewBox()
+    hs = aw._hovers[aw.spectrum]
+    assert hs.shown[0].startswith("f = 12") and any(t.startswith("W1 A #1") for t in hs.shown)
+    sg = aw.spectrogram
+    sp = sg.plot.getViewBox()
+    got = None
     aw._on_mouse(aw.spectrogram, sp.mapViewToScene(QPointF(1.5, 20.0)))
-    assert "f = " in aw.statusBar().currentMessage() and "W1 A #1" in aw.statusBar().currentMessage()
+    assert sg.ptext.isVisible() and sg.ptext.textItem.toPlainText().startswith("t = 1.5")
+    assert sg.peak_text.isVisible() and sg.peak_text.textItem.toPlainText().startswith("peak ")
+    got = sg.probe_at(1.5, 20.0)
+    col = spectrogram_column(sg.data, 1.5)
+    pos = col[0] > 0
+    assert got[1][0] == pytest.approx(col[0][pos][np.argmax(col[1][pos])])
+    # hover (Probe off): the nearest trace thick, named at the mouse with its value
+    aw._act_probe.setChecked(False)
+    c = aw.compare.curves[(1, "wsk:0")]
+    x, y = c.getData()
+    i = len(x) // 2
+    aw._on_mouse(aw.compare, vb.mapViewToScene(QPointF(x[i], y[i])))
+    assert h.hovered is not None and h.shown and "mV" in h.shown[0]
+    rr = h._rows[id(aw.compare.rows["mV"])]
+    assert rr.halo.isVisible() and rr.halo.opts["pen"].widthF() > 3
+    # the spectrum: the hovered trace's peaks marked
+    c = aw.spectrum.curves[(1, "wsk:0")]
+    x, y = c.getData()
+    j = int(np.argmax(y[1:])) + 1
+    aw._on_mouse(aw.spectrum, svb.mapViewToScene(QPointF(x[j], y[j])))
+    assert hs.hovered is c and len(hs.shown) >= 2 and f"{x[j]:.4g} Hz" in hs.shown[1]
+    aw._act_probe.setChecked(True)
     aw._act_probe.setChecked(False)
     assert not any(ln.isVisible() for ln in aw._probe_lines())
     aw.close()

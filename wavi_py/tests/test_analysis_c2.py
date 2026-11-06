@@ -168,10 +168,8 @@ def test_spectrum_tab_recompute_on_change(app, win):
     # different lengths: different grids; the curves are the dataset's spectra
     ds = aw.dataset()
     f, a = ds.spectrum(sels[0], ds.variables[0], *sp.options)
-    x, y = sp.curves[(1, "wsk:0")].getData()                      # log amplitude (the default)
-    with np.errstate(divide="ignore"):
-        assert np.allclose(x, f) and np.allclose(y, np.where(a > 0, np.log10(a), np.nan),
-                                                 equal_nan=True)
+    x, y = sp.curves[(1, "wsk:0")].getData()                      # linear amplitude (the default)
+    assert np.allclose(x, f) and np.allclose(y, a)
     x2, _ = sp.curves[(2, "wsk:0")].getData()                     # 2.5 s and 3.5 s long
     assert abs((x[1] - x[0]) - 1 / 2.5) < 0.01 and abs((x2[1] - x2[0]) - 1 / 3.5) < 0.01
     aw.close()

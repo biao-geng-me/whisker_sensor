@@ -32,16 +32,16 @@ The side panel holds two lists:
   the dome's positions, the halves drag and lift (``pos:<position>:<axis>``:
   read through each recording's dome map, polarity applied), so one choice
   reads the same place on the dome in recordings wired differently.
-  "Plane map" (next to the combo; it turns on the position view) makes the
-  Plots grid the Dome view's plane map in small, without taking a cell of the
-  2x2: each position's cell grows into a plot of its tip path over the
-  included selections (Events: the highlighted events, else the picked one),
-  each sub-range its own path in the sub-range's line style, in degrees of bend
-  (the sensor's calibration), drag toward the side's front, lift up, every
-  cell on one scale; arrows from the root to the tip at the plane head (a
-  teal line in every waveform row, dragged to scrub: ``set_plane_t``) and the
-  cursors, else at each path's peak (``daq/plane_overlay.py``; the cells still toggle the
-  variables: name or plot both axes, the D / L chips one).
+  "Plane map" (next to the combo; on by default, in either view: both views
+  are the same cells, only the picker's labels differ) makes the Plots grid the
+  Dome view's plane map in small, without taking a cell of the 2x2: every
+  position at the plane head (a teal line on the timeline, absolute, dragged
+  to scrub; ``_render_head``: the recording there and its last second, whatever
+  is checked or included), under it each included selection's path (each
+  sub-range its own, in its line style), numbered arrows at the cursors. Events
+  (no timeline): a relative head in the waveform, the highlighted / picked
+  events' paths (``daq/plane_overlay.py``; the cells still toggle the variables:
+  name or plot both halves, the chips one).
   Below them a tree with the rest, IMU (accel x / y / z, gyro x / y / z,
   attitude roll / pitch / yaw, depth) and ROV (the vehicle telemetry, when the
   source has it, with the pilot's demand and the thrust projected per axis:
@@ -58,9 +58,15 @@ skips its work when its inputs did not change.
 
 Cursors: a click in the spectrogram adds a numbered vertical cursor at that
 relative time, drawn there and in the waveform; drag it to move it, right-click
-it or Del (hovered) to delete it. In the waveform a click on a trace shows that
-(variable, selection) in the spectrogram (the trace is then drawn thick), a click
-on the thick trace adds a cursor, and a click away from the traces does nothing.
+it or Del (hovered) to delete it. A click in the waveform adds one too, except on
+a trace other than the picked one: that shows its (variable, selection) in the
+spectrogram (the trace is then drawn thick).
+
+Readouts (``views/hover_probe.py``): no per-variable legends in the timeline,
+waveform and spectrum; hovering a trace draws it thicker and names it with its
+value next to the mouse (the spectrum also marks its peaks). Probe (P) marks
+every trace's value at the mouse in the row, labelled; in the spectrogram a
+crosshair with its value and the segment's peak.
 The bottom right shows the picked tile's spectrogram column at each cursor.
 
 Toolbar: Select (S: a drag in the waveform makes the sub-range, in the
@@ -107,6 +113,7 @@ reuses it for the next new window).
 
 from __future__ import annotations
 
+import math
 import weakref
 from pathlib import Path
 from typing import Callable, Optional, Sequence
@@ -122,7 +129,7 @@ import numpy as np
 import pyqtgraph as pg
 
 from wavi_py.daq.analysis import DEPTH, POS, ROV, Dataset, Selection, Variable
-from wavi_py.daq.plane_overlay import plane_overlay, set_arrows
+from wavi_py.daq.plane_overlay import head_state, plane_overlay, recording_origin, set_arrows
 from wavi_py.daq.series import IMU, WSK
 from wavi_py.replay import eventset as evs
 from wavi_py.views.analysis_cells import (SELECTION, SENSOR, CursorCell, CursorLines, line_style,
@@ -132,6 +139,7 @@ from wavi_py.views.base import ViewWindow
 from wavi_py.views.event_cells import EventBrowserCell, EventWaveCell, group_colors
 from wavi_py.views.event_loader import EventLoader
 from wavi_py.views.event_panel import EventPanel
+from wavi_py.views.hover_probe import HoverProbe
 from wavi_py.views.sensor_grid import GridLayout, SensorGrid
 from wavi_py.views.render_sched import scheduler
 from wavi_py.views.selections import SelectionModel, sel_color
@@ -151,7 +159,7 @@ KEYS_HELP = """\
 <tr><td><b>S</b></td><td>Select: drag in the waveform for another sub-range, in the timeline for a new selection</td></tr>
 <tr><td><b>Esc</b></td><td>clear the sub-ranges (all)</td></tr>
 <tr><td><b>Z</b></td><td>zoom box: drag a rectangle to zoom (waveform, spectra, spectrogram); off: a drag pans</td></tr>
-<tr><td><b>P</b></td><td>probe: values under the mouse (waveform, timeline, spectra, spectrogram)</td></tr>
+<tr><td><b>P</b></td><td>probe: every trace's value at the mouse, marked and labelled (waveform, timeline, spectra); the spectrogram: t, f, amplitude and the segment's peak</td></tr>
 <tr><td><b>R</b></td><td>reset view: the cell under the mouse (outside the cells: all)</td></tr>
 <tr><td><b>F</b></td><td>fit: the plot under the mouse to its data (x and y)</td></tr>
 <tr><td><b>= &nbsp;-</b></td><td>zoom X in / out (the cell under the mouse). Keypad + - too</td></tr>
@@ -160,8 +168,9 @@ KEYS_HELP = """\
 <tr><td><b>arrows</b></td><td>move the data (Left: traces slide left), the cell under the mouse</td></tr>
 <tr><td><b>Del</b></td><td>delete the cursor (else the sub-range, else the selection) under the mouse</td></tr>
 </table>
-Mouse: a click in the spectrogram adds a cursor. In the waveform a click on a trace
-shows it in the spectrogram (drawn thick); a click on the thick trace adds a cursor.
+Mouse: a click in the spectrogram or the waveform adds a cursor; in the waveform a
+click on another trace shows it in the spectrogram instead (drawn thick). Hover a
+trace for its name and value (spectrum: its peaks too).
 Drag a cursor to move it, right-click deletes it. Timeline: drag pans, wheel zooms,
 double-click seeks. A cell's – button (or its border dragged to the edge) collapses
 it; the bar above the plots brings it back. Double-click a border between cells to
@@ -507,11 +516,12 @@ class AnalysisWindow(ViewWindow):
         self.grid_view.currentTextChanged.connect(lambda _t: self._rebuild_grids())
         self.plane_box = QCheckBox("Plane map")
         self.plane_box.setToolTip(
-            "The Plots grid as the Dome view's plane map: each position's tip path over the"
-            " included selections (sub-ranges: each its own), in degrees of bend, drag toward"
-            " the side's front, lift up, all cells on one scale; arrows to the tip at the"
-            " cursors, else at each path's peak. Without V0 a path starts at the selection's"
-            " first 0.25 s. Turns on the position view")
+            "The Plots grid as the Dome view's plane map (either view): every position at the"
+            " plane head (the teal line in the timeline: drag it), with its last second, in"
+            " degrees of bend, drag toward the side's front, lift up, all cells on one scale;"
+            " under it each included selection's path (sub-ranges: each its own), numbered"
+            " arrows at the cursors. Without V0 the head is relative to the recording's first"
+            " 2 s, a path to its selection's first 0.25 s")
         self.plane_box.toggled.connect(self._on_plane_toggled)
         gv = QHBoxLayout()
         gv.setContentsMargins(0, 0, 0, 0)
@@ -520,7 +530,13 @@ class AnalysisWindow(ViewWindow):
         sl.addLayout(gv)
         self._plane_key = None                    # what the plane map's paths were read for
         self._plane_ov = None
-        self.plane_t: Optional[float] = None      # the plane head in the waveform (relative s)
+        self._path_cache: dict = {}               # each selection's plane paths by its inputs
+        self.plane_t: Optional[float] = None      # Events: the plane head in the waveform (relative s)
+        self._head_key = None                     # Selections: the plane head's inputs ...
+        self._head_state = None                   # ... and what it read (plane_overlay.HeadState)
+        self._head_big = 0.0                      # the largest head bend seen (the map's scale)
+        self._head_src = None
+        self._origin = None                       # without V0: the recording's start per position
         self._head_lines: dict = {}               # id(row) -> (row, line)
         self.grids = {PLOTS: SensorGrid("Plots"), TIMELINE: SensorGrid("Timeline")}
         for col, g in self.grids.items():
@@ -565,6 +581,7 @@ class AnalysisWindow(ViewWindow):
         if mode != EVENTS:
             self.set_color_by(SENSOR)                 # the default (each gauge its own colour)
         self.timeline.madeSelection.connect(self.include)
+        self.timeline.planeMoved.connect(self._on_plane_moved)
         self.timeline.laneClicked.connect(self._lane_clicked)
         self.timeline.laneCompare.connect(self._lane_compare)
         self.subs: tuple = ()                         # the waveform's sub-ranges ((n, a, b), ...)
@@ -590,6 +607,8 @@ class AnalysisWindow(ViewWindow):
         self.setCentralWidget(self.split)
         self.default_sizes()
 
+        self._hovers = {c: HoverProbe(c, peaks=c in (self.spectrum, self.at_cursors))
+                        for c in self.cells() if c is not self.spectrogram}
         for cell in self.cells():
             cell.glw.scene().sigMouseMoved.connect(lambda pos, c=cell: self._on_mouse(c, pos))
         self._live_timer = QTimer(self)
@@ -605,6 +624,7 @@ class AnalysisWindow(ViewWindow):
         self._rebuild_vars()
         if mode == EVENTS:
             self._init_events(query or evs.EventQuery(types=["onset"], group_by="run"), cache)
+        self.plane_box.setChecked(True)            # the plane map: on by default
 
     def _build_toolbar(self) -> None:
         tb = QToolBar("Analysis")
@@ -790,6 +810,7 @@ class AnalysisWindow(ViewWindow):
             cell.reset_view()
         self.default_sizes()
         self._lists_dirty = True
+        self.plane_box.setChecked(True)            # the plane map: on by default
 
     def dataset(self) -> Dataset:
         keys = set(self.checked_keys())
@@ -877,9 +898,7 @@ class AnalysisWindow(ViewWindow):
     def _on_wave_click(self, t: float, pick) -> None:
         """A click on a trace shows it in the spectrogram; on the one shown (drawn
         thick), it adds a cursor there; away from the traces, nothing."""
-        if pick is None:
-            return
-        if pick == self.spectrogram.pick:
+        if pick is None or pick == self.spectrogram.pick:
             self.add_cursor(t)
         else:
             self.spectrogram.set_pick(*pick)
@@ -953,7 +972,7 @@ class AnalysisWindow(ViewWindow):
         """The grids' layout from the dome map and the gauges there are."""
         wsk = [v for v in self._vars if v.source == WSK]
         pos = self.grid_positions
-        dm = self._position_map() if pos else self._dome_map_fn()
+        dm = self._position_map()          # both views: the same cells (only the labels differ)
         key = (id(dm), len(wsk), tuple(v.label for v in wsk), pos)
         if key == self._grid_key:
             return
@@ -969,8 +988,6 @@ class AnalysisWindow(ViewWindow):
                     g = p.daq.get(ax) if p is not None else None
                     if g is None or g.ch is None or int(g.ch) in grid.dead:
                         off.add(2 * sn + j)
-        if not pos and self.plane_box.isChecked():
-            self.plane_box.setChecked(False)          # the plane map is the position view's
         self._plane_key = None
         for g in self.grids.values():
             g.positions, g.pos_off = pos, off
@@ -983,22 +1000,24 @@ class AnalysisWindow(ViewWindow):
         self._sync_grids()
         self._request()
 
-    # ----- the plane map (the Plots grid, position view)
+    # ----- the plane map (the Plots grid, either view)
 
     def _on_plane_toggled(self, on: bool) -> None:
-        if on and not self.grid_positions:
-            self.grid_view.setCurrentText(POSITIONS_VIEW)
         g = self.grids[PLOTS]
         g.set_map(on)
         if not on:
             g.set_overlay(None)
-            self._sync_head()
-        self._plane_key = None
+            self.timeline.set_plane_head(None)
+        self._sync_head()
+        self._plane_key = self._head_key = None
         self._request()
 
+    def _plane_on(self) -> bool:
+        return self.plane_box.isChecked()
+
     def _plane_selections(self) -> list:
-        """What the plane map draws: the included selections; Events: the highlighted
-        events, else the picked one."""
+        """What the plane map draws paths of: the included selections; Events: the
+        highlighted events, else the picked one."""
         if self.mode != EVENTS:
             return list(self.included)
         ov = self.overlay
@@ -1018,12 +1037,16 @@ class AnalysisWindow(ViewWindow):
         style = (line_style(nums.index(item.sub)) if item.sub in nums else Qt.PenStyle.SolidLine)
         return QPen(c, 1.3, style)
 
+    def _plane_positions(self) -> list:
+        g = self.grids[PLOTS]
+        return [n for s, n in enumerate(g.grid.names) if g.position_of(2 * s)]
+
     def _render_plane(self) -> None:
         g = self.grids[PLOTS]
-        if not (self.plane_box.isChecked() and g.map and self.grid_positions):
+        if not (self._plane_on() and g.map):
             return
         sels = self._plane_selections()
-        positions = [n for s, n in enumerate(g.grid.names) if g.position_of(2 * s)]
+        positions = self._plane_positions()
         m = self.model
         if self.mode == EVENTS:
             ds = Dataset(sels, [], baseline=True)
@@ -1034,27 +1057,80 @@ class AnalysisWindow(ViewWindow):
                tuple(positions), self.subs, m.despike, id(m.v0), m.scale, id(ds.dome_map),
                self.mode == EVENTS)
         cur = [(n, t) for n, t in self.cursors]
-        if self.plane_t is None and sels:            # start mid-way through the view
+        if self.mode == EVENTS and self.plane_t is None and sels:   # relative head: mid-way
             x = self.compare.x_plot()
             lo, hi = x.getViewBox().viewRange()[0] if x is not None else (0.0, 0.0)
-            longest = max(s.t1 - s.zero for s in sels)
-            self.plane_t = float(min(max(0.5 * (lo + hi), 0.0), longest)) if hi > lo \
-                else 0.5 * longest
+            self.plane_t = 0.5 * (lo + hi) if hi > lo else 0.0
+        head = self.plane_t if self.mode == EVENTS else None
         if key != self._plane_key:
             self._plane_key = key
-            self._plane_ov = plane_overlay(ds, positions, cur, head=self.plane_t) if sels else None
-        elif self._plane_ov is not None:
-            set_arrows(self._plane_ov, cur, self.plane_t)
+            self._plane_ov = plane_overlay(ds, positions, cur, head=head, cache=self._path_cache,
+                                           peaks=self.mode == EVENTS)
+        else:
+            set_arrows(self._plane_ov, cur, head, peaks=self.mode == EVENTS)
+        if self.mode != EVENTS:
+            self._render_head(positions)
+        self._plane_ov.scale = max(self._plane_ov.scale, self._head_big, 0.5)
         g.set_overlay(self._plane_ov, lambda item, sels=sels: self._plane_pen(sels, item))
         self._sync_head()
 
-    def _plane_on(self) -> bool:
-        return self.plane_box.isChecked() and self.grid_positions
+    def _render_head(self, positions: list) -> None:
+        """The recording at the plane head (absolute, on the timeline): every position's
+        tip and its trail, from the replayed recording or the live buffers."""
+        src = timeline_source_of(self._source_fn)
+        ov = self._plane_ov
+        if src is None or ov is None:
+            if ov is not None:
+                ov.head, ov.trail = {}, {}
+            self.timeline.set_plane_head(None)
+            return
+        ext = src.extent()
+        if self.timeline.plane_t is None:          # start at the playhead, else mid-view
+            r = self.replay
+            t = r.position if r is not None and r.source is not None else math.nan
+            if not math.isfinite(t):
+                lo, hi = self.timeline.x_plot().getViewBox().viewRange()[0]
+                t = 0.5 * (lo + hi)
+            if ext is not None:
+                t = min(max(t, ext[0]), ext[1])
+            self.timeline.set_plane_head(t)
+        t = self.timeline.plane_t
+        m = self.model
+        rec_map = m.dome_map_fn()
+        dm = rec_map if rec_map is not None else self._position_map()
+        ds = Dataset([], [], despike=m.despike, v0=m.v0, scale=m.scale, dome_map=dm)
+        key = (t, id(src.series), tuple(positions), m.despike, id(m.v0), m.scale, id(dm))
+        if key == self._head_key:
+            ov.head, ov.trail = self._head_state.head, self._head_state.trail
+            return
+        if self._head_src != (id(src.series), id(dm)):
+            self._head_src = (id(src.series), id(dm))
+            self._head_big = 0.0                    # the running scale: a new recording
+            self._origin = None
+        origin = None
+        if m.v0 is None and ext is not None:       # without V0: the recording's start at rest
+            if self._origin is None:
+                self._origin = recording_origin(ds, src, positions, ext)
+            origin = self._origin
+        st = head_state(ds, src, positions, t, origin)
+        self._head_key, self._head_state = key, st
+        self._head_big = max(self._head_big, st.big)
+        ov.head, ov.trail = st.head, st.trail
+
+    def _on_plane_moved(self, t: float) -> None:
+        """The timeline's plane head was dragged: only the head is re-read (1 s)."""
+        g = self.grids[PLOTS]
+        if self._plane_ov is None or not g.map:
+            return
+        self._render_head(self._plane_positions())
+        self._plane_ov.scale = max(self._plane_ov.scale, self._head_big, 0.5)
+        g.update()
 
     def _sync_head(self) -> None:
-        """The plane head's line in every waveform row (only with the plane map on)."""
-        rows = list(self.compare.rows.values()) if self._plane_on() and self.plane_t is not None \
-            else []
+        """Events (no timeline): the plane head's line in every waveform row, relative
+        to each event's onset."""
+        rows = list(self.compare.rows.values()) if self.mode == EVENTS and self._plane_on() \
+            and self.plane_t is not None else []
         want = {id(r): r for r in rows}
         for k in [k for k in self._head_lines if k not in want]:
             r, line = self._head_lines.pop(k)
@@ -1078,13 +1154,17 @@ class AnalysisWindow(ViewWindow):
                 got[1].blockSignals(False)
 
     def set_plane_t(self, t: float) -> None:
-        """Move the plane head (relative s): the arrows follow, nothing is re-read."""
-        self.plane_t = max(0.0, float(t)) if self.mode != EVENTS else float(t)
+        """Move the plane head: Selections mode on the timeline (absolute s), Events in
+        the waveform (relative to the onsets). Only the head is re-read."""
+        if self.mode != EVENTS:
+            self.timeline.set_plane_head(float(t))
+            self._on_plane_moved(float(t))
+            return
+        self.plane_t = float(t)
         self._sync_head()
-        g = self.grids[PLOTS]
         if self._plane_ov is not None:
             set_arrows(self._plane_ov, [(n, c) for n, c in self.cursors], self.plane_t)
-            g.update()
+            self.grids[PLOTS].update()
 
     def _on_head_dragged(self, line) -> None:
         self.set_plane_t(line.value())
@@ -1258,7 +1338,12 @@ class AnalysisWindow(ViewWindow):
         return cell, plot
 
     def eventFilter(self, obj, ev) -> bool:  # noqa: N802 — Qt naming
-        """Zoom / pan keys by the character typed, anywhere in this window."""
+        """Zoom / pan keys by the character typed, anywhere in this window; the mouse
+        leaving a cell clears its readouts."""
+        if ev.type() == QEvent.Type.Leave and self._hover_cell is not None and \
+                obj is self._hover_cell.glw.viewport():
+            self._clear_readouts()
+            return False
         if ev.type() != QEvent.Type.KeyPress or not isinstance(obj, QWidget) or obj.window() is not self:
             return False
         if isinstance(obj, (QAbstractSpinBox, QLineEdit, QComboBox, QAbstractItemView)):
@@ -1359,20 +1444,34 @@ class AnalysisWindow(ViewWindow):
                 self.spectrogram.probe, self.at_cursors.probe]
 
     def _on_probe_toggled(self, on: bool) -> None:
-        if not on:
-            for line in self._probe_lines():
-                line.hide()
-            self.statusBar().clearMessage()
+        self._clear_readouts()
+
+    def _clear_readouts(self) -> None:
+        for line in self._probe_lines():
+            line.hide()
+        for h in self._hovers.values():
+            h.clear()
+        self.spectrogram.probe_hide()
 
     def _on_mouse(self, cell, pos) -> None:
+        """Hover (a trace highlighted and named at the mouse) or, with Probe, every
+        trace's value at the mouse marked (``views/hover_probe.py``); the spectrogram:
+        Probe's crosshair and the segment's peak."""
         if cell is not self._hover_cell:
-            for line in self._probe_lines():
-                line.hide()
+            self._clear_readouts()
         self._hover_cell = cell
-        if self._act_probe.isChecked():
-            text = self.probe_text(cell, pos)
-            if text:
-                self.statusBar().showMessage(text)
+        probe = self._act_probe.isChecked()
+        if cell is self.spectrogram:
+            vb = self.spectrogram.plot.getViewBox()
+            if probe and vb.sceneBoundingRect().contains(pos):
+                pt = vb.mapSceneToView(pos)
+                self.spectrogram.probe_at(pt.x(), pt.y())
+            else:
+                self.spectrogram.probe_hide()
+            return
+        h = self._hovers.get(cell)
+        if h is not None:
+            h.update(pos, probe)
 
     def probe_text(self, cell, scene_pos) -> Optional[str]:
         """The Probe readout at ``scene_pos`` in ``cell`` (and its probe lines moved

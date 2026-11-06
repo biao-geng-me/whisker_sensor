@@ -249,6 +249,7 @@ def test_grid_picker_toggles_and_syncs(app, win):
     from wavi_py.tests.test_analysis_r2 import _window
     from wavi_py.views.analysis_window import PLOTS, TIMELINE
     aw, _sels = _window(app, win, keys=("wsk:2", "wsk:3"))      # a region menu's pre-check
+    aw.plane_box.setChecked(False)                               # the compact picker
     gp, gt = aw.grids[PLOTS], aw.grids[TIMELINE]
     assert gp.checked == {2, 3}
     # the plane map's layout: LFM (W6) left of the centre gap, RFM (W11) right of it, LBM
@@ -287,7 +288,12 @@ def test_grid_legend_and_colour_by_sensor(app, win):
     names = [lab.text for _s, lab in wc.rows["mV"].legend.items]
     assert not any("A" == n.split()[-1] for n in names)              # the gauges are in the grid
     assert set(wc._grid_legend.lit) == {0, 1}
-    assert [lab.text for _s, lab in wc.rows["mg"].legend.items] == ["Accel x"]
+    # no per-variable legend (hovering a trace names it); positions light the same grid
+    assert wc.rows["mg"].legend is None or not wc.rows["mg"].legend.items
+    aw.set_checked(["pos:LFM:lift"])
+    s_lfm = aw.grids[1].grid.names.index("LFM")
+    assert _pump(app, lambda: set(wc._grid_legend.lit) == {0, 1, 2 * s_lfm + 1}, 2)
+    aw.set_checked(["pos:LFM:lift"], False)
     aw.set_color_by(SENSOR)
     assert _pump(app, lambda: wc.color_by == SENSOR and wc.renders and
                  wc.curves[(1, "wsk:0")].opts["pen"].color().rgba() == gauge_color(0).rgba(), 2)

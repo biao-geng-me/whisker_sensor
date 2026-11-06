@@ -445,6 +445,7 @@ def test_grid_position_view(app):
     app.processEvents()
     try:
         g = w.grids[PLOTS]
+        w.plane_box.setChecked(False)                     # the compact picker
         w.set_checked(["wsk:10"])
         w.grid_view.setCurrentText(POSITIONS_VIEW)
         assert w.grid_positions and g.positions

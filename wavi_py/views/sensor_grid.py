@@ -24,15 +24,17 @@ Analysis window's Positions and the Events windows' default). In the position
 view half ``2 s`` is the drag of sensor ``s``'s position and ``2 s + 1`` its
 lift, whichever gauge is wired to it; a sensor without a position has none.
 
-The plane map (``SensorGrid.set_map``, the Analysis window's Plots grid in
-the position view): the cells grow into small plots, the name strip on top
-with the D and L halves as chips at its right, and under it each position's
+The plane map (``SensorGrid.set_map``, the Analysis window's Plots grid, in
+either view: the cells are the same places): the cells grow into small plots,
+the name strip on top with the halves as chips at its right (A / B, or D / L
+in the position view), and under it each position's
 tip path over the selections (``daq/plane_overlay.py``, ``set_overlay``): drag
 toward the side's front (``GridLayout.fwd``: right on the port side, left on
 starboard, as the Dome view's plane map), lift up, every cell on one scale (the
-largest bend, the title's ``±x°``), arrows from the root to the tip at the
-scrub head (the thick one, ending in a dot) and the cursors (numbered), or
-at each path's peak. A click on the name or the plot
+largest bend, the title's ``±x°``); the recording at the plane head
+(``PlaneOverlay.head`` / ``trail``: teal, a thick arrow ending in a dot and the
+last second's trail), arrows at a relative head (Events) or the cursors
+(numbered), or at each path's peak. A click on the name or the plot
 toggles both axes, on a chip that axis. Rows without a position stay compact.
 
 ``paint_grid``: draws a grid into a rect (the picker, ``SensorGrid``, and the
@@ -50,7 +52,7 @@ from typing import Callable, Optional
 
 import numpy as np
 from PyQt6.QtCore import QPointF, QRectF, QSize, Qt, pyqtSignal
-from PyQt6.QtGui import QBrush, QColor, QFont, QPainter, QPainterPath, QPen, QPolygonF
+from PyQt6.QtGui import QBrush, QColor, QFont, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
 from PyQt6.QtWidgets import QSizePolicy, QToolTip, QWidget
 
 import pyqtgraph as pg
@@ -62,6 +64,7 @@ _UNLIT = QColor(228, 228, 228)
 _DIM = QColor(244, 244, 244)
 _EDGE = QColor(150, 150, 150)
 _TEXT = QColor(50, 50, 50)
+HEAD_RGB = (0, 130, 110)           # the plane head (teal), as its line on the timeline
 MAP_NAME_H = 14.0                  # the plane map: a cell's name strip ...
 MAP_MIN_H, MAP_MAX_H = 52.0, 120.0  # ... and its height (the cell's width + the strip, clipped)
 
@@ -231,6 +234,13 @@ def paint_grid(p: QPainter, grid: GridLayout, rect: QRectF, state: GridState,
     return rects
 
 
+@dataclass
+class _HeadArrow:
+    """The recording's tip at the plane head (drawn in the head's colour)."""
+    xy: tuple
+    label: str = "head"
+
+
 class SensorGrid(QWidget):
     """The picker (see the module doc): ``toggled(keys, on)`` with the gauge keys
     (``wsk:<col>``) a click toggles: the name strip both, a half that gauge.
@@ -253,6 +263,9 @@ class SensorGrid(QWidget):
         self.map = False                                 # the plane map (module doc)
         self.overlay = None                              # daq/plane_overlay.PlaneOverlay
         self.path_pen: Callable = lambda path: QPen(QColor(60, 60, 60), 1.2)
+        self._base = None                                # the plane map's cells and paths ...
+        self._base_key = None                            # ... and what they were drawn for
+        self._ov_version = 0
         self._rects: dict = {}
         self.setMouseTracking(True)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -272,10 +285,19 @@ class SensorGrid(QWidget):
             self.update()
 
     def set_overlay(self, overlay, path_pen: Optional[Callable] = None) -> None:
-        """The paths and arrows (``PlaneOverlay``) and the pen of each path."""
+        """The paths and arrows (``PlaneOverlay``) and the pen of each path (the paths
+        are cached: a new overlay object, or its scale, redraws them; ``refresh_paths``
+        forces it)."""
+        if overlay is not self.overlay:
+            self._ov_version += 1
         self.overlay = overlay
         if path_pen is not None:
             self.path_pen = path_pen
+        self.update()
+
+    def refresh_paths(self) -> None:
+        """Redraw the cached paths (their pens changed: colour by, sub-ranges)."""
+        self._ov_version += 1
         self.update()
 
     def _map_rows(self) -> set:
@@ -283,7 +305,7 @@ class SensorGrid(QWidget):
         return {r for s, (_c, r) in self.grid.cells.items() if self.position_of(2 * s)}
 
     def _row_heights(self, width: Optional[float] = None) -> list[float]:
-        if not (self.map and self.positions):
+        if not self.map:
             return [28.0] * self.grid.nrows
         w = (self.width() if width is None else width) - 4
         cw = (w - 3 * (self.grid.ncols - 1)) / max(1, self.grid.ncols)
@@ -318,7 +340,7 @@ class SensorGrid(QWidget):
     def paintEvent(self, ev) -> None:  # noqa: N802 — Qt naming
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-        if self.title:
+        if self.title and not self.map:
             f = QFont(p.font())
             f.setBold(True)
             p.setFont(f)
@@ -326,7 +348,7 @@ class SensorGrid(QWidget):
             p.drawText(QRectF(2, 0, self.width(), 15), Qt.AlignmentFlag.AlignLeft
                        | Qt.AlignmentFlag.AlignVCenter, self.title)
         lit = {c: self.color(c) for c in self.checked}
-        if self.map and self.positions:
+        if self.map:
             self._paint_map(p, lit)
         elif self.positions:
             self._rects = paint_grid(p, self.grid, self._area(), GridState(lit), font_px=10.0,
@@ -358,75 +380,137 @@ class SensorGrid(QWidget):
         return out
 
     def _paint_map(self, p: QPainter, lit: dict) -> None:
+        """The cells and the paths from a cached pixmap (they change with the data, not
+        while a head or cursor is dragged), then the arrows, trail and head over it."""
         rects = self.map_rects()
         self._rects = {s: (cell, name, d, l) for s, (cell, name, d, l, _pl) in rects.items()}
+        ov = self.overlay
+        dpr = self.devicePixelRatioF()
+        key = (self.width(), self.height(), dpr, id(self.grid), self.positions,
+               tuple(sorted((c, q.rgba()) for c, q in lit.items())), frozenset(self.pos_off),
+               id(ov), ov.scale if ov is not None else None, self._ov_version)
+        if key != self._base_key:
+            pm = QPixmap(int(self.width() * dpr), int(self.height() * dpr))
+            pm.setDevicePixelRatio(dpr)
+            pm.fill(Qt.GlobalColor.transparent)
+            q = QPainter(pm)
+            q.setFont(p.font())
+            self._paint_base(q, lit, rects)
+            q.end()
+            self._base, self._base_key = pm, key
+        p.drawPixmap(0, 0, self._base)
+        if ov is None or ov.scale <= 0:
+            return
+        for s, (_cell, _name, _d, _l, plot) in rects.items():
+            pos = self.position_of(2 * s)
+            if plot.height() > 8 and pos:
+                self._paint_marks(p, s, pos, plot)
+
+    def _paint_base(self, p: QPainter, lit: dict, rects: dict) -> None:
         ov = self.overlay
         f = QFont(p.font())
         f.setPixelSize(10)
         p.setFont(f)
+        if self.title:
+            fb = QFont(f)
+            fb.setBold(True)
+            p.setFont(fb)
+            p.setPen(_TEXT)
+            p.drawText(QRectF(2, 0, self.width(), 15), Qt.AlignmentFlag.AlignLeft
+                       | Qt.AlignmentFlag.AlignVCenter, self.title)
+            p.setFont(f)
         if ov is not None and ov.scale > 0 and self.title:
             p.setPen(QColor(90, 90, 90))
             p.drawText(QRectF(2, 0, self.width() - 4, 15), Qt.AlignmentFlag.AlignRight
                        | Qt.AlignmentFlag.AlignVCenter, f"plane map  ±{ov.scale:.3g}°")
         for s, (cell, name, d, lchip, plot) in rects.items():
             pos = self.position_of(2 * s)
-            for col, chip, letter in ((2 * s, d, "D"), (2 * s + 1, lchip, "L")):
+            letters = "DL" if self.positions else "AB"
+            for col, chip, letter in ((2 * s, d, letters[0]), (2 * s + 1, lchip, letters[1])):
                 c = lit.get(col)
-                off = col in self.pos_off or pos is None
+                off = (col in self.pos_off or pos is None) if self.positions else \
+                    (self.grid.absent(col) or col in self.grid.dead)
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(QBrush(c) if c is not None else QBrush(_DIM if off else _UNLIT))
                 p.drawRect(chip)
                 p.setPen(QColor(255, 255, 255) if c is not None and c.lightnessF() < 0.5
                          else QColor(170, 170, 170) if off else _TEXT)
                 p.drawText(chip, Qt.AlignmentFlag.AlignCenter, letter)
-            p.setPen(_TEXT if pos else QColor(165, 165, 165))
+            p.setPen(_TEXT if pos or not self.positions else QColor(165, 165, 165))
             p.drawText(name.adjusted(3, 0, 0, 0), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                        self.grid.names[s] if s < len(self.grid.names) else f"W{s + 1}")
             if plot.height() > 8 and pos:
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(QBrush(QColor(252, 252, 252)))
                 p.drawRect(plot)
-                self._paint_cell(p, s, pos, plot)
+                self._paint_paths(p, s, pos, plot)
             p.setPen(QPen(_EDGE, 1))
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawRect(cell)
             p.drawLine(name.bottomLeft(), QPointF(cell.right(), name.bottom()))
 
-    def _paint_cell(self, p: QPainter, s: int, pos: str, plot: QRectF) -> None:
+    def _cell_frame(self, s: int, plot: QRectF) -> tuple:
+        """(centre x, centre y, px per degree (x already toward the front), half size)."""
         cx, cy = plot.center().x(), plot.center().y()
         half = 0.44 * min(plot.width(), plot.height())
+        ov = self.overlay
+        k = half / ov.scale if ov is not None and ov.scale > 0 else 0.0
+        return cx, cy, k * self.grid.fwd.get(s, 1.0), k, half
+
+    def _qpath(self, s: int, plot: QRectF, xy: np.ndarray) -> QPainterPath:
+        cx, cy, kx, ky, _h = self._cell_frame(s, plot)
+        xy = np.asarray(xy, dtype=float)
+        return pg.arrayToQPath(cx + kx * xy[:, 0], cy - ky * xy[:, 1])
+
+    def _paint_paths(self, p: QPainter, s: int, pos: str, plot: QRectF) -> None:
+        cx, cy, kx, _k, half = self._cell_frame(s, plot)
         p.setPen(QPen(QColor(222, 222, 222), 1))
         p.drawLine(QPointF(plot.left() + 2, cy), QPointF(plot.right() - 2, cy))
         p.drawLine(QPointF(cx, plot.top() + 2), QPointF(cx, plot.bottom() - 2))
         fwd = self.grid.fwd.get(s, 1.0)
-        # which way is forward: a small tick on the front edge
-        p.drawLine(QPointF(cx + fwd * half, cy - 3), QPointF(cx + fwd * half, cy + 3))
+        p.drawLine(QPointF(cx + fwd * half, cy - 3), QPointF(cx + fwd * half, cy + 3))  # front
         ov = self.overlay
         if ov is None or ov.scale <= 0:
             return
-        k = half / ov.scale
-
-        def at(xy) -> QPointF:
-            return QPointF(cx + fwd * k * float(xy[0]), cy - k * float(xy[1]))
         p.save()
         p.setClipRect(plot)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         p.setBrush(Qt.BrushStyle.NoBrush)
         for path in ov.paths.get(pos, []):
+            if len(path.xy) < 2:
+                continue
             pen = QPen(self.path_pen(path))
             col = QColor(pen.color())
             col.setAlpha(150)
             pen.setColor(col)
             p.setPen(pen)
-            pts = path.xy
-            if len(pts) > 1:
-                p.drawPolyline(QPolygonF([at(q) for q in pts]))
+            p.drawPath(self._qpath(s, plot, path.xy))
+        p.restore()
+
+    def _paint_marks(self, p: QPainter, s: int, pos: str, plot: QRectF) -> None:
+        """The arrows (cursors, a relative head), the recording's trail and head."""
+        ov = self.overlay
+        cx, cy, kx, ky, _half = self._cell_frame(s, plot)
+
+        def at(xy) -> QPointF:
+            return QPointF(cx + kx * float(xy[0]), cy - ky * float(xy[1]))
+        p.save()
+        p.setClipRect(plot)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setBrush(Qt.BrushStyle.NoBrush)
         o = QPointF(cx, cy)
-        for ar in ov.arrows.get(pos, []):
-            pen = QPen(self.path_pen(ar))
+        arrows = list(ov.arrows.get(pos, []))
+        trail = ov.trail.get(pos)
+        if trail is not None and len(trail) > 1:
+            p.setPen(QPen(QColor(*HEAD_RGB, 120), 1.4))
+            p.drawPath(self._qpath(s, plot, trail))
+        if pos in ov.head:
+            arrows.append(_HeadArrow(ov.head[pos]))
+        for ar in arrows:
+            pen = QPen(QColor(*HEAD_RGB)) if isinstance(ar, _HeadArrow) else QPen(self.path_pen(ar))
             pen.setStyle(Qt.PenStyle.SolidLine)
-            head = ar.label == "head"
-            pen.setWidthF(2.6 if head else 1.6)
+            is_head = ar.label == "head"
+            pen.setWidthF(2.6 if is_head else 1.6)
             p.setPen(pen)
             tip = at(ar.xy)
             p.drawLine(o, tip)
@@ -434,12 +518,12 @@ class SensorGrid(QWidget):
             r = math.hypot(dx, dy)
             if r > 4:
                 ux, uy = dx / r, dy / r
-                head = QPainterPath(tip)
-                head.lineTo(tip.x() - 5 * ux + 3 * uy, tip.y() - 5 * uy - 3 * ux)
-                head.lineTo(tip.x() - 5 * ux - 3 * uy, tip.y() - 5 * uy + 3 * ux)
-                head.closeSubpath()
-                p.fillPath(head, pen.color())
-            if head:
+                tri = QPainterPath(tip)
+                tri.lineTo(tip.x() - 5 * ux + 3 * uy, tip.y() - 5 * uy - 3 * ux)
+                tri.lineTo(tip.x() - 5 * ux - 3 * uy, tip.y() - 5 * uy + 3 * ux)
+                tri.closeSubpath()
+                p.fillPath(tri, pen.color())
+            if is_head:
                 p.setBrush(QBrush(pen.color()))
                 p.drawEllipse(tip, 2.5, 2.5)
                 p.setBrush(Qt.BrushStyle.NoBrush)
@@ -452,12 +536,14 @@ class SensorGrid(QWidget):
 
     def hit(self, pos: QPointF) -> list[int]:
         """The gauge columns a click at ``pos`` toggles (absent ones left out)."""
-        if self.map and self.positions:
+        if self.map:
             for s, (cell, _name, d, lchip, _plot) in self.map_rects().items():
                 if cell.contains(pos):
                     cols = [2 * s] if d.contains(pos) else [2 * s + 1] if lchip.contains(pos) \
                         else [2 * s, 2 * s + 1]
-                    return [c for c in cols if self.position_of(c) is not None]
+                    if self.positions:
+                        return [c for c in cols if self.position_of(c) is not None]
+                    return [c for c in cols if not self.grid.absent(c)]
             return []
         for s, (cell, name, a, b) in self._rects.items():
             if not cell.contains(pos):

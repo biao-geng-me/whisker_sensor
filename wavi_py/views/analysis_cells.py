@@ -580,6 +580,16 @@ class _RowsCell(_Cell):
     def _sel_text(s) -> str:
         return f"#{s.number}  {s.t0:.2f} .. {s.t1:.2f} s"
 
+    def _grid_col(self, var) -> Optional[int]:
+        """The grid half a variable lights in the grid legend: a gauge its own, a
+        position the half of its cell (drag left, lift right), whichever the
+        picker's view; None: not on the grid."""
+        if var.source == WSK:
+            return var.col
+        if var.source == "pos" and self.grid is not None and var.pos in self.grid.names:
+            return 2 * self.grid.names.index(var.pos) + (var.axis == "lift")
+        return None
+
     def _legend_color(self, var, shades: dict) -> QColor:
         """A variable's legend colour: its shade in grey (by selection), else its own."""
         if self.color_by == SENSOR:
@@ -602,7 +612,7 @@ class _RowsCell(_Cell):
             return
         self._legend_key = key
         self._sel_labels = {}
-        gauges = [v for v in ds.variables if v.source == WSK]
+        gauges = [v for v in ds.variables if self._grid_col(v) is not None]
         for i, u in enumerate(units):
             p = self.rows[u]
             if p.legend is None:
@@ -619,13 +629,10 @@ class _RowsCell(_Cell):
                     gl = self._grid_legend = GridLegend(self.grid)
                     gl.setParentItem(p.getViewBox())
                     gl.anchor(itemPos=(1, 0), parentPos=(1, 0), offset=(-10, 5))
-                gl.set_lit({v.col: self._legend_color(v, shades) for v in gauges})
+                gl.set_lit({self._grid_col(v): self._legend_color(v, shades) for v in gauges})
                 gl.setToolTip("\n".join(v.label for v in gauges))
                 gl_w = gl.width() + 6
-            for v in ds.variables:
-                if v.unit == u and not (grid_here and v.source == WSK):
-                    p.legend.addItem(pg.PlotDataItem(pen=pg.mkPen(self._legend_color(v, shades),
-                                                                  width=3)), v.label)
+            # no per-variable legend: hovering a trace names it (views/hover_probe.py)
             if i == 0:
                 self._top_legend(p, ds, subs)
             p.legend.setOffset((-10 - gl_w, 5))
@@ -789,10 +796,10 @@ class WaveCell(_RowsCell):
         self.hovered_sub: Optional[int] = None
         self._bands: dict[tuple, SubBand] = {}       # (row unit, number) -> its band
         self.title = self._add_title(
-            "Waveform · click a trace: the spectrogram shows it (drawn thick) · click the thick"
-            " one again: a cursor there")
-        self.glw.setToolTip("Click a trace to show it in the spectrogram (it is then drawn"
-                            " thick); click the thick trace again to add a cursor there")
+            "Waveform · click: a cursor there · click a trace: the spectrogram shows it (drawn"
+            " thick)")
+        self.glw.setToolTip("Click to add a cursor there (away from the traces, or on the thick"
+                            " one); click another trace to show it in the spectrogram")
 
     def x_plot(self) -> Optional[pg.PlotItem]:
         return next(iter(self.rows.values()), None)
@@ -1033,7 +1040,7 @@ class SpectrumCell(_RowsCell):
         h.new_row()
         self.log_f = h.add("", QCheckBox("log f"))
         self.log_a = h.add("", QCheckBox("log amp"))
-        self.log_a.setChecked(True)                   # the default: spectra span decades
+        self.log_a.setChecked(False)                  # the default: linear (peaks read directly)
         self.log_a.setToolTip("Log amplitude axis")
         self.f_lo = h.add("f", _spin(0.0, 1e5, 0.0, 2))
         self.f_hi = h.add("..", _spin(0.0, 1e5, 0.0, 2, special="Nyquist"))
@@ -1205,6 +1212,15 @@ class SpecgramCell(_Cell):
         self.img.setColorMap(self._cmap)
         self.plot.addItem(self.img)
         self.probe = probe_line(self.plot)
+        self.hprobe = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen((255, 255, 255, 170)))
+        self.pdots = pg.ScatterPlotItem(size=8, pen=pg.mkPen("k", width=1))
+        self.ptext = pg.TextItem(color=(20, 20, 20), fill=pg.mkBrush(255, 255, 255, 225), anchor=(0, 1))
+        self.peak_text = pg.TextItem(color=(150, 0, 0), fill=pg.mkBrush(255, 255, 255, 225),
+                                     anchor=(0, 0.5))
+        for it, z in ((self.hprobe, 25), (self.pdots, 26), (self.ptext, 27), (self.peak_text, 27)):
+            it.setZValue(z)
+            it.hide()
+            self.plot.addItem(it, ignoreBounds=True)
         hook_click(self.plot.getViewBox(), self._click)
         self.pick: Optional[tuple] = None             # (sel number, var key)
         self.bands: list[SpecBand] = []               # the sub-ranges, highlighted
@@ -1343,6 +1359,42 @@ class SpecgramCell(_Cell):
         ev.accept()
         self.clicked.emit(float(vb.mapSceneToView(ev.scenePos()).x()))
         return True
+
+    def probe_hide(self) -> None:
+        for it in (self.probe, self.hprobe, self.pdots, self.ptext, self.peak_text):
+            it.hide()
+
+    def probe_at(self, x: float, y: float) -> Optional[tuple]:
+        """Probe at view (t, f): a crosshair with t, f and the amplitude there next to
+        it, and the segment's peak (above 0 Hz) marked with its f and amplitude.
+        Returns ((f, amp) here, (f, amp) of the peak) or None off the tile."""
+        self.probe_hide()
+        if self.data is None:
+            return None
+        col = spectrogram_column(self.data, x)
+        f = self.data[1]
+        if col is None or not len(f) or y < f[0] - 0.5 * (f[1] - f[0] if len(f) > 1 else 1) \
+                or y > f[-1]:
+            return None
+        cf, amp, centre = col
+        fi = int(np.argmin(np.abs(f - y)))
+        pos = np.flatnonzero(f > 0)
+        pk = int(pos[np.argmax(amp[pos])]) if len(pos) else fi
+
+        def val(a: float) -> str:
+            return f"{float(to_db(np.array([a]))[0]):.1f} dB" if self.db else f"{a:.4g} {self.unit}"
+        px_x, _px_y = self.plot.getViewBox().viewPixelSize()
+        self.probe.setPos(x)
+        self.hprobe.setPos(f[fi])
+        self.pdots.setData([x, centre], [f[fi], f[pk]],
+                           brush=[pg.mkBrush(255, 255, 255), pg.mkBrush(220, 30, 30)])
+        self.ptext.setText(f"t = {x:.3f} s · f = {f[fi]:.2f} Hz · {val(amp[fi])}")
+        self.ptext.setPos(x + 8 * px_x, f[fi])
+        self.peak_text.setText(f"peak {f[pk]:.2f} Hz · {val(amp[pk])}")
+        self.peak_text.setPos(centre + 8 * px_x, f[pk])
+        for it in (self.probe, self.hprobe, self.pdots, self.ptext, self.peak_text):
+            it.show()
+        return (f[fi], amp[fi]), (f[pk], amp[pk])
 
     def probe_text(self, x: float, y: float) -> Optional[str]:
         """t, f and the amplitude of the tile under the mouse."""
