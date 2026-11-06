@@ -43,7 +43,9 @@ import pyqtgraph as pg
 
 from wavi_py.daq.analysis import UNIT_GROUPS, Dataset
 from wavi_py.replay.rov import MODE_KEY
-from wavi_py.views.analysis_cells import AXIS_W, _Cell, hook_click, probe_line
+from wavi_py.daq.series import WSK
+from wavi_py.views.analysis_cells import AXIS_W, SENSOR, SELECTION, _Cell, hook_click, probe_line
+from wavi_py.views.sensor_grid import gauge_color
 from wavi_py.views.selections import SelectionModel, SelectionOverlay, _hook_drag
 from wavi_py.views.whisker_plots import _show_grid
 
@@ -83,6 +85,7 @@ class TimelineCell(_Cell):
         self._anchor: Optional[pg.PlotItem] = None       # the top row shown: the X link
         self.zoomed = False
         self._extent: Optional[tuple] = None
+        self.color_by = SELECTION                        # sensor: the gauges in their own colour
         self._mode_items: list = []                      # the mode band's spans and labels
         self._mode_key = None
         self._show_rows([_BARE])
@@ -242,7 +245,8 @@ class TimelineCell(_Cell):
         n_px = max(50, int(self._anchor.getViewBox().width()) or 600)
         v0 = None if ds.v0 is None else np.asarray(ds.v0).tobytes()
         inputs = (id(source.series) if source is not None else None, extent, round(x0, 6),
-                  round(x1, 6), n_px, tuple(v.key for v in ds.variables), ds.despike, v0, ds.scale)
+                  round(x1, 6), n_px, tuple(v.key for v in ds.variables), ds.despike, v0, ds.scale,
+                  self.color_by)
         if inputs == self._last:
             return
         self._last = inputs
@@ -260,8 +264,9 @@ class TimelineCell(_Cell):
                 c.unit, c.label = v.unit, v.label
                 self._plots[v.unit].addItem(c)
                 self.curves[v.key] = c
-            c.setPen(pg.mkPen(TIMELINE_COLORS[order.index(v.key) % len(TIMELINE_COLORS)],
-                              width=1.5 if v.unit == "cm" else 1))
+            color = gauge_color(v.col) if self.color_by == SENSOR and v.source == WSK else \
+                TIMELINE_COLORS[order.index(v.key) % len(TIMELINE_COLORS)]
+            c.setPen(pg.mkPen(color, width=1.5 if v.unit == "cm" else 1))
             c.setData(tr.t, tr.y)
             seen.add(v.key)
         if any(v.key == MODE_KEY for v in ds.variables) and source is not None:
@@ -321,7 +326,7 @@ class TimelineCell(_Cell):
             c.setData([], [])
 
     def _legends(self, ds: Dataset) -> None:
-        key = tuple(v.key for v in ds.variables)
+        key = (tuple(v.key for v in ds.variables), self.color_by)
         if getattr(self, "_legend_key", None) == key:
             return
         self._legend_key = key

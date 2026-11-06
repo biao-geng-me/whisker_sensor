@@ -1396,7 +1396,8 @@ class MainWindow(QMainWindow):
             win.reset_state(self._analysis_n)
         else:
             win = AnalysisWindow(self._selections, self.analysis_variables, self._analysis_n,
-                                 self._timeline_source, self._replay)
+                                 self._timeline_source, self._replay,
+                                 dome_map_fn=lambda: self._dome_map)
             win.closed.connect(lambda w=win: self._on_analysis_closed(w))
             win.activated.connect(self._on_analysis_activated)
             self._add_chrome(win)

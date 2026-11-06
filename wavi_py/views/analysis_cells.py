@@ -6,11 +6,22 @@ scale) handed to ``render``; the window decides when (``views/analysis_window.py
 and every cell does no work when its inputs did not change (``renders`` /
 ``computed`` count it, for the tests).
 
-Encoding (waveform and spectrum): colour is the selection (its region's
-colour); the variables in a row are told apart by the shade of it, dark to
-light in the order they are listed (``shade_levels``). The legends: each row's
-variables in their shade (grey), the top row's also the selections in their
-colour. Rows are unit groups (mV, mg, mrad/s, deg, cm).
+Encoding (waveform and spectrum), by the window's Colour by:
+
+- selection (default): colour is the selection (its region's colour); the
+  variables in a row are told apart by the shade of it, dark to light in the
+  order they are listed (``shade_levels``);
+- sensor: each gauge has its fixed colour (``sensor_grid.gauge_color``, by its
+  index: it keeps it whatever else is shown), the other variables a fixed dark
+  colour by their place in their row (``OTHER_COLORS``), and the selections are
+  told apart by the line style, solid, dash, dot, dash-dot in their order
+  (``LINE_STYLES``).
+
+The legends: the gauges' row (mV) has the plane-map grid in miniature
+(``sensor_grid.GridLegend``), the plotted gauges lit in their shade (grey) or
+their colour; the other rows list their variables; the top row's also lists
+the selections in their colour (or line style). Rows are unit groups (mV, mg,
+mrad/s, deg, cm, and the ROV's).
 
 - ``WaveCell`` (top left, the former Compare tab): relative time, min / max
   decimated to the plot width (``Dataset.traces``). With the window's Select on,
@@ -34,17 +45,23 @@ colour. Rows are unit groups (mV, mg, mrad/s, deg, cm).
   on top keeps the plot as wide as the waveform's rows.
 - ``CursorCell`` (bottom right): the picked tile's spectrogram column at each
   cursor (``spectrogram_column``), one curve per cursor in the cursor's colour,
-  legend "cursor number  t"; dB follows the spectrogram's dB box.
+  legend "t=12.34 s (segment at ...)"; dB follows the spectrogram's dB box.
 
-Cursors are numbered vertical lines at a relative time (``CursorLine``, kept
+Cursors are vertical lines at a relative time, labelled with that time
+(``t=12.34 s`` from the selection's start, ``cursor_text``; the label follows a
+drag; the colour, kept per cursor, tells them apart) (``CursorLine``, kept
 in sync per plot by ``CursorLines``), drawn in every waveform row and in the
 spectrogram: drag to move, right-click to delete, Del deletes the hovered one.
 Their colours (``CURSOR_COLORS``: saturated red, green, azure, magenta, black)
 are none of the selections' muted ones, and solid (no dash styles); in the
 spectrogram they get a white outline to stand out on its colours.
 
-Every cell has a header with a collapse button at its right
-(``collapseRequested``; ``TITLE`` names it on the window's restore bar).
+Every cell has a header with an expand and a collapse button at its right
+(``expandRequested``: the cell takes the whole 2x2, again: back;
+``collapseRequested``; ``TITLE`` names it on the window's restore bar).
+
+Zoom box (the window's toggle, Z): ``set_zoom_box`` puts the cell's plots in
+pyqtgraph's rectangle mode (a drag zooms to the box; rows made later follow).
 
 Navigation (the window's keys and Probe) goes through ``nav_plots`` (the plots
 a Y key may act on), ``x_plot`` (the one X keys scale), ``on_manual`` (a key
@@ -68,6 +85,7 @@ from wavi_py.daq.analysis import UNIT_GROUPS, Dataset, spectrogram_column
 from wavi_py.daq.series import WSK
 from wavi_py.views.render_sched import GraphicsLayoutWidget
 from wavi_py.views.selections import sel_color
+from wavi_py.views.sensor_grid import GridLegend, gauge_color
 from wavi_py.views.spectral_base import (_DB_LEVELS, _LIN_LEVELS, auto_levels, show_level_boxes,
                                          to_db)
 from wavi_py.views.whisker_plots import _show_grid
@@ -84,10 +102,24 @@ OVERLAPS = (0.0, 0.5, 0.75, 0.9)
 PICK_PX = 5                                    # a click this near a trace picks it
 # cursors: saturated, none of the selections' colours (SEL_COLORS) nor the grey sub-range
 CURSOR_COLORS = ((215, 25, 28), (0, 150, 0), (0, 110, 255), (210, 0, 210), (0, 0, 0))
+SELECTION, SENSOR = "selection", "sensor"            # the window's Colour by
+LINE_STYLES = (Qt.PenStyle.SolidLine, Qt.PenStyle.DashLine, Qt.PenStyle.DotLine,
+               Qt.PenStyle.DashDotLine)
+# Colour by sensor: the non-gauge variables of a row, by their place in it
+OTHER_COLORS = ((40, 90, 170), (70, 70, 70), (20, 120, 60), (150, 30, 30), (100, 60, 150),
+                (0, 110, 120), (120, 110, 0), (190, 80, 150))
 
 
 def cursor_color(number: int) -> QColor:
     return QColor(*CURSOR_COLORS[(number - 1) % len(CURSOR_COLORS)])
+
+
+CURSOR_FMT = "t={value:.2f} s"
+
+
+def cursor_text(t: float) -> str:
+    """A cursor's label and legend name: its time from the selection's start."""
+    return CURSOR_FMT.format(value=t)
 
 
 def shade_levels(n: int) -> list[Optional[float]]:
@@ -112,6 +144,11 @@ def shades_of(ds: Dataset) -> dict:
         vs = [v for v in ds.variables if v.unit == u]
         out.update(zip((v.key for v in vs), shade_levels(len(vs))))
     return out
+
+
+def line_style(i: int) -> Qt.PenStyle:
+    """The ``i``-th selection's line style (Colour by sensor)."""
+    return LINE_STYLES[i % len(LINE_STYLES)]
 
 
 def sub_text(sub) -> str:
@@ -168,7 +205,7 @@ class CursorLine(pg.InfiniteLine):
     def __init__(self, number: int, t: float, owner, halo: bool = False):
         c = cursor_color(number)
         super().__init__(pos=t, angle=90, movable=True, pen=pg.mkPen(c, width=2),
-                         hoverPen=pg.mkPen(c, width=4), label=str(number),
+                         hoverPen=pg.mkPen(c, width=4), label=CURSOR_FMT,
                          labelOpts={"position": 0.94, "color": c,
                                     "fill": pg.mkBrush(255, 255, 255, 220)})
         self.number, self._owner, self._halo = number, owner, halo
@@ -218,6 +255,7 @@ class CursorLines:
                 got[1].blockSignals(True)
                 got[1].setValue(t)
                 got[1].blockSignals(False)
+                got[1].label.valueChanged()          # its time label (the signal was blocked)
 
 
 # ----------------------------------------------------------------------
@@ -249,7 +287,15 @@ class _Header(QWidget):
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(1)
         outer.addLayout(v, 1)
-        # the cell's collapse button, top right (the window restores it from its bar)
+        # the cell's expand and collapse buttons, top right (the window restores it from its bar)
+        self.expand_btn = QToolButton()
+        self.expand_btn.setText("⤢")
+        self.expand_btn.setAutoRaise(True)
+        self.expand_btn.setCheckable(True)
+        self.expand_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.expand_btn.setToolTip("Expand: this cell takes the whole 2x2 (again, or the bar"
+                                   " above the plots: back to the layout before)")
+        outer.addWidget(self.expand_btn, 0, Qt.AlignmentFlag.AlignTop)
         self.collapse_btn = QToolButton()
         self.collapse_btn.setText("–")
         self.collapse_btn.setAutoRaise(True)
@@ -285,6 +331,7 @@ class _Cell(QWidget):
 
     changed = pyqtSignal()                       # an option: redraw
     collapseRequested = pyqtSignal()             # its header's collapse button
+    expandRequested = pyqtSignal()               # its header's expand button
     TITLE = ""                                   # the window's restore bar names it so
 
     def __init__(self, parent: Optional[QWidget] = None):
@@ -307,10 +354,12 @@ class _Cell(QWidget):
         self._pages.addWidget(self.glw)
         self._last: Optional[tuple] = None           # the last render's inputs
         self.renders = 0                             # renders that did any work (tests)
+        self.zoom_box = False                        # a drag zooms to a box (else pans)
 
     def _add_header(self, sub_line: bool = True) -> _Header:
         self.header = _Header(sub_line=sub_line)
         self.header.collapse_btn.clicked.connect(self.collapseRequested.emit)
+        self.header.expand_btn.clicked.connect(lambda _on: self.expandRequested.emit())
         self._lay.insertWidget(0, self.header)
         return self.header
 
@@ -337,6 +386,17 @@ class _Cell(QWidget):
         """The plots page is up (not the hint) and the cell is not collapsed."""
         return (self._pages.currentIndex() == 1 and not self.isHidden() and self.width() > 1
                 and self.height() > 1)
+
+    def set_zoom_box(self, on: bool) -> None:
+        self.zoom_box = bool(on)
+        for p in self._zoom_plots():
+            self._apply_zoom_box(p)
+
+    def _apply_zoom_box(self, p: pg.PlotItem) -> None:
+        p.getViewBox().setMouseMode(pg.ViewBox.RectMode if self.zoom_box else pg.ViewBox.PanMode)
+
+    def _zoom_plots(self) -> list[pg.PlotItem]:
+        return self.nav_plots()
 
     # navigation (the window's keys / Probe)
     def nav_plots(self) -> list[pg.PlotItem]:
@@ -371,9 +431,17 @@ class _RowsCell(_Cell):
         self._sel_labels: dict = {}                      # selection number -> its legend label
         self.picked: Optional[tuple] = None              # (sel number, var key) drawn thicker
         self._auto = True                                # X follows the data
+        self.color_by = SELECTION
+        self.grid = None                                 # the sensors' GridLayout (legends)
+        self._grid_legend: Optional[GridLegend] = None
+        self._order: dict = {}                           # var key -> its place in its row
+        self._sel_index: dict = {}                       # sel number -> its place
 
     def nav_plots(self) -> list[pg.PlotItem]:
         return list(self.rows.values()) if self._pages.currentIndex() == 1 else []
+
+    def _zoom_plots(self) -> list[pg.PlotItem]:
+        return list(self.rows.values())
 
     def on_manual(self) -> None:
         self._auto = False
@@ -387,6 +455,7 @@ class _RowsCell(_Cell):
     def _rebuild_rows(self, units: list[str]) -> None:
         self.glw.clear()
         self.rows, self.curves, self.probes, self._legend_key = {}, {}, {}, ()
+        self._grid_legend = None
         first = None
         for i, u in enumerate(units):
             p = self.glw.addPlot(row=i, col=0)
@@ -400,6 +469,7 @@ class _RowsCell(_Cell):
             if first is None:
                 first = p
             p.getViewBox().sigRangeChangedManually.connect(self._on_manual)
+            self._apply_zoom_box(p)
             self.rows[u] = p
             self.probes[u] = probe_line(p)
             self._row_added(p)
@@ -423,24 +493,48 @@ class _RowsCell(_Cell):
         self._pages.setCurrentIndex(1)
         return units
 
-    def _curve(self, sel, var, lightness) -> pg.PlotCurveItem:
-        key = (sel.number, var.key)
+    def _index(self, ds: Dataset) -> None:
+        """Each variable's place in its row and each selection's place (the styles)."""
+        self._order, n = {}, {}
+        for v in ds.variables:
+            self._order[v.key] = n.get(v.unit, 0)
+            n[v.unit] = self._order[v.key] + 1
+        self._sel_index = {s.number: i for i, s in enumerate(ds.selections)}
+
+    def var_color(self, var, lightness=None) -> QColor:
+        """A variable's colour by sensor (a gauge's own; else by its place in its row)."""
+        if var.source == WSK:
+            return gauge_color(var.col)
+        return QColor(*OTHER_COLORS[self._order.get(var.key, 0) % len(OTHER_COLORS)])
+
+    def _pen_of(self, number: int, var, lightness, style_i: Optional[int] = None) -> tuple:
+        """(colour, line style) of a trace (see the module doc)."""
+        if self.color_by == SENSOR:
+            i = self._sel_index.get(number, 0) if style_i is None else style_i
+            return self.var_color(var), line_style(i)
+        return shade(sel_color(number), lightness), (Qt.PenStyle.SolidLine if style_i is None
+                                                      else line_style(style_i))
+
+    def _curve(self, sel, var, lightness, key: Optional[tuple] = None,
+               style_i: Optional[int] = None, label: str = "") -> pg.PlotCurveItem:
+        key = key or (sel.number, var.key)
         c = self.curves.get(key)
         if c is None:
             c = pg.PlotCurveItem(connect="finite")
-            c.unit, c.look, c.label = var.unit, None, f"{var.label} #{sel.number}"
+            c.unit, c.look, c.label = var.unit, None, label or f"{var.label} #{sel.number}"
             self.rows[var.unit].addItem(c)
             self.curves[key] = c
-        self._style(key, c, sel.number, lightness)
+        color, style = self._pen_of(sel.number, var, lightness, style_i)
+        self._style(key, c, (color.rgba(), style))
         return c
 
-    def _style(self, key: tuple, c: pg.PlotCurveItem, number: int, lightness) -> None:
-        """The pen: the selection's colour in the variable's shade (the checked order);
-        the picked trace (waveform) thicker and on top."""
-        look = (number, lightness, key == self.picked)
+    def _style(self, key: tuple, c: pg.PlotCurveItem, pen: tuple) -> None:
+        """The pen ``(rgba, style)``; the picked trace (waveform) thicker and on top."""
+        look = (pen, key[:2] == self.picked)
         if c.look != look:
-            c.setPen(pg.mkPen(shade(sel_color(number), lightness), width=2.5 if look[2] else 1))
-            c.setZValue(5 if look[2] else 0)
+            c.setPen(pg.mkPen(QColor.fromRgba(pen[0]), width=2.5 if look[1] else 1,
+                              style=pen[1]))
+            c.setZValue(5 if look[1] else 0)
             c.look = look
 
     def _drop(self, seen: set) -> None:
@@ -452,11 +546,19 @@ class _RowsCell(_Cell):
     def _sel_text(s) -> str:
         return f"#{s.number}  {s.t0:.2f} .. {s.t1:.2f} s"
 
+    def _legend_color(self, var, shades: dict) -> QColor:
+        """A variable's legend colour: its shade in grey (by selection), else its own."""
+        if self.color_by == SENSOR:
+            return self.var_color(var)
+        return shade(QColor(128, 128, 128), shades[var.key])
+
     def _legends(self, ds: Dataset, shades: dict, units: list[str]) -> None:
-        """Rebuilt when the variables or selections change; an edge drag only re-labels
-        (a rebuild per drag step would cost more than the curves)."""
+        """Rebuilt when the variables, the selections or the colouring change; an edge
+        drag only re-labels (a rebuild per drag step would cost more than the curves).
+        The gauges' row has the grid legend instead of their names."""
         key = (tuple(v.key for v in ds.variables), tuple(s.number for s in ds.selections),
-               tuple(units))
+               tuple(units), self.color_by, id(self.grid),
+               tuple(sorted((k, v) for k, v in shades.items() if v is not None)))
         if key == self._legend_key:
             for s in ds.selections:
                 lab = self._sel_labels.get(s.number)
@@ -466,21 +568,42 @@ class _RowsCell(_Cell):
             return
         self._legend_key = key
         self._sel_labels = {}
+        gauges = [v for v in ds.variables if v.source == WSK]
         for i, u in enumerate(units):
             p = self.rows[u]
             if p.legend is None:
                 p.addLegend(offset=(-10, 5), labelTextColor="k",
                             brush=pg.mkBrush(255, 255, 255, 210), pen=pg.mkPen(180, 180, 180))
             p.legend.clear()
+            grid_here = u == "mV" and self.grid is not None and gauges
+            gl_w = 0.0
+            if grid_here:
+                gl = self._grid_legend
+                if gl is None or gl.grid is not self.grid or gl.parentItem() is not p.getViewBox():
+                    if gl is not None and gl.scene() is not None:
+                        gl.scene().removeItem(gl)
+                    gl = self._grid_legend = GridLegend(self.grid)
+                    gl.setParentItem(p.getViewBox())
+                    gl.anchor(itemPos=(1, 0), parentPos=(1, 0), offset=(-10, 5))
+                gl.set_lit({v.col: self._legend_color(v, shades) for v in gauges})
+                gl.setToolTip("\n".join(v.label for v in gauges))
+                gl_w = gl.width() + 6
             for v in ds.variables:
-                if v.unit == u:
-                    grey = shade(QColor(128, 128, 128), shades[v.key])
-                    p.legend.addItem(pg.PlotDataItem(pen=pg.mkPen(grey, width=3)), v.label)
+                if v.unit == u and not (grid_here and v.source == WSK):
+                    p.legend.addItem(pg.PlotDataItem(pen=pg.mkPen(self._legend_color(v, shades),
+                                                                  width=3)), v.label)
             if i == 0:
-                for s in ds.selections:
-                    p.legend.addItem(pg.PlotDataItem(pen=pg.mkPen(sel_color(s.number), width=3)),
-                                     self._sel_text(s))
+                for j, s in enumerate(ds.selections):
+                    pen = (pg.mkPen((40, 40, 40), width=2, style=line_style(j))
+                           if self.color_by == SENSOR else pg.mkPen(sel_color(s.number), width=3))
+                    p.legend.addItem(pg.PlotDataItem(pen=pen), self._sel_text(s))
                     self._sel_labels[s.number] = p.legend.items[-1][1]
+            p.legend.setOffset((-10 - gl_w, 5))
+            p.legend.setVisible(bool(p.legend.items))
+        if self._grid_legend is not None and not (self.grid is not None and gauges and "mV" in units):
+            if self._grid_legend.scene() is not None:
+                self._grid_legend.scene().removeItem(self._grid_legend)
+            self._grid_legend = None
 
     def probe_items(self, plot: pg.PlotItem):
         unit = next((u for u, p in self.rows.items() if p is plot), None)
@@ -541,7 +664,7 @@ class WaveCell(_RowsCell):
         self.picked = pick
         for key, c in self.curves.items():
             if c.look is not None:
-                self._style(key, c, c.look[0], c.look[1])
+                self._style(key, c, c.look[0])
 
     def _row_added(self, p: pg.PlotItem) -> None:
         _hook_drag(p.getViewBox(), self._drag)
@@ -643,11 +766,13 @@ class WaveCell(_RowsCell):
         v0 = None if ds.v0 is None else np.asarray(ds.v0).tobytes()
         inputs = (n_px, tuple((s.number, s.t0, s.t1, id(s.source)) for s in ds.selections),
                   tuple(v.key for v in ds.variables), ds.despike, v0, ds.scale,
-                  tuple(sorted(shades.items(), key=lambda kv: kv[0])), self._auto)
+                  tuple(sorted(shades.items(), key=lambda kv: kv[0])), self._auto,
+                  self.color_by, id(self.grid))
         if inputs == self._last:
             return
         self._last = inputs
         self.renders += 1
+        self._index(ds)
         seen = set()
         for tr in ds.traces(n_px):
             seen.add((tr.sel.number, tr.var.key))
@@ -727,11 +852,12 @@ class SpectrumCell(_RowsCell):
         inputs = (tuple((s.number, _input_key(ds, s, v, win, det), v.key) for s, v in ds.pairs()),
                   tuple(sorted(shades.items(), key=lambda kv: kv[0])),
                   self.log_f.isChecked(), self.log_a.isChecked(),
-                  self.f_lo.value(), self.f_hi.value(), self._auto)
+                  self.f_lo.value(), self.f_hi.value(), self._auto, self.color_by, id(self.grid))
         if inputs == self._last:
             return                                    # nothing changed: no work
         self._last = inputs
         self.renders += 1
+        self._index(ds)
         units = self._units(ds)
         lf, la = self.log_f.isChecked(), self.log_a.isChecked()
         seen, fmax, fmin_pos = set(), 0.0, np.inf
@@ -933,6 +1059,9 @@ class SpecgramCell(_Cell):
     def nav_plots(self) -> list[pg.PlotItem]:
         return [self.plot] if self._pages.currentIndex() == 1 else []
 
+    def _zoom_plots(self) -> list[pg.PlotItem]:
+        return [self.plot]
+
     def reset_view(self) -> None:
         super().reset_view()
 
@@ -1040,6 +1169,9 @@ class CursorCell(_Cell):
     def nav_plots(self) -> list[pg.PlotItem]:
         return [self.plot] if self._pages.currentIndex() == 1 else []
 
+    def _zoom_plots(self) -> list[pg.PlotItem]:
+        return [self.plot]
+
     def on_manual(self) -> None:
         self._auto = False
 
@@ -1051,7 +1183,7 @@ class CursorCell(_Cell):
     def probe_items(self, plot: pg.PlotItem):
         if plot is not self.plot:
             return None
-        items = [(f"cursor {n}", self._unit, c) for n, c in self.curves.items()]
+        items = [(f"cursor at {cursor_text(c.t)}", self._unit, c) for c in self.curves.values()]
         return "f", "Hz", (lambda x: x), (lambda y: y), items
 
     def render(self, spec: SpecgramCell, cursors) -> None:
@@ -1091,14 +1223,15 @@ class CursorCell(_Cell):
             if c is None:
                 c = self.curves[n] = pg.PlotCurveItem(pen=pg.mkPen(cursor_color(n), width=1.5))
                 self.plot.addItem(c)
+            c.t = t
             if col is None:
                 c.setData([], [])
-                labels[n] = (c, f"{n}  t = {t:.2f} s: outside the tile")
+                labels[n] = (c, f"{cursor_text(t)}: outside the tile")
                 continue
             self.columns[n] = col
             f, a, centre = col
             c.setData(f, to_db(a) if spec.db else a)
-            labels[n] = (c, f"{n}  t = {t:.2f} s (segment at {centre:.2f} s)")
+            labels[n] = (c, f"{cursor_text(t)} (segment at {centre:.2f} s)")
         if relabel:
             for (_sample, lab), n in zip(self.plot.legend.items, sorted(labels)):
                 if lab.text != labels[n][1]:

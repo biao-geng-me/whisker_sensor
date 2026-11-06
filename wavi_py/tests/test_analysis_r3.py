@@ -25,6 +25,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
+from PyQt6.QtCore import Qt  # noqa: E402
 from PyQt6.QtWidgets import QApplication, QMessageBox  # noqa: E402
 
 from wavi_py.daq.analysis import (ROV, Dataset, Selection, SelSource, rov_variables,  # noqa: E402
@@ -216,3 +217,154 @@ def test_rov_real_dive():
     _t, amps = r.series("rov:current")
     assert 0.2 <= np.nanmin(amps) and np.nanmax(amps) < 60     # cA -> A
     assert r.frame is None                                  # no FRAME_CONFIG: numbers only
+
+
+# ----------------------------------------------------------------------
+# part 2: the grid picker, legends, colour by, expand, zoom box, cursor labels
+# ----------------------------------------------------------------------
+
+@pytest.fixture
+def win(app, tmp_path):
+    p = tmp_path / "rec.jsonl"
+    fx.write_recording(p, rov=True)
+    w = _open(app, p, t_buffer_s=2.0)
+    from whisker_link.dome_map import DEFAULT_MAP, DomeMap
+    w.set_dome_map(DomeMap.load(DEFAULT_MAP))
+    yield w
+    w.close()
+
+
+def _grid_click(app, g, sensor: int, part: str) -> None:
+    """Click sensor ``sensor``'s name strip ("name") or its "A" / "B" half."""
+    from PyQt6.QtTest import QTest
+    from wavi_py.views.sensor_grid import cell_rects
+    g.grab()                                             # painted: the rects are known
+    cell, name, a, b = cell_rects(g.grid, g._area())[sensor]
+    r = {"name": name, "A": a, "B": b}[part]
+    QTest.mouseClick(g, Qt.MouseButton.LeftButton, pos=r.center().toPoint())
+    app.processEvents()
+
+
+def test_grid_picker_toggles_and_syncs(app, win):
+    from wavi_py.tests.test_analysis_r2 import _window
+    from wavi_py.views.analysis_window import PLOTS, TIMELINE
+    aw, _sels = _window(app, win, keys=("wsk:2", "wsk:3"))      # a region menu's pre-check
+    gp, gt = aw.grids[PLOTS], aw.grids[TIMELINE]
+    assert gp.checked == {2, 3}
+    # the plane map's layout: LFM (W6) left of the centre gap, RFM (W11) right of it, LBM
+    # (W2) outboard of LFM, same row
+    cells = gp.grid.cells
+    assert cells[1][0] < cells[5][0] < cells[10][0] and cells[1][1] == cells[5][1] == cells[10][1]
+    assert {5, 15, 18, 26} <= gp.grid.dead                          # the map's dead / not scanned
+    _grid_click(app, gp, 5, "name")                              # LFM: both gauges on
+    assert {"wsk:10", "wsk:11"} <= set(aw.checked_keys())
+    _grid_click(app, gp, 5, "B")                                 # its B half: B off
+    assert "wsk:10" in aw.checked_keys() and "wsk:11" not in aw.checked_keys()
+    _grid_click(app, gp, 5, "name")                              # partly on: both on
+    assert {"wsk:10", "wsk:11"} <= set(aw.checked_keys())
+    _grid_click(app, gp, 5, "name")                              # all on: both off
+    assert not {"wsk:10", "wsk:11"} & set(aw.checked_keys())
+    assert gp.checked == {2, 3}
+    # the API and the grid agree both ways; the order is the variables' (shades)
+    aw.set_checked(["wsk:6", "imu:0"])
+    assert gp.checked == {2, 3, 6} and aw.checked_keys() == ["wsk:2", "wsk:3", "wsk:6", "imu:0"]
+    _pump(app, lambda: False, 0.3)
+    assert {k for (_n, k) in aw.compare.curves} == {"wsk:2", "wsk:3", "wsk:6", "imu:0"}
+    # the Timeline grid is its own column, and an edit there keeps the default from coming back
+    _grid_click(app, gt, 0, "A")
+    assert "wsk:0" in aw.timeline_keys() and 0 not in gp.checked and aw._tl_edited
+    assert gt.checked == {0}
+    aw.close()
+
+
+def test_grid_legend_and_colour_by_sensor(app, win):
+    from wavi_py.tests.test_analysis_r2 import _window
+    from wavi_py.views.analysis_cells import SENSOR, line_style
+    from wavi_py.views.sensor_grid import gauge_color
+    aw, sels = _window(app, win, keys=("wsk:0", "wsk:1", "imu:0"))
+    wc = aw.compare
+    assert wc._grid_legend is not None and wc._grid_legend.parentItem() is wc.rows["mV"].getViewBox()
+    names = [lab.text for _s, lab in wc.rows["mV"].legend.items]
+    assert not any("A" == n.split()[-1] for n in names)              # the gauges are in the grid
+    assert set(wc._grid_legend.lit) == {0, 1}
+    assert [lab.text for _s, lab in wc.rows["mg"].legend.items] == ["Accel x"]
+    aw.set_color_by(SENSOR)
+    assert _pump(app, lambda: wc.color_by == SENSOR and wc.renders and
+                 wc.curves[(1, "wsk:0")].opts["pen"].color().rgba() == gauge_color(0).rgba(), 2)
+
+    def pen(n, key):
+        return wc.curves[(n, key)].opts["pen"]
+    c0 = pen(1, "wsk:0").color().rgba()
+    assert {pen(s.number, "wsk:0").style() for s in sels} == {line_style(i) for i in range(3)}
+    assert pen(1, "wsk:0").color().rgba() == pen(2, "wsk:0").color().rgba()   # the gauge's
+    assert wc._grid_legend.lit[0].rgba() == gauge_color(0).rgba()
+    # toggling other gauges does not move W1 A's colour
+    for keys in (["wsk:4", "wsk:5", "wsk:20"], ["wsk:1"]):
+        aw.set_checked(keys, not set(keys) <= set(aw.checked_keys()))
+        _pump(app, lambda: False, 0.3)
+        assert pen(1, "wsk:0").color().rgba() == c0
+        assert aw.spectrum.curves[(1, "wsk:0")].opts["pen"].color().rgba() == c0
+    assert len({gauge_color(c).rgba() for c in range(32)}) == 32
+    from wavi_py.views.analysis_cells import CURSOR_COLORS
+    assert not {gauge_color(c).getRgb()[:3] for c in range(32)} & set(CURSOR_COLORS)
+    aw.set_color_by("selection")
+    assert _pump(app, lambda: pen(2, "wsk:0").color().rgba() != pen(1, "wsk:0").color().rgba(), 2)
+    aw.close()
+
+
+def test_expand_and_restore(app, win):
+    from wavi_py.tests.test_analysis_r2 import _window
+    aw, _sels = _window(app, win)
+    g = aw.grid
+    g.collapse(aw.at_cursors)                                    # a layout to come back to
+    _pump(app, lambda: False, 0.2)
+    before = (g.state(), [c.isHidden() for c in g.cells])
+    aw.spectrum.header.expand_btn.click()
+    _pump(app, lambda: False, 0.2)
+    assert g.expanded is aw.spectrum and [c.isHidden() for c in g.cells] == [True, False, True, True]
+    assert aw.spectrum.width() > 0.9 * g.width() and aw.spectrum.height() > 0.85 * g.height()
+    assert aw.spectrum.header.expand_btn.isChecked()
+    aw.spectrum.header.expand_btn.click()                        # again: the layout before
+    _pump(app, lambda: False, 0.2)
+    assert g.expanded is None and (g.state(), [c.isHidden() for c in g.cells]) == before
+    aw.compare.header.expand_btn.click()
+    _pump(app, lambda: False, 0.2)
+    assert g.bar.isVisible()
+    g.restore_buttons[aw.spectrogram].click()                    # the bar: the layout before
+    _pump(app, lambda: False, 0.2)
+    assert g.expanded is None and [c.isHidden() for c in g.cells] == before[1]
+    assert not aw.compare.header.expand_btn.isChecked()
+    aw.close()
+
+
+def test_zoom_box_and_cursor_labels(app, win):
+    import pyqtgraph as pg
+    from wavi_py.tests.test_analysis_r2 import _window
+    aw, _sels = _window(app, win)
+    aw._act_zoom.trigger()
+    cells = (aw.compare, aw.spectrum, aw.spectrogram, aw.at_cursors)
+    for cell in cells:
+        for p in cell._zoom_plots():
+            assert p.getViewBox().state["mouseMode"] == pg.ViewBox.RectMode
+    # the box zoom in the spectrogram moves the waveform's time span too
+    vb = aw.spectrogram.plot.getViewBox()
+    vb.showAxRect(pg.QtCore.QRectF(1.0, 0.0, 1.0, 20.0))
+    _pump(app, lambda: False, 0.2)
+    x0, x1 = aw.compare.x_plot().getViewBox().viewRange()[0]
+    assert (x0, x1) == pytest.approx(tuple(vb.viewRange()[0]), abs=1e-9)   # one time span
+    assert 0.9 < x0 < 1.0 and 2.0 < x1 < 2.1                    # the box (pyqtgraph pads it)
+    assert not aw.compare._auto                                 # kept until R
+    aw._act_zoom.trigger()
+    assert all(p.getViewBox().state["mouseMode"] == pg.ViewBox.PanMode
+               for cell in cells for p in cell._zoom_plots())
+    # cursor labels: the time, live while dragged
+    n = aw.add_cursor(1.234)
+    _pump(app, lambda: n in aw.at_cursors.curves, 2)
+    line = next(ln for (_p, ln) in aw._spec_lines.lines.values() if ln.number == n)
+    assert line.label.toPlainText() == "t=1.23 s"
+    line.setValue(2.5)
+    line.sigDragged.emit(line)
+    assert line.label.toPlainText() == "t=2.50 s"
+    assert all(ln.label.toPlainText() == "t=2.50 s" for (_p, ln) in aw._wave_lines.lines.values())
+    assert _pump(app, lambda: aw.at_cursors.plot.legend.items[0][1].text.startswith("t=2.50 s"), 2)
+    aw.close()
