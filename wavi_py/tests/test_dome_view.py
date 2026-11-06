@@ -377,3 +377,35 @@ def test_dome_view_plane_map(app):
         v._render_pose()
     finally:
         v.close()
+
+
+def test_dome_view_seek_while_paused_keeps_the_pose(app):
+    """A replay seek while paused brings the preroll, then nothing: the pose must
+    show the position (smoothing restarted from the samples just before it), not
+    go grey until Play (the bug: discontinuity reset the smoother and skipped
+    the preroll)."""
+    from wavi_py.views import dome_view as dvm
+
+    v = dvm.DomeView(fs=250.0)
+    try:
+        bus = SampleBus(4000, NCH)
+        v.set_bus(bus, 250.0)
+        base = np.full((40, NCH), 250.0, np.float32)
+        bus.publish(base)
+        samples, v._cursor = bus.read_since(v._cursor)
+        v.pose.feed(samples, 250.0)                        # tare done
+        assert v.pose.tare.ready
+        ch = CHANNEL_NAMES.index("W1_A")
+        pre = base.copy()
+        pre[:, ch] += 10.0
+        bus.publish(np.concatenate([base, pre]))           # the preroll, ending bent
+        at = bus.total_published
+        v.discontinuity(at)                                # the "live" mark; no more samples
+        assert v._cursor == at
+        assert np.isfinite(v.pose.smoother.value[ch])
+        assert v.pose.smoother.value[ch] > 5.0             # the bend at the new position
+        v._on_frame()                                      # a frame with nothing new keeps it
+        assert v.pose.smoother.value[ch] > 5.0
+    finally:
+        v.set_bus(None)
+        v.close()
