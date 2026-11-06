@@ -29,10 +29,6 @@ room for it.
 The rows are kept (a unit's plot and its overlay are made once and only moved
 in the layout), so checking variables does not rebuild the regions.
 
-The plane head (``set_plane_head``, the window's Plane map): a teal dashed
-line in every row, labelled "plane" in the top one; drag it (``planeMoved``)
-and the plane map shows every position at that time.
-
 The manoeuvre lane (when the recording has its sidecar, ``replay/manoeuvres.py``;
 ``set_manoeuvres``): a row under the mode band, above the variables' rows,
 with the stick segments as bars, coloured by axis and sign (``LANE_COLORS``; the minus side a darker shade),
@@ -68,7 +64,6 @@ from wavi_py.views.whisker_plots import _show_grid
 TIMELINE_COLORS = ((40, 90, 170), (70, 70, 70), (20, 120, 60), (150, 30, 30), (100, 60, 150),
                    (0, 110, 120), (120, 110, 0), (190, 80, 150))
 _HEAD_PEN = pg.mkPen((210, 0, 0), width=2)
-PLANE_RGB = (0, 130, 110)                        # the plane head: teal (sensor_grid.HEAD_RGB)
 _BARE = ""                                       # the row shown with no variable
 ROW_MIN = 58                                     # px a row keeps (its y labels don't overlap)
 _AXIS_H = 34                                     # the bottom row's time axis and label
@@ -133,7 +128,6 @@ class TimelineCell(_Cell):
     madeSelection = pyqtSignal(object)           # a Select drag here made this one
     laneClicked = pyqtSignal(float, float)       # the lane: a selection of this window
     laneCompare = pyqtSignal(object)             # the lane: Compare similar (the event)
-    planeMoved = pyqtSignal(float)               # the plane head was dragged here (absolute s)
 
     def __init__(self, model: SelectionModel, win, select_act, replay=None,
                  parent: Optional[QWidget] = None):
@@ -144,8 +138,6 @@ class TimelineCell(_Cell):
         self._plots: dict[str, pg.PlotItem] = {}         # unit -> its row (kept)
         self._overlays: dict[str, SelectionOverlay] = {}
         self._heads: dict[str, pg.InfiniteLine] = {}
-        self._plane_lines: dict[str, pg.InfiniteLine] = {}   # unit -> the plane head's line
-        self.plane_t: Optional[float] = None                 # the plane head (None: hidden)
         self.probes: dict[str, pg.InfiniteLine] = {}
         self.rows: dict[str, pg.PlotItem] = {}           # the rows shown, top to bottom
         self.curves: dict[str, pg.PlotCurveItem] = {}    # var key -> curve
@@ -204,15 +196,6 @@ class TimelineCell(_Cell):
         head.setVisible(False)
         p.addItem(head, ignoreBounds=True)
         self._heads[unit] = head
-        ph = pg.InfiniteLine(angle=90, movable=True,
-                             pen=pg.mkPen(PLANE_RGB, width=2, style=Qt.PenStyle.DashLine),
-                             hoverPen=pg.mkPen(PLANE_RGB, width=4))
-        ph.setZValue(22)
-        ph.setVisible(False)
-        ph.setToolTip("The plane head: the plane map (left) shows every position here; drag it")
-        ph.sigDragged.connect(self._plane_dragged)
-        p.addItem(ph, ignoreBounds=True)
-        self._plane_lines[unit] = ph
         self.probes[unit] = probe_line(p)
         self._plots[unit] = p
         self._overlays[unit] = SelectionOverlay(self.model, [p], None, self)
@@ -249,7 +232,6 @@ class TimelineCell(_Cell):
         # the splitter keeps the timeline at least this tall (it grows with the rows)
         self.setMinimumHeight(sum(LANE_H if u == LANE else ROW_MIN for u in units) + _AXIS_H + 6)
         self.show_position()
-        self._show_plane()
 
     def _on_manual(self, *_a) -> None:
         self.zoomed = True
@@ -301,37 +283,6 @@ class TimelineCell(_Cell):
             if on:
                 head.setValue(t)
             head.setVisible(on)
-
-    # ----- the plane head
-
-    def set_plane_head(self, t: Optional[float]) -> None:
-        """The plane head's line at absolute ``t`` in every row (None: hidden)."""
-        self.plane_t = None if t is None else float(t)
-        self._show_plane()
-
-    def _show_plane(self) -> None:
-        top = next(iter(self.rows), None)
-        for u, line in self._plane_lines.items():
-            on = self.plane_t is not None and u in self.rows
-            if on and not line.moving and abs(line.value() - self.plane_t) > 1e-12:
-                line.blockSignals(True)
-                line.setValue(self.plane_t)
-                line.blockSignals(False)
-            line.setVisible(on)
-            if on and u == top and getattr(line, "label", None) is None:
-                line.label = pg.InfLineLabel(line, "plane", position=0.9, color=PLANE_RGB,
-                                             fill=(255, 255, 255, 200))
-            if getattr(line, "label", None) is not None:
-                line.label.setVisible(on and u == top)
-
-    def _plane_dragged(self, line) -> None:
-        self.plane_t = float(line.value())
-        for other in self._plane_lines.values():
-            if other is not line:
-                other.blockSignals(True)
-                other.setValue(self.plane_t)
-                other.blockSignals(False)
-        self.planeMoved.emit(self.plane_t)
 
     # ----- probe
 

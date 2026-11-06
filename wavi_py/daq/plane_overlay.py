@@ -18,10 +18,11 @@ view's tare does).
 
 Each path is thinned to at most ``n_max`` points (every k-th sample: drag and
 lift stay paired, which a min / max envelope would not). The arrows go from the
-root to the tip at the scrub head (the Analysis window's plane head in the
-waveform, label ``HEAD``) and at each cursor (``(number, t)``, t relative to the
-selection's zero) inside the span; with neither, one per path to its farthest
-point (the peak bend). ``scale`` is the largest bend drawn (the ``SCALE_PCT`` percentile of each path, so one spike does not shrink the rest), in degrees (the map's common
+root to the tip at each cursor (``(number, t)``, t relative to the
+selection's zero) inside the span (Events: also at the scrub head, label
+``HEAD``); with neither, one per path to its farthest point (the peak bend).
+``heads``: every selection at the plane head (the Analysis window's teal line
+in the waveform, relative time), read wherever the head is, with its trail. ``scale`` is the largest bend drawn (the ``SCALE_PCT`` percentile of each path, so one spike does not shrink the rest), in degrees (the map's common
 scale: all cells the same, so they compare).
 """
 
@@ -38,7 +39,7 @@ from wavi_py.daq.analysis import Dataset, Selection, position_variables
 ORIGIN_S = 0.25                 # the origin without V0 / baseline: median of the first this
 N_MAX = 300
 TRAIL_S = 1.0                   # the head's trail: the last this many seconds before it
-ORIGIN_REC_S = 2.0              # the head without V0: the median of the recording's first this
+TRAIL_N = 60                    # ... drawn with at most this many points
 HEAD = "head"                   # the scrub head's arrow label (drawn as the main arrow, unlabelled)
 SCALE_PCT = 99.5            # the scale: this percentile of each path's bend (a spike is clipped)
 
@@ -67,8 +68,8 @@ class PlaneOverlay:
     arrows: dict = field(default_factory=dict)    # position -> [PlaneArrow]
     scale: float = 0.0                            # deg: the largest bend drawn
     relative: bool = False                        # origin from each selection's start
-    head: dict = field(default_factory=dict)      # position -> (drag, lift) deg at the head
-    trail: dict = field(default_factory=dict)     # position -> (N, 2) deg, the TRAIL_S before it
+    head: dict = field(default_factory=dict)      # position -> [PlaneArrow] at the head, per selection
+    trail: dict = field(default_factory=dict)     # position -> [(sel, (N, 2) deg)], the TRAIL_S before
 
     def __bool__(self) -> bool:
         return bool(self.paths) or bool(self.head)
@@ -76,8 +77,8 @@ class PlaneOverlay:
 
 @dataclass
 class HeadState:
-    """The recording at the plane head (absolute time): per position the tip now
-    and its trail (``head_state``)."""
+    """The selections at the plane head: per position each one's tip and trail
+    (``heads``)."""
     head: dict = field(default_factory=dict)
     trail: dict = field(default_factory=dict)
     big: float = 0.0                              # deg: the largest bend in it
@@ -198,45 +199,66 @@ def set_arrows(ov: PlaneOverlay, cursors: Sequence = (), head: Optional[float] =
                 arrows.append(PlaneArrow(path.sel, path.sub, "", tuple(deg[int(np.argmax(r))])))
 
 
-def recording_origin(ds: Dataset, source, positions: Sequence[str],
-                     extent: tuple) -> dict:
-    """Per position the (drag, lift) mV median of the recording's first
-    ``ORIGIN_REC_S`` (the head's origin without V0: the vehicle at rest on deck)."""
-    from wavi_py.daq.analysis import Selection as _Sel
-    sel = _Sel(0, extent[0], min(extent[1], extent[0] + ORIGIN_REC_S), source)
-    out = {}
-    for p in positions:
-        vd, vl = position_variables([p])
-        got = _pair(ds, sel, vd, vl, (sel.t0, sel.t1))
-        if got is not None:
-            out[p] = np.nanmedian(got[1], axis=0)
+def _head_key(ds: Dataset, sel: Selection) -> tuple:
+    """What a selection's head reads depends on (not its end: an end drag keeps it)."""
+    v0 = None if ds.v0 is None else id(ds.v0)
+    return (id(sel), sel.t0, sel.align, id(sel.source), id(ds.map_of(sel)), ds.despike, v0,
+            ds.scale, ds.baseline)
+
+
+def heads(ds: Dataset, positions: Sequence[str], t: float, cache: Optional[dict] = None,
+          trail_s: float = TRAIL_S) -> HeadState:
+    """Every selection of ``ds`` at the plane head ``t`` (relative to its zero, as the
+    cursors): per position one ``PlaneArrow`` (label ``HEAD``) per selection and its
+    trail over the ``trail_s`` before. The recording is read there whether or not
+    it is inside the selection's span, with the origin of the selection's paths
+    (its first ``ORIGIN_S`` without V0 / baseline, else 0), so where the head is
+    inside the span its arrow ends on the path (at its last sample at or before
+    the head). ``cache``: a dict the caller keeps, each selection's head by its
+    inputs, so an edge drag re-reads none (pruned to the selections here)."""
+    keys = [(_head_key(ds, sel), tuple(positions), float(t), trail_s) for sel in ds.selections]
+    if cache is not None and cache.get(HEAD, (None,))[0] == keys:
+        return cache[HEAD][1]                     # nothing changed: the same state (drawn once)
+    out = HeadState()
+    keep = {}
+    for sel, k in zip(ds.selections, keys):
+        got = cache.get(k) if cache is not None else None
+        if got is None:
+            got = _sel_head(ds, sel, positions, float(t), trail_s)
+        keep[k] = got
+        for p, (arrow, trail) in got.items():
+            out.head.setdefault(p, []).append(arrow)
+            out.trail.setdefault(p, []).append((sel, trail))
+            out.big = max(out.big, float(np.hypot(*arrow.xy)))
+    if cache is not None:
+        cache.clear()
+        cache.update(keep)
+        cache[HEAD] = (keys, out)
     return out
 
 
-def head_state(ds: Dataset, source, positions: Sequence[str], t: float,
-               origin: Optional[dict] = None, trail_s: float = TRAIL_S) -> HeadState:
-    """Every position of the recording ``source`` (a ``SelSource``) at absolute time
-    ``t``: the tip (deg, as the paths) and its trail over the ``trail_s`` before.
-    ``origin``: per position mV to subtract (None: 0, the values are relative: V0)."""
-    from wavi_py.daq.analysis import Selection as _Sel
-    out = HeadState()
-    sel = _Sel(0, t - trail_s, t, source)
+def _sel_head(ds: Dataset, sel: Selection, positions, t: float, trail_s: float) -> dict:
+    """{position: (its PlaneArrow at the head, its trail)} of one selection."""
+    from dataclasses import replace
+    relative = not ds.baseline and ds.v0 is None
     scale = 1.0 / ds.scale if ds.scale else 1.0
+    at = sel.zero + t
+    win = replace(sel, t0=at - trail_s, t1=at)
+    out = {}
     for p in positions:
         vd, vl = position_variables([p])
-        got = _pair(ds, sel, vd, vl, (t - trail_s, t + 1e-6))
+        o = np.zeros(2)
+        if relative:
+            got = _pair(ds, sel, vd, vl, (sel.t0, min(sel.t1, sel.t0 + ORIGIN_S)))
+            if got is None:
+                continue
+            o = np.nanmedian(got[1], axis=0)
+        got = _pair(ds, win, vd, vl, (at - trail_s, at + 1e-6))
         if got is None:
             continue
-        tt, v = got
-        o = origin.get(p) if origin is not None else None
-        if origin is not None and o is None:
-            continue
-        deg = (v - (o if o is not None else 0.0)) @ (deg_per_mv(ds.map_of(None), p) * scale).T
-        ok = np.isfinite(deg).all(axis=1)
-        deg = deg[ok]
-        if not len(deg):
-            continue
-        out.trail[p] = deg
-        out.head[p] = tuple(deg[-1])
-        out.big = max(out.big, float(np.hypot(*deg[-1])))
+        deg = (got[1] - o) @ (deg_per_mv(ds.map_of(sel), p) * scale).T
+        deg = deg[np.isfinite(deg).all(axis=1)]
+        if len(deg):
+            k = max(1, math.ceil(len(deg) / TRAIL_N))     # thinned to draw, the head kept
+            out[p] = (PlaneArrow(sel, None, HEAD, tuple(deg[-1])), deg[::-1][::k][::-1])
     return out

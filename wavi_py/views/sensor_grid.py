@@ -31,10 +31,10 @@ in the position view), and under it each position's
 tip path over the selections (``daq/plane_overlay.py``, ``set_overlay``): drag
 toward the side's front (``GridLayout.fwd``: right on the port side, left on
 starboard, as the Dome view's plane map), lift up, every cell on one scale (the
-largest bend, the title's ``±x°``); the recording at the plane head
-(``PlaneOverlay.head`` / ``trail``: teal, a thick arrow ending in a dot and the
-last second's trail), arrows at a relative head (Events) or the cursors
-(numbered), or at each path's peak. A click on the name or the plot
+largest bend, the title's ``±x°``); each selection at the plane head
+(``PlaneOverlay.head`` / ``trail``: in its path's colour, a thick arrow ending
+in a dot and the last second's trail), arrows at the cursors (numbered), or at
+each path's peak. A click on the name or the plot
 toggles both axes, on a chip that axis. Rows without a position stay compact.
 
 ``paint_grid``: draws a grid into a rect (the picker, ``SensorGrid``, and the
@@ -64,7 +64,6 @@ _UNLIT = QColor(228, 228, 228)
 _DIM = QColor(244, 244, 244)
 _EDGE = QColor(150, 150, 150)
 _TEXT = QColor(50, 50, 50)
-HEAD_RGB = (0, 130, 110)           # the plane head (teal), as its line on the timeline
 MAP_NAME_H = 14.0                  # the plane map: a cell's name strip ...
 MAP_MIN_H, MAP_MAX_H = 52.0, 120.0  # ... and its height (the cell's width + the strip, clipped)
 
@@ -235,10 +234,10 @@ def paint_grid(p: QPainter, grid: GridLayout, rect: QRectF, state: GridState,
 
 
 @dataclass
-class _HeadArrow:
-    """The recording's tip at the plane head (drawn in the head's colour)."""
-    xy: tuple
-    label: str = "head"
+class _Mark:
+    """A trail's selection, for ``path_pen`` (its colour)."""
+    sel: object
+    sub: Optional[int] = None
 
 
 class SensorGrid(QWidget):
@@ -266,6 +265,9 @@ class SensorGrid(QWidget):
         self.path_pen: Callable = lambda path: QPen(QColor(60, 60, 60), 1.2)
         self._base = None                                # the plane map's cells and paths ...
         self._base_key = None                            # ... and what they were drawn for
+        self._heads_pm = None                            # the heads and trails ...
+        self._heads_key = None                           # ... and what they were drawn for
+        self._pen_version = 0                            # refresh_paths: the pens changed
         self._ov_version = 0
         self._rects: dict = {}
         self._solo: Optional[tuple] = None               # right-click: (its keys, the keys it hid)
@@ -300,6 +302,7 @@ class SensorGrid(QWidget):
     def refresh_paths(self) -> None:
         """Redraw the cached paths (their pens changed: colour by, sub-ranges)."""
         self._ov_version += 1
+        self._pen_version += 1
         self.update()
 
     def _map_rows(self) -> set:
@@ -403,10 +406,23 @@ class SensorGrid(QWidget):
         p.drawPixmap(0, 0, self._base)
         if ov is None or ov.scale <= 0:
             return
-        for s, (_cell, _name, _d, _l, plot) in rects.items():
-            pos = self.position_of(2 * s)
-            if plot.height() > 8 and pos:
-                self._paint_marks(p, s, pos, plot)
+        self._pens: dict = {}
+        cells = [(s, pos, plot) for s, (_c, _n, _d, _l, plot) in rects.items()
+                 if plot.height() > 8 and (pos := self.position_of(2 * s))]
+        hkey = (self.width(), self.height(), dpr, id(self.grid), self.positions, ov.scale,
+                id(ov.head), id(ov.trail), self._pen_version)   # not the paths: an edge drag keeps it
+        if hkey != self._heads_key:           # the heads: another cached layer (a cursor drag
+            pm = QPixmap(int(self.width() * dpr), int(self.height() * dpr))   # keeps them)
+            pm.setDevicePixelRatio(dpr)
+            pm.fill(Qt.GlobalColor.transparent)
+            q = QPainter(pm)
+            for s, pos, plot in cells:
+                self._paint_marks(q, s, pos, plot, heads=True)
+            q.end()
+            self._heads_pm, self._heads_key = pm, hkey
+        p.drawPixmap(0, 0, self._heads_pm)
+        for s, pos, plot in cells:
+            self._paint_marks(p, s, pos, plot)
 
     def _paint_base(self, p: QPainter, lit: dict, rects: dict) -> None:
         ov = self.overlay
@@ -489,8 +505,9 @@ class SensorGrid(QWidget):
             p.drawPath(self._qpath(s, plot, path.xy))
         p.restore()
 
-    def _paint_marks(self, p: QPainter, s: int, pos: str, plot: QRectF) -> None:
-        """The arrows (cursors, a relative head), the recording's trail and head."""
+    def _paint_marks(self, p: QPainter, s: int, pos: str, plot: QRectF,
+                     heads: bool = False) -> None:
+        """The cursors' arrows, or (``heads``) the selections at the head and their trails."""
         ov = self.overlay
         cx, cy, kx, ky, _half = self._cell_frame(s, plot)
 
@@ -501,15 +518,24 @@ class SensorGrid(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         p.setBrush(Qt.BrushStyle.NoBrush)
         o = QPointF(cx, cy)
-        arrows = list(ov.arrows.get(pos, []))
-        trail = ov.trail.get(pos)
-        if trail is not None and len(trail) > 1:
-            p.setPen(QPen(QColor(*HEAD_RGB, 120), 1.4))
-            p.drawPath(self._qpath(s, plot, trail))
-        if pos in ov.head:
-            arrows.append(_HeadArrow(ov.head[pos]))
+        memo = self._pens
+
+        def pen_of(item) -> QPen:                 # the selection's pen, once per paint
+            k = (id(item.sel), item.sub)
+            if k not in memo:
+                memo[k] = QPen(self.path_pen(item))
+            return QPen(memo[k])
+        arrows = [] if heads else list(ov.arrows.get(pos, []))
+        for sel, trail in (ov.trail.get(pos, []) if heads else []):
+            if len(trail) > 1:
+                c = QColor(pen_of(_Mark(sel)).color())
+                c.setAlpha(130)
+                p.setPen(QPen(c, 1.4))
+                p.drawPath(self._qpath(s, plot, trail))
+        if heads:
+            arrows += ov.head.get(pos, [])
         for ar in arrows:
-            pen = QPen(QColor(*HEAD_RGB)) if isinstance(ar, _HeadArrow) else QPen(self.path_pen(ar))
+            pen = pen_of(ar)
             pen.setStyle(Qt.PenStyle.SolidLine)
             is_head = ar.label == "head"
             pen.setWidthF(2.6 if is_head else 1.6)
@@ -531,9 +557,10 @@ class SensorGrid(QWidget):
                 p.setBrush(Qt.BrushStyle.NoBrush)
             elif ar.label:
                 p.drawText(QPointF(tip.x() + 3, tip.y() - 3), ar.label)
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QBrush(QColor(90, 90, 90)))
-        p.drawEllipse(o, 2.0, 2.0)
+        if not heads:
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QBrush(QColor(90, 90, 90)))
+            p.drawEllipse(o, 2.0, 2.0)
         p.restore()
 
     def hit(self, pos: QPointF) -> list[int]:

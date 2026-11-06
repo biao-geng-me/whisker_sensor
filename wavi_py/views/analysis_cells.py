@@ -31,7 +31,7 @@ mrad/s, deg, cm, and the ROV's).
   ``subsChanged``). A
   click on a trace (within ``PICK_PX``) picks that (variable, selection) for the
   spectrogram, which the window then marks (``set_picked``: drawn thick, on
-  top); a click on the picked trace adds a cursor; elsewhere nothing. Its time
+  top); elsewhere nothing (cursors are the spectrogram's). Its time
   range is copied to and from the spectrogram (``xChanged`` / ``set_x``: the
   same span, whatever the two widths).
 - ``SpectrumCell`` (top right, the former Spectrum tab): ``Dataset.spectrum``
@@ -796,10 +796,10 @@ class WaveCell(_RowsCell):
         self.hovered_sub: Optional[int] = None
         self._bands: dict[tuple, SubBand] = {}       # (row unit, number) -> its band
         self.title = self._add_title(
-            "Waveform · click: a cursor there · click a trace: the spectrogram shows it (drawn"
-            " thick)")
-        self.glw.setToolTip("Click to add a cursor there (away from the traces, or on the thick"
-                            " one); click another trace to show it in the spectrogram")
+            "Waveform · click a trace: the spectrogram shows it (drawn thick) · drag the teal"
+            " line to scrub the plane map")
+        self.glw.setToolTip("Click a trace to show it in the spectrogram (cursors: click in the"
+                            " spectrogram); drag the teal line to scrub the plane map")
 
     def x_plot(self) -> Optional[pg.PlotItem]:
         return next(iter(self.rows.values()), None)
@@ -1515,7 +1515,7 @@ class CursorCell(_Cell):
         """``spec``: the spectrogram cell (its tile and dB); ``cursors``: [(number, t)]."""
         if spec.data is None or not cursors:
             self.show_hint("The spectrogram tile is shorter than one segment." if spec.data is None
-                           else "Click in the spectrogram or the waveform to add a cursor: the"
+                           else "Click in the spectrogram to add a cursor: the"
                            " spectrogram's column there shows here, one curve per cursor.")
             for c in self.curves.values():
                 self.plot.removeItem(c)

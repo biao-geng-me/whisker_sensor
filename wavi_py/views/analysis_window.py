@@ -35,13 +35,14 @@ The side panel holds two lists:
   "Plane map" (next to the combo; on by default, in either view: both views
   are the same cells, only the picker's labels differ) makes the Plots grid the
   Dome view's plane map in small, without taking a cell of the 2x2: every
-  position at the plane head (a teal line on the timeline, absolute, dragged
-  to scrub; ``_render_head``: the recording there and its last second, whatever
-  is checked or included), under it each included selection's path (each
-  sub-range its own, in its line style), numbered arrows at the cursors. Events
-  (no timeline): a relative head in the waveform, the highlighted / picked
-  events' paths (``daq/plane_overlay.py``; the cells still toggle the variables:
-  name or plot both halves, the chips one).
+  position, whatever is checked. Each included selection's path (each
+  sub-range its own, in its line style), numbered arrows at the cursors, and
+  each selection at the plane head (a teal line in the waveform, time from
+  each selection's zero, dragged to scrub; ``_render_heads``: the recording
+  there and its last second, read inside the span or not), overlaid in the
+  selections' colours. Events: the highlighted / picked events' paths and an
+  arrow on each at the head (``daq/plane_overlay.py``; the cells still toggle
+  the variables: name or plot both halves, the chips one).
   Below them a tree with the rest, IMU (accel x / y / z, gyro x / y / z,
   attitude roll / pitch / yaw, depth) and ROV (the vehicle telemetry, when the
   source has it, with the pilot's demand and the thrust projected per axis:
@@ -58,9 +59,9 @@ skips its work when its inputs did not change.
 
 Cursors: a click in the spectrogram adds a numbered vertical cursor at that
 relative time, drawn there and in the waveform; drag it to move it, right-click
-it or Del (hovered) to delete it. A click in the waveform adds one too, except on
-a trace other than the picked one: that shows its (variable, selection) in the
-spectrogram (the trace is then drawn thick).
+it or Del (hovered) to delete it. Only the spectrogram adds them: a click on a
+trace in the waveform shows its (variable, selection) in the spectrogram (the
+trace is then drawn thick).
 
 Readouts (``views/hover_probe.py``): no per-variable legends in the timeline,
 waveform and spectrum; hovering a trace draws it thicker and names it with its
@@ -129,7 +130,7 @@ import numpy as np
 import pyqtgraph as pg
 
 from wavi_py.daq.analysis import DEPTH, POS, ROV, Dataset, Selection, Variable
-from wavi_py.daq.plane_overlay import head_state, plane_overlay, recording_origin, set_arrows
+from wavi_py.daq.plane_overlay import heads, plane_overlay, set_arrows
 from wavi_py.daq.series import IMU, WSK
 from wavi_py.replay import eventset as evs
 from wavi_py.views.analysis_cells import (SELECTION, SENSOR, CursorCell, CursorLines, line_style,
@@ -168,8 +169,9 @@ KEYS_HELP = """\
 <tr><td><b>arrows</b></td><td>move the data (Left: traces slide left), the cell under the mouse</td></tr>
 <tr><td><b>Del</b></td><td>delete the cursor (else the sub-range, else the selection) under the mouse</td></tr>
 </table>
-Mouse: a click in the spectrogram or the waveform adds a cursor; in the waveform a
-click on another trace shows it in the spectrogram instead (drawn thick). Hover a
+Mouse: a click in the spectrogram adds a cursor; in the waveform a click on a
+trace shows it in the spectrogram (drawn thick); drag the teal line there to scrub
+the plane map. Hover a
 trace for its name and value (spectrum: its peaks too).
 Drag a cursor to move it, right-click deletes it. Timeline: drag pans, wheel zooms,
 double-click seeks. A cell's – button (or its border dragged to the edge) collapses
@@ -531,12 +533,11 @@ class AnalysisWindow(ViewWindow):
         self._plane_key = None                    # what the plane map's paths were read for
         self._plane_ov = None
         self._path_cache: dict = {}               # each selection's plane paths by its inputs
-        self.plane_t: Optional[float] = None      # Events: the plane head in the waveform (relative s)
+        self.plane_t: Optional[float] = None      # the plane head in the waveform (relative s)
         self._head_key = None                     # Selections: the plane head's inputs ...
         self._head_state = None                   # ... and what it read (plane_overlay.HeadState)
         self._head_big = 0.0                      # the largest head bend seen (the map's scale)
-        self._head_src = None
-        self._origin = None                       # without V0: the recording's start per position
+        self._head_cache: dict = {}               # each selection's head (an edge drag re-reads none)
         self._head_lines: dict = {}               # id(row) -> (row, line)
         self.grids = {PLOTS: SensorGrid("Plots"), TIMELINE: SensorGrid("Timeline")}
         for col, g in self.grids.items():
@@ -582,7 +583,6 @@ class AnalysisWindow(ViewWindow):
         if mode != EVENTS:
             self.set_color_by(SENSOR)                 # the default (each gauge its own colour)
         self.timeline.madeSelection.connect(self.include)
-        self.timeline.planeMoved.connect(self._on_plane_moved)
         self.timeline.laneClicked.connect(self._lane_clicked)
         self.timeline.laneCompare.connect(self._lane_compare)
         self.subs: tuple = ()                         # the waveform's sub-ranges ((n, a, b), ...)
@@ -625,6 +625,7 @@ class AnalysisWindow(ViewWindow):
         self._rebuild_vars()
         if mode == EVENTS:
             self._init_events(query or evs.EventQuery(types=["onset"], group_by="run"), cache)
+        self.plane_t = None
         self.plane_box.setChecked(True)            # the plane map: on by default
 
     def _build_toolbar(self) -> None:
@@ -811,6 +812,7 @@ class AnalysisWindow(ViewWindow):
             cell.reset_view()
         self.default_sizes()
         self._lists_dirty = True
+        self.plane_t = None
         self.plane_box.setChecked(True)            # the plane map: on by default
 
     def dataset(self) -> Dataset:
@@ -897,11 +899,9 @@ class AnalysisWindow(ViewWindow):
             self.spectrogram.plot.setXRange(lo, hi, padding=0)
 
     def _on_wave_click(self, t: float, pick) -> None:
-        """A click on a trace shows it in the spectrogram; on the one shown (drawn
-        thick), it adds a cursor there; away from the traces, nothing."""
-        if pick is None or pick == self.spectrogram.pick:
-            self.add_cursor(t)
-        else:
+        """A click on a trace shows it in the spectrogram (cursors are added in the
+        spectrogram only)."""
+        if pick is not None and pick != self.spectrogram.pick:
             self.spectrogram.set_pick(*pick)
             self.compare.set_picked(pick)
 
@@ -1008,7 +1008,6 @@ class AnalysisWindow(ViewWindow):
         g.set_map(on)
         if not on:
             g.set_overlay(None)
-            self.timeline.set_plane_head(None)
         self._sync_head()
         self._plane_key = self._head_key = None
         self._request()
@@ -1058,7 +1057,7 @@ class AnalysisWindow(ViewWindow):
                tuple(positions), self.subs, m.despike, id(m.v0), m.scale, id(ds.dome_map),
                self.mode == EVENTS)
         cur = [(n, t) for n, t in self.cursors]
-        if self.mode == EVENTS and self.plane_t is None and sels:   # relative head: mid-way
+        if self.plane_t is None and sels:           # the head: mid-way in the waveform
             x = self.compare.x_plot()
             lo, hi = x.getViewBox().viewRange()[0] if x is not None else (0.0, 0.0)
             self.plane_t = 0.5 * (lo + hi) if hi > lo else 0.0
@@ -1067,70 +1066,36 @@ class AnalysisWindow(ViewWindow):
             self._plane_key = key
             self._plane_ov = plane_overlay(ds, positions, cur, head=head, cache=self._path_cache,
                                            peaks=self.mode == EVENTS)
+            self._plane_ds = ds
+            self._head_big = 0.0                    # the running scale: new selections
+            self._head_key = None
         else:
             set_arrows(self._plane_ov, cur, head, peaks=self.mode == EVENTS)
         if self.mode != EVENTS:
-            self._render_head(positions)
+            self._render_heads(positions)
         self._plane_ov.scale = max(self._plane_ov.scale, self._head_big, 0.5)
         g.set_overlay(self._plane_ov, lambda item, sels=sels: self._plane_pen(sels, item))
         self._sync_head()
 
-    def _render_head(self, positions: list) -> None:
-        """The recording at the plane head (absolute, on the timeline): every position's
-        tip and its trail, from the replayed recording or the live buffers."""
-        src = timeline_source_of(self._source_fn)
-        ov = self._plane_ov
-        if src is None or ov is None:
+    def _render_heads(self, positions: list) -> None:
+        """Every included selection at the plane head (relative): each position's tip
+        and its last second, read inside the selection's span or not."""
+        ov, ds = self._plane_ov, getattr(self, "_plane_ds", None)
+        if ov is None or ds is None or self.plane_t is None:
             if ov is not None:
                 ov.head, ov.trail = {}, {}
-            self.timeline.set_plane_head(None)
             return
-        ext = src.extent()
-        if self.timeline.plane_t is None:          # start at the playhead, else mid-view
-            r = self.replay
-            t = r.position if r is not None and r.source is not None else math.nan
-            if not math.isfinite(t):
-                lo, hi = self.timeline.x_plot().getViewBox().viewRange()[0]
-                t = 0.5 * (lo + hi)
-            if ext is not None:
-                t = min(max(t, ext[0]), ext[1])
-            self.timeline.set_plane_head(t)
-        t = self.timeline.plane_t
-        m = self.model
-        rec_map = m.dome_map_fn()
-        dm = rec_map if rec_map is not None else self._position_map()
-        ds = Dataset([], [], despike=m.despike, v0=m.v0, scale=m.scale, dome_map=dm)
-        key = (t, id(src.series), tuple(positions), m.despike, id(m.v0), m.scale, id(dm))
-        if key == self._head_key:
-            ov.head, ov.trail = self._head_state.head, self._head_state.trail
-            return
-        if self._head_src != (id(src.series), id(dm)):
-            self._head_src = (id(src.series), id(dm))
-            self._head_big = 0.0                    # the running scale: a new recording
-            self._origin = None
-        origin = None
-        if m.v0 is None and ext is not None:       # without V0: the recording's start at rest
-            if self._origin is None:
-                self._origin = recording_origin(ds, src, positions, ext)
-            origin = self._origin
-        st = head_state(ds, src, positions, t, origin)
-        self._head_key, self._head_state = key, st
-        self._head_big = max(self._head_big, st.big)
-        ov.head, ov.trail = st.head, st.trail
-
-    def _on_plane_moved(self, t: float) -> None:
-        """The timeline's plane head was dragged: only the head is re-read (1 s)."""
-        g = self.grids[PLOTS]
-        if self._plane_ov is None or not g.map:
-            return
-        self._render_head(self._plane_positions())
-        self._plane_ov.scale = max(self._plane_ov.scale, self._head_big, 0.5)
-        g.update()
+        key = (self.plane_t, self._plane_key)
+        if key != self._head_key:
+            self._head_key = key
+            self._head_state = heads(ds, positions, self.plane_t, self._head_cache)
+            self._head_big = max(self._head_big, self._head_state.big)
+        ov.head, ov.trail = self._head_state.head, self._head_state.trail
 
     def _sync_head(self) -> None:
-        """Events (no timeline): the plane head's line in every waveform row, relative
-        to each event's onset."""
-        rows = list(self.compare.rows.values()) if self.mode == EVENTS and self._plane_on() \
+        """The plane head's line in every waveform row (time from each selection's
+        zero, or event's onset)."""
+        rows = list(self.compare.rows.values()) if self._plane_on() \
             and self.plane_t is not None else []
         want = {id(r): r for r in rows}
         for k in [k for k in self._head_lines if k not in want]:
@@ -1155,17 +1120,19 @@ class AnalysisWindow(ViewWindow):
                 got[1].blockSignals(False)
 
     def set_plane_t(self, t: float) -> None:
-        """Move the plane head: Selections mode on the timeline (absolute s), Events in
-        the waveform (relative to the onsets). Only the head is re-read."""
-        if self.mode != EVENTS:
-            self.timeline.set_plane_head(float(t))
-            self._on_plane_moved(float(t))
-            return
+        """Move the plane head (relative s, in the waveform). Only the head is re-read
+        (Selections: each selection's last second there; Events: its arrows)."""
         self.plane_t = float(t)
         self._sync_head()
-        if self._plane_ov is not None:
+        g = self.grids[PLOTS]
+        if self._plane_ov is None or not g.map:
+            return
+        if self.mode == EVENTS:
             set_arrows(self._plane_ov, [(n, c) for n, c in self.cursors], self.plane_t)
-            self.grids[PLOTS].update()
+        else:
+            self._render_heads(self._plane_positions())
+            self._plane_ov.scale = max(self._plane_ov.scale, self._head_big, 0.5)
+        g.update()
 
     def _on_head_dragged(self, line) -> None:
         self.set_plane_t(line.value())

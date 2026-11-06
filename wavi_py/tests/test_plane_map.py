@@ -27,7 +27,7 @@ from PyQt6.QtWidgets import QApplication, QMessageBox  # noqa: E402
 
 from wavi_py.daq.analysis import Dataset, Selection, position_variables  # noqa: E402
 from wavi_py.daq.plane_overlay import (HEAD, ORIGIN_S, TRAIL_S, deg_per_mv,  # noqa: E402
-                                       head_state, plane_overlay, set_arrows)
+                                       heads, plane_overlay, set_arrows)
 from wavi_py.tests import replay_fixture as fx  # noqa: E402
 from wavi_py.tests.test_analysis import _open, _pump, _shot  # noqa: E402
 
@@ -63,7 +63,6 @@ def test_plane_map_head_and_paths(app, win):
     from PyQt6.QtTest import QTest
 
     from wavi_py.tests.test_analysis_r2 import _window
-    from wavi_py.views.analysis_timeline import timeline_source_of
     from wavi_py.views.analysis_window import GAUGES_VIEW, PLOTS, POSITIONS_VIEW
     aw, sels = _window(app, win, n_sel=2, keys=("wsk:2",))
     g = aw.grids[PLOTS]
@@ -73,38 +72,50 @@ def test_plane_map_head_and_paths(app, win):
     ov = g.overlay
     positions = _positions(g)
     assert len(positions) == 12
-    # the head: on the timeline (absolute), every position from the recording, with a trail
-    tl = aw.timeline
-    t = tl.plane_t
-    assert t is not None and all(ln.isVisible() for u, ln in tl._plane_lines.items() if u in tl.rows)
+    # the head: a line in every waveform row (relative), each selection at it, overlaid
+    t = aw.plane_t
+    assert t is not None and aw._head_lines
+    assert all(line.value() == pytest.approx(t) for _r, line in aw._head_lines.values())
     assert len(ov.head) >= 6 and set(ov.head) <= set(positions)
-    src = timeline_source_of(aw._source_fn)
-    m = aw.model
-    dm = m.dome_map_fn() or aw._position_map()
-    ds = Dataset([], [], despike=m.despike, v0=m.v0, scale=m.scale, dome_map=dm)
     p = next(iter(ov.head))
+    assert {a.sel.number for a in ov.head[p]} == {s.number for s in sels}
+    m = aw.model
     vd, vl = position_variables([p])
-    sel = Selection(0, t - TRAIL_S, t, src)
-    _t, d = ds.samples(sel, vd, (t - TRAIL_S, t + 1e-6))
-    _t, lf = ds.samples(sel, vl, (t - TRAIL_S, t + 1e-6))
-    o = np.zeros(2) if m.v0 is not None else aw._origin[p]
-    want = (np.array([d[-1], lf[-1]]) - o) @ (deg_per_mv(dm, p) / m.scale).T
-    assert np.allclose(ov.head[p], want)
+    for a in ov.head[p]:
+        sel = a.sel
+        ds = Dataset([sel], [], despike=m.despike, v0=m.v0, scale=m.scale, dome_map=aw._position_map())
+        at = sel.zero + t
+        _t, d = ds.samples(sel, vd, (at - TRAIL_S, at + 1e-6))
+        _t, lf = ds.samples(sel, vl, (at - TRAIL_S, at + 1e-6))
+        o = np.zeros(2)
+        if m.v0 is None:                       # the selection's own origin, as its path
+            h = (sel.t0, sel.t0 + ORIGIN_S)
+            o = np.array([np.median(ds.samples(sel, vd, h)[1]), np.median(ds.samples(sel, vl, h)[1])])
+        want = (np.array([d[-1], lf[-1]]) - o) @ (deg_per_mv(ds.map_of(sel), p) / m.scale).T
+        assert np.allclose(a.xy, want)
     # independent of the variables: unchecking every Plots variable keeps it
     aw.set_checked(["wsk:2"], False)
     _pump(app, lambda: False, 0.3)
     assert g.overlay.head and g.map
     aw.set_checked(["wsk:2"])
-    # dragging the head on the timeline re-reads only the head
-    row = next(iter(tl.rows))
-    line = tl._plane_lines[row]
-    n_paths = id(g.overlay.paths)
-    line.setValue(t + 1.5)
+    _pump(app, lambda: False, 0.3)
+    # dragging the head in the waveform re-reads only the head; past a selection's end too
+    _r, line = next(iter(aw._head_lines.values()))
+    paths = id(g.overlay.paths)
+    before = [a.xy for a in g.overlay.head[p]]
+    end = max(s.duration for s in sels) + 0.5
+    line.setValue(end)
     line.sigDragged.emit(line)
-    assert tl.plane_t == pytest.approx(t + 1.5) and id(g.overlay.paths) == n_paths
-    assert all(abs(ln.value() - (t + 1.5)) < 1e-9 for ln in tl._plane_lines.values())
-    assert not np.allclose(g.overlay.head[p], want)
-    assert len(g.overlay.trail[p]) > 5                     # the last second before the head
+    assert aw.plane_t == pytest.approx(end) and id(g.overlay.paths) == paths
+    assert all(ln.value() == pytest.approx(end) for _r, ln in aw._head_lines.values())
+    assert len(g.overlay.head[p]) == len(sels) and [a.xy for a in g.overlay.head[p]] != before
+    assert all(len(tr) > 5 for _s, tr in g.overlay.trail[p])   # each one's last second
+    # the head's arrow ends on the path inside the span
+    aw.set_plane_t(1.0)
+    path = g.overlay.paths[p][0]
+    a = next(a for a in g.overlay.head[p] if a.sel is path.sel)
+    i = int(np.searchsorted(path.t, path.sel.zero + 1.0 + 1e-6)) - 1   # the last sample at or before
+    assert np.allclose(a.xy, path.deg[i], atol=1e-6)
     # the selections' paths, no peak arrows; a cursor adds a numbered arrow per path
     assert {pp.sel.number for pp in g.overlay.paths[p]} == {s.number for s in sels}
     assert not any(g.overlay.arrows.get(q) for q in positions)
@@ -147,11 +158,10 @@ def test_plane_map_head_and_paths(app, win):
     assert {"pos:LFM:drag", "pos:LFM:lift"} <= set(aw.checked_keys())
     _pump(app, lambda: False, 0.3)
     _shot(aw, "plane_map")
-    # off: the compact picker, no head on the timeline
+    # off: the compact picker, no head line
     h_map = g.height()
     aw.plane_box.setChecked(False)
-    assert not g.map and g.height() < h_map
-    assert not any(ln.isVisible() for ln in tl._plane_lines.values())
+    assert not g.map and g.height() < h_map and not aw._head_lines
     aw.close()
 
 
@@ -181,8 +191,15 @@ def test_plane_overlay_sub_ranges_and_cache(app, win):
     assert not any(b.arrows.values())
     set_arrows(b, [], None)
     assert all(len(b.arrows[q]) == len(b.paths[q]) for q in b.paths)
-    st = head_state(ds, sels[0].source, pos, sels[0].t0 + 1.0)
-    assert set(st.head) <= set(pos) and st.big >= 0
+    hc: dict = {}
+    st = heads(ds, pos, 1.0, hc)
+    assert set(st.head) <= set(pos) and st.big >= 0 and len(hc) == len(sels) + 1
+    assert heads(ds, pos, 1.0, hc) is st                          # nothing changed: the same
+    sels[0].t1 += 0.1                                             # an end drag: not re-read
+    assert heads(ds, pos, 1.0, hc) is st
+    sels[0].t0 += 0.1                                             # a start drag moves its zero
+    assert heads(ds, pos, 1.0, hc) is not st
+    assert all(len(st.head[q]) == len(sels) for q in st.head)
 
 
 def test_zoom_cursor_fit_key_and_colour_default(app, win):

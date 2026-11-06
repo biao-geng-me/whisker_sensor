@@ -244,16 +244,14 @@ def test_picker_and_click_to_pick(app, win):
     ev = _click(vb, x[i], y[i])
     assert ev.accepted and sg.pick == (2, "wsk:1") and aw.cursors == []
     assert c.opts["pen"].widthF() > 2 and thick.opts["pen"].widthF() == 1 and thick.zValue() == 0
-    # a click on the picked one adds a cursor there
+    # cursors are the spectrogram's: a click on the picked trace, or away from
+    # every trace, adds none (the pick stays)
     _click(vb, x[i], y[i])
-    assert [n for n, _t in aw.cursors] == [1] and aw.cursors[0][1] == pytest.approx(x[i], abs=1e-6)
-    assert sg.pick == (2, "wsk:1")
-    # away from every trace: a cursor too (the pick stays)
+    assert aw.cursors == [] and sg.pick == (2, "wsk:1")
     lo, hi = vb.viewRange()[1]
     vb.setYRange(hi + 50 * (hi - lo), hi + 60 * (hi - lo), padding=0)
     _click(vb, 1.0)
-    assert sg.pick == (2, "wsk:1") and len(aw.cursors) == 2
-    assert aw.cursors[1][1] == pytest.approx(1.0, abs=1e-6)
+    assert sg.pick == (2, "wsk:1") and aw.cursors == []
     # the pick falls back when its variable is unchecked
     aw.set_checked(["wsk:1"], False)
     assert _pump(app, lambda: sg.pick[1] == "wsk:0", 2)
