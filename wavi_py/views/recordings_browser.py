@@ -20,6 +20,12 @@ Make card builds a missing card of a local recording in the background (the
 same child process as after Stop); a cluster-only recording without a card
 says in its tooltip how to make it there.
 
+Events... (``events_fn``) opens an Events window (the Analysis window's event
+mode) on the selected recordings: rows, or a date / tag (all of its rows);
+Ctrl / Shift select several. Cluster-only ones are downloaded first through the
+same verified download (one after the other, after asking), or skipped with a
+note.
+
 Refresh lists the cluster in one ssh call (only the date folders whose mtime
 changed are walked again); the label shows the catalogue's age, or the reason
 the listing failed (the Local tab keeps working). Nothing here runs ssh, a
@@ -121,13 +127,15 @@ class RecordingsBrowser(QWidget):
                  protect: Callable[[], list] = lambda: [], who: str = "",
                  state: Optional[SyncState] = None, catalog: Optional[Catalog] = None,
                  cache: Optional[Cache] = None, extra_dirs: tuple = (),
-                 parent: Optional[QWidget] = None):
+                 events_fn: Optional[Callable] = None, parent: Optional[QWidget] = None):
         super().__init__(parent, Qt.WindowType.Window)
         self.setWindowTitle("Wavi - Recordings")
         self.resize(1000, 600)
         self._outdir = Path(outdir)
         self._extra = [Path(d) for d in extra_dirs]     # more local folders to list
         self._open_fn, self._protect, self._who = open_fn, protect, who
+        self._events_fn = events_fn
+        self._batch: Optional[dict] = None             # Events...: downloads in a row
         self._state = state or SyncState()
         self.catalog = catalog or Catalog()
         self.cache = cache or Cache()
@@ -200,10 +208,16 @@ class RecordingsBrowser(QWidget):
         self.card_btn = QPushButton("Make card")
         self.card_btn.setToolTip("Build the missing card of a local recording (in the background)")
         self.card_btn.clicked.connect(self._make_card)
+        self.events_btn = QPushButton("Events...")
+        self.events_btn.setToolTip("An Events window on the selected recordings (rows, or a date /"
+                                   " tag: all of it; Ctrl / Shift for several)")
+        self.events_btn.clicked.connect(self.events_selected)
+        self.events_btn.setVisible(events_fn is not None)
         self.cache_label = QLabel()
         self.cache_label.setStyleSheet("QLabel { color: #777; }")
         bottom.addWidget(self.open_btn)
         bottom.addWidget(self.card_btn)
+        bottom.addWidget(self.events_btn)
         bottom.addStretch(1)
         bottom.addWidget(self.cache_label)
 
@@ -228,6 +242,7 @@ class RecordingsBrowser(QWidget):
         t.setIconSize(QSize(PREVIEW_W, PREVIEW_H))
         t.setUniformRowHeights(False)
         t.setAlternatingRowColors(True)
+        t.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
         h = t.header()
         h.setStretchLastSection(False)
         for c in (C_N, C_START, C_DUR, C_BAD, C_NOTES, C_WHERE):
@@ -478,6 +493,59 @@ class RecordingsBrowser(QWidget):
     def _busy(self) -> bool:
         return self._dl_sess is not None
 
+    # ----- Events...
+
+    def selected_rows(self) -> list:
+        """The rows of the selected items (a date / tag item: every row under it)."""
+        stems: list = []
+        for it in self._tree().selectedItems() or ([self._tree().currentItem()]
+                                                   if self._tree().currentItem() else []):
+            stack = [it]
+            while stack:
+                x = stack.pop()
+                st = x.data(0, ROLE)
+                if st:
+                    stems.append(st)
+                stack.extend(x.child(i) for i in range(x.childCount()))
+        by = {r.stem: r for r in self.rows}
+        return [by[s] for s in dict.fromkeys(stems) if s in by]
+
+    def events_selected(self) -> None:
+        rows = self.selected_rows()
+        if not rows or self._events_fn is None or self._busy():
+            return
+        local = [r for r in rows if r.local is not None and str(r.local).endswith(".jsonl")]
+        remote = [r for r in rows if r.local is None and r.cluster is not None]
+        note = ""
+        if remote:
+            cfg = rconfig.load()
+            mb = sum(int(v[0]) for r in remote for v in r.cluster["files"].values()) / 1e6
+            ans = QMessageBox.question(
+                self, "Events", f"{len(remote)} of these are only on the cluster ({mb:.0f} MB)."
+                " Download them first?\n\nNo: skip them.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                | QMessageBox.StandardButton.Cancel) if cfg.configured else \
+                QMessageBox.StandardButton.No
+            if ans == QMessageBox.StandardButton.Cancel:
+                return
+            if ans == QMessageBox.StandardButton.Yes:
+                self._batch = {"todo": list(remote), "paths": [str(r.local) for r in local],
+                               "cfg": cfg}
+                self._next_batch()
+                return
+            note = f"skipped {len(remote)} cluster-only recording(s) (not downloaded)"
+        self._events_fn([str(r.local) for r in local], note)
+
+    def _next_batch(self) -> None:
+        b = self._batch
+        if b is None:
+            return
+        if not b["todo"]:
+            self._batch = None
+            self._events_fn(b["paths"], b.get("note", ""))
+            return
+        self._download(b["todo"].pop(0), b["cfg"])
+
     def open_selected(self) -> None:
         r = self.selected()
         if r is None or self._busy():
@@ -539,6 +607,13 @@ class RecordingsBrowser(QWidget):
             self._dlg.deleteLater()
             self._dlg = None
         if err is not None:
+            if self._batch is not None:
+                self._batch["note"] = f"a download failed ({err}): not in the scope"
+                if err == "cancelled":
+                    self._batch["todo"] = []
+                self.rebuild()
+                self._next_batch()
+                return
             if err != "cancelled":
                 QMessageBox.critical(self, "Download failed", err)
             self._say(f"download {err}")
@@ -552,6 +627,10 @@ class RecordingsBrowser(QWidget):
         self.rebuild()
         self._say(f"downloaded {path.name} in {secs:.1f} s"
                   + (f"; evicted {len(gone)} older from the cache" if gone else ""))
+        if self._batch is not None:
+            self._batch["paths"].append(str(path))
+            self._next_batch()
+            return
         self._open_fn(str(path))
 
     def _make_card(self) -> None:

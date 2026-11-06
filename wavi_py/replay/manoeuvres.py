@@ -914,6 +914,18 @@ def extract(fl: Flight, dome: Optional[DomeMap] = None) -> dict:
 # ---------------------------------------------------------------------------
 # sidecar
 # ---------------------------------------------------------------------------
+def sidecar_dir_for(recording: Union[str, Path]) -> Optional[Path]:
+    """Where the sidecar of ``recording`` lives when no folder is given: next to it
+    (None), unless it is there already or the folder is not writable (a lab share,
+    a read-only mount): then the user cache's ``manoeuvres/`` (as the index cache:
+    ``replay/index._cache_dir``)."""
+    rec = Path(recording)
+    if manoeuvres_path(rec).exists() or os.access(rec.parent, os.W_OK):
+        return None
+    from wavi_py.replay.index import _cache_dir
+    return _cache_dir() / "manoeuvres"
+
+
 def manoeuvres_path(recording: Union[str, Path], out_dir: Union[str, Path, None] = None) -> Path:
     p = recname.sidecar(recording, SUFFIX)
     return Path(out_dir) / p.name if out_dir is not None else p
@@ -974,17 +986,25 @@ def write_manoeuvres_for(recording: Union[str, Path], out_dir: Union[str, Path, 
     return out, doc, {"load": t1 - t0, "extract": t2 - t1}
 
 
-def write_manoeuvres_in_background(recording: Union[str, Path], on_done=None) -> threading.Thread:
-    """The sidecar of a recording that just closed, in a child process at a lower
-    priority (``tools/make_manoeuvres.py``; as ``card.write_card_in_background``).
-    ``on_done(path, error or None)`` is called from the thread."""
+def write_manoeuvres_in_background(recording: Union[str, Path], on_done=None,
+                                   out_dir: Union[str, Path, None] = "auto",
+                                   force: bool = True) -> threading.Thread:
+    """The sidecar of a recording (one that just closed, or opened without one) in a
+    child process at a lower priority (``tools/make_manoeuvres.py``; as
+    ``card.write_card_in_background``). Written next to the recording, with the
+    index and store caches as replay keeps them, unless ``out_dir`` ("auto":
+    ``sidecar_dir_for``; then no caches next to it). ``on_done(path, error or
+    None)`` is called from the thread."""
     rec = Path(recording)
+    if out_dir == "auto":
+        out_dir = sidecar_dir_for(rec)
+    out_args = ["--out", str(out_dir)] if out_dir is not None else []
 
     def run() -> None:
         err = None
         try:
             if getattr(sys, "frozen", False):
-                write_manoeuvres_for(rec)
+                write_manoeuvres_for(rec, out_dir, cache=out_dir is None)
             else:
                 root = Path(__file__).resolve().parents[2]
                 env = dict(os.environ)
@@ -994,7 +1014,7 @@ def write_manoeuvres_in_background(recording: Union[str, Path], on_done=None) ->
                 flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
                 r = subprocess.run(
                     [sys.executable, "-m", "wavi_py.tools.make_manoeuvres", "--quiet", "--nice",
-                     "--force", "--no-csv", str(rec)],
+                     *(["--force"] if force else []), "--no-csv", *out_args, str(rec)],
                     cwd=str(root), env=env, stdin=subprocess.DEVNULL, capture_output=True,
                     timeout=1800, creationflags=flags)
                 if r.returncode != 0:
@@ -1002,9 +1022,9 @@ def write_manoeuvres_in_background(recording: Union[str, Path], on_done=None) ->
         except Exception as exc:  # noqa: BLE001 — an aid: report, never raise
             err = f"{type(exc).__name__}: {exc}"
         print(f"[manoeuvres] {rec.name}: " + (f"not written ({err})" if err else
-                                             f"wrote {manoeuvres_path(rec).name}"))
+                                             f"wrote {manoeuvres_path(rec, out_dir).name}"))
         if on_done is not None:
-            on_done(manoeuvres_path(rec), err)
+            on_done(manoeuvres_path(rec, out_dir), err)
 
     th = threading.Thread(target=run, name="wavi-manoeuvres", daemon=True)
     th.start()

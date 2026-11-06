@@ -37,6 +37,17 @@ store, or live the copy of the buffers taken at Pause (``_freeze_selections``).
 The Analysis windows are kept here (``_analysis``; closed ones are reused), the
 newest focused one takes a region's Compare.
 
+Events windows (the Analysis window in Events mode; ``_events_windows``, not
+reused): the panel's Events button / Go to → Events... (the open recording,
+else the last scope), the recordings browser's Events... (``events_for``) and
+the timeline lane's Compare similar (``new_events_window``). They share one
+``StoreCache`` (``_event_cache``); an event's double-click opens its recording
+in the replay a little before it (``open_event``). The manoeuvres sidecar
+(``replay/manoeuvres.py``) is written after Stop by a second low-priority child
+next to the recording (it syncs with it, like the card; the caches do not), and
+on replay open, once the store is in, it is read, or built in the background
+when missing or outdated (``_load_manoeuvres``): then the timeline's lane shows.
+
 External agent loops can subscribe to ``WaviClient.bus`` independently without
 touching this module. The GUI's slow plot redraws can never starve them — they
 poll the bus on their own thread.
@@ -54,7 +65,7 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-from PyQt6.QtCore import QRegularExpression, QTimer, Qt
+from PyQt6.QtCore import QRegularExpression, QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import QGuiApplication, QKeySequence, QRegularExpressionValidator, QShortcut
 from PyQt6.QtWidgets import (
     QApplication,
@@ -91,7 +102,8 @@ from wavi_py.config import (
     DEFAULT_VIEW_SPAN_S,
     MIN_REC_LEN_S,
 )
-from wavi_py.daq.analysis import SelSource, imu_variables, snapshot_of, whisker_variables
+from wavi_py.daq.analysis import (DOME_ORDER, SelSource, cmd_variables, imu_variables,
+                                  position_variables, snapshot_of, whisker_variables)
 from wavi_py.daq.despike import Despiker
 from wavi_py.daq.ring import Window
 from wavi_py.daq.series import IMU, WSK, ArraySeries, Series
@@ -99,6 +111,8 @@ from wavi_py.daq.server_reader import IMU_CHANNELS
 from wavi_py.daq.spectra import SPEC_COL_HZ, SpecHistory, amp_spectra, amp_spectrum
 from wavi_py.io.dat_writer import DatWriter, build_datalog_filename
 from wavi_py.replay import notes as rec_notes
+from wavi_py.replay import eventset as evs
+from wavi_py.replay import manoeuvres as mnv
 from wavi_py.replay.card import write_card_in_background
 from wavi_py.replay.index import RecordingIndex
 from wavi_py.replay.store import RecordingStore
@@ -107,7 +121,8 @@ from wavi_py.scan_mode import (DEFAULT_SELECTS, PRESETS, ModeKeeper, ScanRequest
                                legacy_nominal_hz, parse_selects)
 from wavi_py.transports.sim_transport import SimSignals
 from wavi_py.views import FftView, ImuView, LineView, SpectrogramView, SpectrumView
-from wavi_py.views.analysis_window import AnalysisWindow
+from wavi_py.views.analysis_window import EVENTS, AnalysisWindow
+from wavi_py.views.render_sched import scheduler
 from wavi_py.views.base import (REC_FOREIGN, REC_OFF, REC_ON, REC_PENDING, ViewWindow,
                                 add_timeline_dock, alarm_label, bring_to_front, show_alarm)
 from wavi_py.views.fault_log import FaultLogView
@@ -173,6 +188,7 @@ def _same_rec(a: Optional[str], b: Optional[str]) -> bool:
 
 
 class MainWindow(QMainWindow):
+    _manoeuvres_ready = pyqtSignal(str, object)          # recording path, error or None
     """The wavi GUI control panel."""
 
     def __init__(
@@ -329,6 +345,12 @@ class MainWindow(QMainWindow):
         self._analysis: list[AnalysisWindow] = []          # open, oldest focused first
         self._analysis_spare: list[AnalysisWindow] = []    # closed: reused by the next new one
         self._analysis_n = 0
+        self._events_windows: list[AnalysisWindow] = []
+        self._event_cache = evs.StoreCache()               # the Events windows' stores
+        self._last_event_scope: list = []
+        self._manoeuvres: Optional[tuple] = None             # (recording, sidecar) of the replay
+        self._map_of_rec: Optional[tuple] = None             # (recording, its dome map)
+        self._manoeuvres_ready.connect(self._on_manoeuvres_ready)
         self.set_dome_map(dome_map)
         for v, btn in ((self._line_view, self._toggle_line), (self._spectrum_view, self._toggle_spectrum),
                        (self._fft_view, self._toggle_fft),
@@ -769,25 +791,31 @@ class MainWindow(QMainWindow):
         self._analysis_btn.setToolTip("The Analysis window last used (a new one if none is open):"
                                       " compare selections")
         self._analysis_btn.clicked.connect(self.show_analysis)
+        self._events_btn = QPushButton("Events")
+        self._events_btn.setToolTip("A new Events window: the manoeuvre events of the open recording"
+                                    " (else the last scope), filtered, grouped and overlaid")
+        self._events_btn.clicked.connect(self.show_events)
 
         h.addWidget(self._toggle_imu)
         h2.addWidget(self._toggle_dome)
         h2.addWidget(self._toggle_rov)
         h2.addWidget(self._map_btn)
         h2.addWidget(self._analysis_btn)
+        h2.addWidget(self._events_btn)
         h2.addStretch(1)
         h2.addWidget(self._despike_chk)
         h2.addWidget(self._pause_btn)
         h2.addWidget(self._reset_btn)
         _compact(self._toggle_line, self._toggle_spectrum, self._toggle_fft, self._toggle_spec,
                  self._toggle_imu, self._toggle_dome, self._toggle_rov, self._analysis_btn,
-                 self._pause_btn, self._reset_btn)
+                 self._events_btn, self._pause_btn, self._reset_btn)
         self._pause_btn.setMinimumWidth(                    # it says Resume when paused
             self._pause_btn.fontMetrics().horizontalAdvance("Resume") + 20)
         # the second row (with Analysis) packed a little tighter, so it is no wider than
         # the transport row and the panel keeps its minimum width
         h2.setSpacing(3)
-        for b in (self._toggle_dome, self._toggle_rov, self._analysis_btn, self._reset_btn):
+        for b in (self._toggle_dome, self._toggle_rov, self._analysis_btn, self._events_btn,
+                  self._reset_btn):
             b.setMinimumWidth(b.fontMetrics().horizontalAdvance(b.text()) + 14)
         self._pause_btn.setMinimumWidth(self._pause_btn.fontMetrics().horizontalAdvance("Resume") + 14)
         return box
@@ -1014,6 +1042,9 @@ class MainWindow(QMainWindow):
             self._progress.setValue(0)
         if job["index"] is not self._index or not self._replaying:
             return                                   # closed (or another file) meanwhile
+        # the lane's sidecar after the store: its child then reads the caches the
+        # store job just wrote instead of writing them at the same time
+        self._load_manoeuvres(str(self._index.path))
         if job["error"] is not None or not job["store"].has(WSK):
             self._note(f"Whole-recording plots unavailable ({job['error'] or 'no scans'}); "
                        "the Line window shows the playback buffer.")
@@ -1270,8 +1301,15 @@ class MainWindow(QMainWindow):
             act.setCheckable(True)
             act.setChecked(True)
             act.triggered.connect(lambda _=False, w=win: bring_to_front(w))
+        for win in self._events_windows:
+            act = menu.addAction(win.windowTitle().removeprefix("Wavi - "))
+            act.setCheckable(True)
+            act.setChecked(True)
+            act.triggered.connect(lambda _=False, w=win: bring_to_front(w))
         act = menu.addAction("New analysis window", lambda: self.new_analysis_window())
         act.setToolTip("Compare selections (every one made so far is included)")
+        act = menu.addAction("Events...", self.show_events)
+        act.setToolTip("Manoeuvre events of the open recording (else the last scope)")
         menu.addAction("Recordings...", self.show_recordings)
 
     def show_recordings(self) -> None:
@@ -1279,7 +1317,8 @@ class MainWindow(QMainWindow):
         if self._recordings is None:
             from wavi_py.views.recordings_browser import RecordingsBrowser
             self._recordings = RecordingsBrowser(self._outpath, self._open_from_browser,
-                                                 protect=self._sync_protect, who=self._who)
+                                                 protect=self._sync_protect, who=self._who,
+                                                 events_fn=self.events_for)
         bring_to_front(self._recordings)
 
     def _open_from_browser(self, path: str) -> None:
@@ -1378,8 +1417,123 @@ class MainWindow(QMainWindow):
 
     def analysis_variables(self) -> list:
         """The variables an Analysis window lists: every gauge (by the Line window's
-        sensor names), the IMU and depth."""
-        return whisker_variables(self._nch, self._line_view._names) + imu_variables()
+        sensor names), the IMU and depth, the demand / thrust and the dome's
+        positions (drag / lift through the recording's dome map)."""
+        return (whisker_variables(self._nch, self._line_view._names) + imu_variables()
+                + cmd_variables() + position_variables(DOME_ORDER))
+
+    def analysis_dome_map(self):
+        """The map the Positions variables read in Selections mode: the replayed
+        recording's own (``replay/dome_maps.dome_map_for``), else the active one."""
+        if self._replaying and self._index is not None:
+            path = str(self._index.path)
+            if self._map_of_rec is None or self._map_of_rec[0] != path:
+                from wavi_py.replay.dome_maps import dome_map_for
+                try:
+                    self._map_of_rec = (path, dome_map_for(path))
+                except (OSError, ValueError):
+                    self._map_of_rec = (path, self._dome_map)
+            return self._map_of_rec[1]
+        return self._dome_map if self._dome_map is not None else DomeMap.load(DEFAULT_MAP)
+
+    def manoeuvres_doc(self) -> Optional[tuple]:
+        """(recording, sidecar) of the replayed recording, once there is one."""
+        if self._manoeuvres is None or not self._replaying or self._index is None:
+            return None
+        return self._manoeuvres if self._manoeuvres[0] == str(self._index.path) else None
+
+    def _load_manoeuvres(self, path: str) -> None:
+        """The lane's sidecar: read if current, else built in the background (a
+        low-priority child; next to the recording, or the user cache)."""
+        self._manoeuvres = None
+        try:
+            out = mnv.sidecar_dir_for(path)
+            if mnv.is_current(path, out):
+                doc = mnv.read_doc(mnv.manoeuvres_path(path, out))
+                if doc is not None:
+                    self._manoeuvres = (path, doc)
+                    self._refresh_analysis()
+                    return
+        except OSError:
+            return
+        if os.environ.get("WAVI_SIDECAR_BUILD", "1") == "0":     # (the test suite)
+            return
+        mnv.write_manoeuvres_in_background(
+            path, on_done=lambda _p, err, rec=path: self._emit_manoeuvres(rec, err), force=False)
+
+    def _emit_manoeuvres(self, rec: str, err) -> None:
+        try:
+            self._manoeuvres_ready.emit(rec, err)
+        except RuntimeError:
+            pass
+
+    def _on_manoeuvres_ready(self, rec: str, err) -> None:
+        if err is not None or not self._replaying or self._index is None \
+                or str(self._index.path) != rec:
+            if err is not None:
+                print(f"[manoeuvres] {Path(rec).name}: {err}")
+            return
+        doc = mnv.read_doc(mnv.manoeuvres_path(rec, mnv.sidecar_dir_for(rec)))
+        if doc is not None:
+            self._manoeuvres = (rec, doc)
+            self._refresh_analysis()
+
+    def _refresh_analysis(self) -> None:
+        for w in self._analysis:
+            w._request()
+
+    # ----- Events windows
+
+    def new_events_window(self, query: Optional[evs.EventQuery] = None) -> AnalysisWindow:
+        """A new Analysis window in Events mode on ``query`` (its scope)."""
+        self._analysis_n += 1
+        q = query or evs.EventQuery(types=["onset"], group_by="run")
+        if q.recordings:
+            self._last_event_scope = list(q.recordings)
+        win = AnalysisWindow(self._selections, self.analysis_variables, self._analysis_n,
+                             None, self._replay, mode=EVENTS, query=q, cache=self._event_cache)
+        win.closed.connect(lambda w=win: self._on_events_closed(w))
+        win.openEvent.connect(self.open_event)
+        self._add_chrome(win)
+        self._events_windows.append(win)
+        bring_to_front(win)
+        return win
+
+    def _on_events_closed(self, win: AnalysisWindow) -> None:
+        if win in self._events_windows:
+            self._events_windows.remove(win)
+            if win.events_panel is not None and win.query.recordings:
+                self._last_event_scope = list(win.query.recordings)
+            scheduler().unregister(win)          # (an Events window is not reused)
+            win.deleteLater()
+
+    def show_events(self) -> AnalysisWindow:
+        """The panel's Events: the open recording, else the last scope."""
+        scope = ([str(self._index.path)] if self._replaying and self._index is not None
+                 else list(self._last_event_scope))
+        return self.new_events_window(evs.EventQuery(recordings=scope, types=["onset"],
+                                                     group_by="run"))
+
+    def events_for(self, paths: list, note: str = "") -> AnalysisWindow:
+        """The recordings browser's Events...: a window on these recordings."""
+        win = self.new_events_window(evs.EventQuery(recordings=[str(p) for p in paths],
+                                                    types=["onset"], group_by="run"))
+        if note and win.events_panel is not None:
+            win.events_panel.note = note
+            win.events_panel.set_status(win.events_panel.status.text())
+        return win
+
+    def open_event(self, path: str, t: float) -> None:
+        """Open ``path`` in the replay at ``t`` (the event's onset, a little before
+        it), or seek there if it is the one open."""
+        lead = 2.0
+        if self._replaying and self._index is not None and \
+                Path(self._index.path).resolve() == Path(path).resolve():
+            self._replay.request_seek(max(0.0, t - lead), True)
+            bring_to_front(self)
+            return
+        self._replay_start_s = max(0.0, t - lead)
+        self._open_from_browser(path)
 
     def new_analysis_window(self, sel=None, keys=()) -> AnalysisWindow:
         """A new Analysis window (a closed one is reused): ``sel`` included and
@@ -1390,7 +1544,10 @@ class MainWindow(QMainWindow):
             win.reset_state(self._analysis_n)
         else:
             win = AnalysisWindow(self._selections, self.analysis_variables, self._analysis_n,
-                                 self._timeline_source, self._replay)
+                                 self._timeline_source, self._replay,
+                                 dome_map_fn=self.analysis_dome_map,
+                                 manoeuvres_fn=self.manoeuvres_doc)
+            win.compareSimilar.connect(self.new_events_window)
             win.closed.connect(lambda w=win: self._on_analysis_closed(w))
             win.activated.connect(self._on_analysis_activated)
             self._add_chrome(win)
@@ -1961,8 +2118,16 @@ class MainWindow(QMainWindow):
                 self._dat_writer = None
                 self._notes.set_offset(None)           # the live timeline goes on without it
                 rec = Path(p).with_suffix(".jsonl")
-                write_card_in_background(rec if rec.is_file() else Path(p),
-                                         on_done=self._sync.card_written)
+                target = rec if rec.is_file() else Path(p)
+                sync = self._sync
+
+                def card_done(path, err, target=target, sync=sync):
+                    sync.card_written(path, err)
+                    # then the manoeuvres sidecar and the store cache (the same kind of
+                    # child; it goes up with the recording, the caches do not)
+                    mnv.write_manoeuvres_in_background(target, on_done=sync.card_written,
+                                                       out_dir=None)
+                write_card_in_background(target, on_done=card_done)
                 self._sync.recording_stopped(p)
                 text = f"Saved {p}"
                 if server_stopped:

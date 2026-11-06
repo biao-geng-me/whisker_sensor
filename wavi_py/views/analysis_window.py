@@ -23,11 +23,15 @@ The side panel holds two lists:
   with an include box, its colour and number, t0 / t1 boxes (edits move it
   everywhere) and delete. Which are included is this window's own.
 - Variables: a tree, Whiskers (by sensor, then gauge; a sensor's box checks
-  both) and IMU (accel x / y / z, gyro x / y / z, attitude roll / pitch / yaw,
-  depth), with two checkbox columns: Plots (the 2x2) and Timeline (the
-  timeline's own rows, independent). The Timeline column starts on Depth when
-  the recording has depth, else on the first variable checked for Plots, until
-  it is edited.
+  both), IMU (accel x / y / z, gyro x / y / z, attitude roll / pitch / yaw,
+  depth), Demand / Thrust (the pilot's demand u_surge .. u_yaw and the thrust
+  projected from the servo outputs, ``daq/vehicle.py``: intended against
+  achieved motion) and Positions (drag / lift of each dome position in dome
+  order, read through the recording's dome map with the polarity applied; a
+  position's box checks both), with two checkbox columns: Plots (the 2x2) and
+  Timeline (the timeline's own rows, independent). The Timeline column starts
+  on Depth when the recording has depth, else on the first variable checked for
+  Plots, until it is edited.
 
 The cells read one ``daq/analysis.Dataset`` (the included selections x the
 Plots variables, with the panel's Despike / V0 / scale and the sub-range),
@@ -50,6 +54,28 @@ the cell under the mouse (= - X, + _ Y of the row under the mouse, . , Y of all
 its rows, arrows move the data), matched by the character typed in an
 application event filter while the window is shown, as the Line window does.
 
+Events mode (``mode=EVENTS``, fixed for the window; titled "Events n"): the
+source is an event set (``replay/eventset.py``: the manoeuvre events of the
+sidecars in a scope of recordings, filtered, grouped, curated) instead of the
+selections. The side panel's Selections list gives way to the ``EventPanel``
+(``views/event_panel.py``: saved comparisons, scope, filter, group by; a
+change re-runs the query, debounced) and Positions is checked by default. The
+timeline gives way to the event browser (``views/event_cells.EventBrowserCell``:
+a table and a feature scatter sharing one selection; hover or select draws the
+event thick in the waveform; a checkbox / the context menu curate; a
+double-click opens the recording in the replay at the event, ``openEvent``).
+The waveform is ``EventWaveCell``: time from each event's onset, colour by
+group, thin single events under a darker, outlined median with its 25-75 %
+band per group, a "drawn N of M" cap, optionally the 3x4 dome grid; a click on
+a trace selects that event. The spectrum and the spectrogram read the picked
+event alone (the first selected, else the first drawn); there is no group
+median spectrum (one FFT per event and variable per redraw: not cheap at a few
+hundred events). The sidecars, the stores and the traces are fetched off the
+GUI thread (``views/event_loader.py``, progress in the panel); the window only
+draws what arrives. In Selections mode the timeline's manoeuvre lane (the open
+recording's sidecar, ``manoeuvres_fn``) makes a selection on a click and opens
+an Events window on similar events from its menu (``compareSimilar``).
+
 Several Analysis windows may be open, each with its own included selections,
 variables, sizes, cursors and options (the control panel keeps them; the
 newest focused one takes a region's Compare). Model changes only mark the
@@ -61,6 +87,7 @@ reuses it for the next new window).
 from __future__ import annotations
 
 import weakref
+from pathlib import Path
 from typing import Callable, Optional, Sequence
 
 from PyQt6.QtCore import QEvent, Qt, QTimer, pyqtSignal
@@ -73,17 +100,22 @@ from PyQt6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication, 
 import numpy as np
 import pyqtgraph as pg
 
-from wavi_py.daq.analysis import DEPTH, Dataset, Selection, Variable
+from wavi_py.daq.analysis import CMD, DEPTH, POS, Dataset, Selection, Variable
 from wavi_py.daq.series import IMU, WSK
+from wavi_py.replay import eventset as evs
 from wavi_py.views.analysis_cells import (CursorCell, CursorLines, SpecgramCell, SpectrumCell,
                                           WaveCell, shades_of)
 from wavi_py.views.analysis_timeline import TimelineCell, timeline_source_of
 from wavi_py.views.base import ViewWindow
+from wavi_py.views.event_cells import EventBrowserCell, EventWaveCell, group_colors
+from wavi_py.views.event_loader import EventLoader
+from wavi_py.views.event_panel import EventPanel
 from wavi_py.views.render_sched import scheduler
 from wavi_py.views.selections import SelectionModel, sel_color
 from wavi_py.views.whisker_plots import _PAN_STEP, ZOOM_STEP
 
 CELLS = ("Compare", "Spectrum", "Spectrogram", "Cursors")   # set_tab names (region menus)
+SELECTIONS, EVENTS = "selections", "events"                 # the window's source mode
 PLOTS, TIMELINE = 1, 2                                      # the Variables tree's check columns
 _KEY = Qt.ItemDataRole.UserRole
 _LIVE_POLL_MS = 1000
@@ -310,17 +342,28 @@ class Grid2x2(QWidget):
 
 class AnalysisWindow(ViewWindow):
     """See the module doc. ``variables_fn()`` lists the variables there are (the
-    gauges by the Line window's sensor names, the IMU, depth); ``source_fn()`` is
-    what the timeline shows (a ``SelSource``: the whole recording, the live
-    buffers; or None / a str when there is none); ``replay``: the ``ReplayModel``
-    (playhead, seek)."""
+    gauges by the Line window's sensor names, the IMU, depth, demand / thrust,
+    the dome's positions); ``source_fn()`` is what the timeline shows (a
+    ``SelSource``: the whole recording, the live buffers; or None / a str when
+    there is none); ``replay``: the ``ReplayModel`` (playhead, seek);
+    ``dome_map_fn()``: the dome map the Positions variables read in Selections
+    mode; ``manoeuvres_fn()``: the open recording's manoeuvres sidecar (the
+    timeline's lane) or None. ``mode``: SELECTIONS or EVENTS (fixed for the
+    window); EVENTS starts on ``query`` and fetches stores through ``cache``."""
 
     MAX_HZ = 20.0
     activated = pyqtSignal(object)            # this window got the focus (newest-focused)
+    openEvent = pyqtSignal(str, float)        # Events: open this recording in the replay at t
+    compareSimilar = pyqtSignal(object)       # the lane's Compare similar: an EventQuery
 
     def __init__(self, model: SelectionModel, variables_fn: Callable[[], list], number: int = 1,
-                 source_fn: Optional[Callable] = None, replay=None):
+                 source_fn: Optional[Callable] = None, replay=None, mode: str = SELECTIONS,
+                 dome_map_fn: Optional[Callable] = None, manoeuvres_fn: Optional[Callable] = None,
+                 query: Optional[evs.EventQuery] = None, cache: Optional[evs.StoreCache] = None):
         super().__init__()
+        self.mode = mode
+        self._dome_map_fn = dome_map_fn or (lambda: None)
+        self._manoeuvres_fn = manoeuvres_fn or (lambda: None)
         self.model = model
         self._variables_fn = variables_fn
         self._source_fn = source_fn
@@ -335,7 +378,7 @@ class AnalysisWindow(ViewWindow):
         self._next_cursor = 1
         self.hovered_cursor: Optional[int] = None
         self._hover_cell = None                   # the cell last under the mouse (keys)
-        self.setWindowTitle(f"Wavi - Analysis {number}")
+        self.setWindowTitle(self._title(number))
         self.resize(1300, 860)
         ref = weakref.ref(self)                   # the scheduler must not keep it alive
         scheduler().register(self, lambda: (w := ref()) is not None and w._render(), self.MAX_HZ)
@@ -345,19 +388,26 @@ class AnalysisWindow(ViewWindow):
         side = QWidget()
         sl = QVBoxLayout(side)
         sl.setContentsMargins(4, 4, 4, 4)
-        sl.addWidget(QLabel("<b>Selections</b>"))
+        self._sel_label = QLabel("<b>Selections</b>")
+        sl.addWidget(self._sel_label)
+        self.events_panel: Optional[EventPanel] = None
+        if mode == EVENTS:
+            self._sel_label.hide()
+            self.events_panel = EventPanel()
+            sl.addWidget(self.events_panel)
         self.sel_list = QTreeWidget()
         self.sel_list.setHeaderLabels(["#", "t0 (s)", "t1 (s)", ""])
         self.sel_list.setRootIsDecorated(False)
         self.sel_list.setToolTip("Include a selection (box); edit its times; ✕ deletes it")
         hdr = self.sel_list.header()
         hdr.setStretchLastSection(False)
-        for c, mode in enumerate((QHeaderView.ResizeMode.ResizeToContents,
-                                  QHeaderView.ResizeMode.Stretch, QHeaderView.ResizeMode.Stretch,
-                                  QHeaderView.ResizeMode.ResizeToContents)):
-            hdr.setSectionResizeMode(c, mode)
+        for c, rm in enumerate((QHeaderView.ResizeMode.ResizeToContents,
+                                QHeaderView.ResizeMode.Stretch, QHeaderView.ResizeMode.Stretch,
+                                QHeaderView.ResizeMode.ResizeToContents)):
+            hdr.setSectionResizeMode(c, rm)
         self.sel_list.itemChanged.connect(self._on_sel_item)
         sl.addWidget(self.sel_list, 1)
+        self.sel_list.setVisible(mode != EVENTS)
         sl.addWidget(QLabel("<b>Variables</b>"))
         self.var_tree = QTreeWidget()
         self.var_tree.setColumnCount(3)
@@ -374,7 +424,8 @@ class AnalysisWindow(ViewWindow):
 
         # the cells
         self.spectrogram = SpecgramCell()
-        self.compare = WaveCell(lambda: self._act_select.isChecked())
+        self.compare = (EventWaveCell() if mode == EVENTS
+                        else WaveCell(lambda: self._act_select.isChecked()))
         self.spectrum = SpectrumCell()
         self.at_cursors = CursorCell()
         self.timeline = TimelineCell(model, self, self._act_select, replay)
@@ -394,12 +445,20 @@ class AnalysisWindow(ViewWindow):
         self.spectrogram.plot.getViewBox().sigXRangeChanged.connect(
             lambda _vb, r: self.compare.set_x(float(r[0]), float(r[1])))
         self.timeline.madeSelection.connect(self.include)
+        self.timeline.laneClicked.connect(self._lane_clicked)
+        self.timeline.laneCompare.connect(self._lane_compare)
         self.sub: Optional[tuple] = None              # the waveform's sub-range (relative)
         self._wave_lines = CursorLines(self)
         self._spec_lines = CursorLines(self, halo=True)
 
         self.right = _Splitter(Qt.Orientation.Vertical)
-        self.right.addWidget(self.timeline)
+        self.browser: Optional[EventBrowserCell] = None
+        if mode == EVENTS:
+            self.browser = EventBrowserCell()
+            self.right.addWidget(self.browser)
+            self.timeline.hide()
+        else:
+            self.right.addWidget(self.timeline)
         self.right.addWidget(self.grid)
         self.right.setChildrenCollapsible(True)
         self.right.setStretchFactor(1, 1)
@@ -424,6 +483,8 @@ class AnalysisWindow(ViewWindow):
         model.changed.connect(self._on_changed)
         model.dataChanged.connect(self._on_data_changed)
         self._rebuild_vars()
+        if mode == EVENTS:
+            self._init_events(query or evs.EventQuery(types=["onset"], group_by="run"), cache)
 
     def _build_toolbar(self) -> None:
         tb = QToolBar("Analysis")
@@ -465,12 +526,26 @@ class AnalysisWindow(ViewWindow):
         self.addAction(delete)
 
     def cells(self) -> list:
+        if self.mode == EVENTS:
+            return [self.compare, self.spectrum, self.spectrogram, self.at_cursors]
         return [self.timeline, self.compare, self.spectrum, self.spectrogram, self.at_cursors]
 
+    def _title(self, number: int) -> str:
+        return f"Wavi - {'Events' if self.mode == EVENTS else 'Analysis'} {number}"
+
     def default_sizes(self) -> None:
-        """The layout a new window starts with: panel 290 px, timeline 150 px, the
-        2x2 at 62 / 38 % across and half / half down."""
+        """The layout a new window starts with: panel 290 px (Events: 330), timeline
+        150 px (Events: the browser, 30 %), the 2x2 at 62 / 38 % across and half /
+        half down (Events: 70 / 30, the waveform's row 62 %: the spectrogram keeps
+        room for its tile under its colour bar)."""
         w, h = max(800, self.width()), max(500, self.height())
+        if self.mode == EVENTS:
+            pw, th = 330, int(h * 0.30)
+            self.split.setSizes([pw, w - pw])
+            self.right.setSizes([th, h - th])
+            cw, gh = w - pw, h - th
+            self.grid.set_state([int(cw * 0.7), cw - int(cw * 0.7)], [int(gh * 0.62), gh - int(gh * 0.62)])
+            return
         th = max(TIMELINE_H, self.timeline.minimumHeight())
         self.split.setSizes([290, w - 290])
         self.right.setSizes([th, h - th])
@@ -540,7 +615,7 @@ class AnalysisWindow(ViewWindow):
         """A closed window reused as a new one: nothing included or checked, no
         cursors, the default sizes."""
         self.number = number
-        self.setWindowTitle(f"Wavi - Analysis {number}")
+        self.setWindowTitle(self._title(number))
         self._included = []
         self.set_checked([v.key for v in self._vars], False)
         self.set_checked([v.key for v in self._vars], False, TIMELINE)
@@ -558,14 +633,19 @@ class AnalysisWindow(ViewWindow):
     def dataset(self) -> Dataset:
         keys = set(self.checked_keys())
         m = self.model
+        if self.mode == EVENTS:
+            pick = self.picked_event_selection()
+            return Dataset([pick] if pick is not None else [],
+                           [v for v in self._vars if v.key in keys], sub=self.sub, baseline=True)
         return Dataset(self.included, [v for v in self._vars if v.key in keys],
-                       despike=m.despike, v0=m.v0, scale=m.scale, sub=self.sub)
+                       despike=m.despike, v0=m.v0, scale=m.scale, sub=self.sub,
+                       dome_map=self._dome_map_fn())
 
     def timeline_dataset(self) -> Dataset:
         keys = set(self.timeline_keys())
         m = self.model
         return Dataset([], [v for v in self._vars if v.key in keys],
-                       despike=m.despike, v0=m.v0, scale=m.scale)
+                       despike=m.despike, v0=m.v0, scale=m.scale, dome_map=self._dome_map_fn())
 
     def set_sub(self, sub) -> None:
         """The sub-range (a, b) in seconds from each selection's start, or None: the
@@ -688,10 +768,18 @@ class AnalysisWindow(ViewWindow):
             for col in (PLOTS, TIMELINE):
                 it.setCheckState(col, Qt.CheckState.Unchecked)
             return it
-        tops = {WSK: node(self.var_tree, "Whiskers"), IMU: node(self.var_tree, "IMU")}
+        tops = {}
+        if self.mode == EVENTS and any(v.source == POS for v in new):
+            tops[POS] = node(self.var_tree, "Positions")
+        tops[WSK] = node(self.var_tree, "Whiskers")
+        tops[IMU] = node(self.var_tree, "IMU")
+        if any(v.source == CMD for v in new):
+            tops[CMD] = node(self.var_tree, "Demand / Thrust")
+        if POS not in tops and any(v.source == POS for v in new):
+            tops[POS] = node(self.var_tree, "Positions")
         groups: dict = {}
         for v in new:
-            side = WSK if v.source == WSK else IMU
+            side = v.source if v.source in (WSK, POS, CMD) else IMU
             top = tops[side]
             if v.source == DEPTH:
                 parent = top
@@ -700,14 +788,18 @@ class AnalysisWindow(ViewWindow):
                 if parent is None:
                     parent = groups[(side, v.group)] = node(top, v.group)
             it = QTreeWidgetItem(parent, [v.label.split(" ")[-1] if v.source != DEPTH else v.label])
+            if v.source == POS:
+                it.setToolTip(0, f"{v.label}: the position's gauge in each recording's dome map,"
+                                 " polarity applied")
             it.setFlags(flags)
             it.setData(0, _KEY, v.key)
-            it.setToolTip(0, f"{v.label} ({v.unit})")
+            if v.source != POS:
+                it.setToolTip(0, f"{v.label} ({v.unit})")
             for col in (PLOTS, TIMELINE):
                 it.setCheckState(col, Qt.CheckState.Checked if v.key in keep[col]
                                  else Qt.CheckState.Unchecked)
-        tops[IMU].setExpanded(True)
-        tops[WSK].setExpanded(True)
+        for side, top in tops.items():
+            top.setExpanded(side in (IMU, WSK, POS) if self.mode != EVENTS else side == POS)
         self.var_tree.blockSignals(False)
         self._fix_parents()
 
@@ -906,7 +998,8 @@ class AnalysisWindow(ViewWindow):
 
     def _probe_lines(self) -> list[pg.InfiniteLine]:
         return [*self.compare.probes.values(), *self.spectrum.probes.values(),
-                *self.timeline.probes.values(), self.spectrogram.probe, self.at_cursors.probe]
+                *(self.timeline.probes.values() if self.mode != EVENTS else ()),
+                self.spectrogram.probe, self.at_cursors.probe]
 
     def _on_probe_toggled(self, on: bool) -> None:
         if not on:
@@ -976,13 +1069,212 @@ class AnalysisWindow(ViewWindow):
         if self.replay is None or not self.replay.active:
             self._request()
 
+    # ----- Events mode
+
+    def _init_events(self, query: evs.EventQuery, cache) -> None:
+        self.loader = EventLoader(cache, self)
+        self.eventset: Optional[evs.EventSet] = None
+        self.overlay: Optional[evs.Overlay] = None
+        self.colors: dict = {}
+        self.sel_keys: list = []
+        self.hover_key = None
+        self._ov_vars: Optional[tuple] = None
+        self._num_of: dict = {}                    # EventRef.key -> selection number
+        self._extra: dict = {}                     # (numbers, var keys) -> {number: {key: (t, y)}}
+        p, b = self.events_panel, self.browser
+        p.queryChanged.connect(self._on_query)
+        b.selectionChanged.connect(self._on_event_selection)
+        b.hovered.connect(self._on_event_hover)
+        b.curate.connect(self.curate)
+        b.openEvent.connect(self._open_event_key)
+        self.compare.eventClicked.connect(self._on_wave_event)
+        self.loader.setReady.connect(self._on_set)
+        self.loader.overlayReady.connect(self._on_overlay)
+        self.loader.progress.connect(self._on_progress)
+        self.loader.failed.connect(lambda m: self._on_progress(f"failed: {m}"))
+        if not self.checked_keys():
+            self.set_checked([v.key for v in self._vars if v.source == POS])
+        p.set_query(query, emit=False)
+        self.query = p.query
+        self._request_load()
+
+    def set_query(self, q: evs.EventQuery) -> None:
+        """Events: the panel, the set and the traces from ``q``."""
+        self.events_panel.set_query(q)
+
+    def _checked_vars(self) -> list:
+        keys = set(self.checked_keys())
+        return [v for v in self._vars if v.key in keys]
+
+    def _request_load(self) -> None:
+        vs = self._checked_vars()
+        self._ov_vars = tuple(v.key for v in vs)
+        self.loader.request(self.query, vs)
+
+    def _on_query(self, q: evs.EventQuery) -> None:
+        self.query = q
+        self._request_load()
+
+    def _on_set(self, es, gen: int) -> None:
+        if gen != self.loader.gen:
+            return
+        self.eventset = es
+        self.colors = group_colors(list(es.groups))
+        self.browser.set_events(es, self.colors)
+        self._request()
+
+    def _on_overlay(self, ov, gen: int) -> None:
+        if gen != self.loader.gen:
+            return
+        self.overlay = ov
+        self._num_of = {s.event.key: s.number for s in ov.selections if s.event is not None}
+        self._extra = {}
+        self._request()
+
+    def _on_progress(self, text: str) -> None:
+        if self.events_panel is not None:
+            self.events_panel.set_status(text)
+
+    def _on_event_selection(self, keys: list) -> None:
+        self.sel_keys = list(keys)
+        self._request()
+
+    def _on_event_hover(self, key) -> None:
+        if key != self.hover_key:
+            self.hover_key = key
+            self._request()
+
+    def _on_wave_event(self, number: int) -> None:
+        key = next((k for k, n in self._num_of.items() if n == number), None)
+        if key is not None:
+            self.browser.set_selected([key], emit=True)
+
+    def _ref(self, key) -> Optional[evs.EventRef]:
+        es = self.eventset
+        if es is None:
+            return None
+        return next((r for r in es.events + es.excluded if r.key == tuple(key)), None)
+
+    def _open_event_key(self, key) -> None:
+        r = self._ref(key)
+        if r is not None:
+            self.openEvent.emit(r.recording, float(r.t))
+
+    def curate(self, action: str, keys: list) -> None:
+        """The browser's Exclude / Include / Pin / Unpin / Show only these / Include
+        all: into the query's curation (and so into a saved comparison)."""
+        q = self.events_panel.query
+        ex = {tuple(k) for k in q.excludes}
+        pins = {tuple(k) for k in q.pins}
+        keys = {tuple(k) for k in keys}
+        if action == "exclude":
+            ex |= keys
+        elif action == "include":
+            ex -= keys
+        elif action == "pin":
+            pins |= keys
+        elif action == "unpin":
+            pins -= keys
+        elif action == "only" and self.eventset is not None:
+            ex |= {r.key for r in self.eventset.events} - keys
+        elif action == "include_all":
+            ex = set()
+        self.events_panel.set_curation(sorted(ex), sorted(pins))
+
+    def highlighted(self) -> list:
+        """Selection numbers drawn thick: the browser's selection, then the hovered one."""
+        keys = list(self.sel_keys) + ([self.hover_key] if self.hover_key is not None else [])
+        return list(dict.fromkeys(self._num_of[k] for k in keys if k in self._num_of))
+
+    def picked_event_selection(self) -> Optional[Selection]:
+        """The event the spectra read: the first selected, else the first drawn."""
+        ov = self.overlay
+        if ov is None or not ov.selections:
+            return None
+        by = ov.by_number
+        for k in self.sel_keys:
+            n = self._num_of.get(k)
+            if n in by:
+                return by[n]
+        return ov.drawn[0] if ov.drawn else ov.selections[0]
+
+    def _extra_traces(self, numbers: list, vs: list) -> dict:
+        """Traces of highlighted events beyond the drawn ones (one event: cheap)."""
+        ov = self.overlay
+        drawn = {s.number for s in ov.drawn}
+        want = tuple(n for n in numbers if n not in drawn)
+        key = (want, tuple(v.key for v in vs))
+        got = self._extra.get(key)
+        if got is None:
+            by = ov.by_number
+            got = {n: evs.event_traces(by[n], vs, self.loader.n_px) for n in want if n in by}
+            self._extra = {key: got}
+        return got
+
+    def _render_events(self) -> None:
+        vs = self._checked_vars()
+        if tuple(v.key for v in vs) != self._ov_vars:
+            self._request_load()
+        ov = self.overlay
+        hl = self.highlighted() if ov is not None else []
+        if _open(self.compare):
+            self.compare.render(ov, vs, self.colors, hl,
+                                self._extra_traces(hl, vs) if ov is not None else None)
+            self._sync_cursors()
+        ds = self.dataset()
+        grid_cells = (self.spectrum, self.spectrogram, self.at_cursors)
+        if not ds.selections or not ds.variables:
+            hint = ("Loading the events ..." if self.loader.busy else
+                    "No events: widen the filter or the scope on the left." if ov is not None
+                    else "Check variables for Plots on the left.")
+            for cell in grid_cells:
+                cell.show_hint(hint)
+            self.spectrogram.data = None
+            return
+        shades = shades_of(ds)
+        if _open(self.spectrum):
+            self.spectrum.render(ds, shades)
+        if _open(self.spectrogram) or _open(self.at_cursors):
+            self.spectrogram.render(ds)
+        if _open(self.at_cursors):
+            self.at_cursors.render(self.spectrogram, [(n, t) for n, t in self.cursors])
+
+    # ----- the timeline's manoeuvre lane (Selections mode)
+
+    def _lane_clicked(self, t0: float, t1: float) -> None:
+        sel = self.model.create(t0, t1)
+        if isinstance(sel, str):
+            self.statusBar().showMessage(f"No selection: {sel}", 4000)
+            return
+        self.include(sel)
+
+    def _lane_compare(self, ev: dict) -> None:
+        """Compare similar: an Events query with the event's type, class, mode and
+        |u| +- 0.1, over the recording's folder (its day, and what else is there)."""
+        got = self._manoeuvres_fn()
+        rec = got[0] if got else None
+        lvl = abs(evs._event_level(ev))
+        mode = (ev.get("context") or {}).get("mode")
+        q = evs.EventQuery(recordings=[str(Path(rec).parent)] if rec else [],
+                           types=[ev.get("type", "onset")], classes=[ev.get("class", "")],
+                           level_min=round(max(0.0, lvl - 0.1), 3),
+                           level_max=round(min(1.0, lvl + 0.1), 3) if lvl + 0.1 < 1.0 else None,
+                           modes=[mode] if mode else [], group_by="run",
+                           pins=[[ev.get("_stem", ""), int(ev.get("id", -1))]] if ev.get("_stem") else [])
+        self.compareSimilar.emit(q)
+
     def _render(self) -> None:
         scheduler().done(self)
         if not self.isVisible():
             return
+        if self.mode == EVENTS:
+            self._render_events()
+            return
         src = timeline_source_of(self._source_fn)
         self._default_timeline(src)
         if _open(self.timeline):
+            got = self._manoeuvres_fn()
+            self.timeline.set_manoeuvres(got[1] if got else None)
             self.timeline.render(src, self.timeline_dataset())
         ds = self.dataset()
         grid_cells = (self.compare, self.spectrum, self.spectrogram, self.at_cursors)

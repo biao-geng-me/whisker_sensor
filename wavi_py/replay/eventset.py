@@ -23,7 +23,9 @@ later, per event, from the recordings' stores:
 Filters (a None / empty field does not filter):
 
 - ``recordings``: recording paths or folders (a folder: its ``*.jsonl``);
-  ``sidecar_dir``: where the sidecars are (default: next to each recording);
+  ``sidecar_dir``: where the sidecars are (default: next to each recording, or
+  the user cache's ``manoeuvres/`` for a folder we cannot write:
+  ``manoeuvres.sidecar_dir_for``);
   ``build_missing``: make a missing or outdated sidecar (``write_manoeuvres_for``;
   with ``sidecar_dir`` the recordings' folder gets no caches);
 - ``kinds`` ("hold", "transition"), ``types`` ("hold", "onset", "release",
@@ -40,6 +42,8 @@ Filters (a None / empty field does not filter):
 - ``depth_min_cm`` / ``depth_max_cm``: a depth filter drops runs whose depth is
   not trusted (``recording.depth_ok`` false) and events without a depth;
 - ``alive``: "all" (no position lost, ``alive`` false), or a list of positions;
+  undetermined (``alive`` null: no thrust, a rest) passes; ``alive_known``: only
+  events where every one of those positions is known alive;
 - ``whisker_sets``, ``map_ids``: the recording's dome map (``recording.whisker_set``
   / ``dome_map``; a v1 sidecar without them: ``replay/dome_maps.dome_map_for``);
 - ``group_by``: "run", "day", "level" (bins of ``|level|`` by ``level_edges``),
@@ -89,6 +93,7 @@ class EventQuery:
     depth_min_cm: Optional[float] = None
     depth_max_cm: Optional[float] = None
     alive: Union[str, list, None] = None
+    alive_known: bool = False
     whisker_sets: list = field(default_factory=list)
     map_ids: list = field(default_factory=list)
     group_by: str = "none"
@@ -155,8 +160,9 @@ class EventRef:
     baseline_t: Optional[tuple]
     baseline_clean: bool
     steady: bool
-    minor: dict
+    minor: dict                     # axis -> the largest |u| of that minor input
     alive: dict                     # position -> True / False / None
+    no_reference: bool              # its map has no reference: no drift correction
     flags: dict                     # quality: adc_flagged_scans, railed, lost
     map_id: Optional[str]
     whisker_set: Optional[str]
@@ -211,11 +217,24 @@ def _ref_of(rec: str, doc: dict, e: dict, map_id, wset) -> EventRef:
         depth_cm=ctx.get("depth_cm"), depth_ok=bool((doc.get("recording") or {}).get("depth_ok", True)),
         baseline_t=tuple(bt) if bt else None,
         baseline_clean=bool(ctx.get("baseline_clean", q.get("baseline_clean", False))),
-        steady=bool(q.get("steady", False)), minor=dict(e.get("minor") or {}),
+        steady=bool(q.get("steady", False)), minor=_minor_levels(e.get("minor")),
         alive={k: p.get("alive") for k, p in (e.get("positions") or {}).items()},
+        no_reference=not (doc.get("recording") or {}).get("reference"),
         flags={k: q.get(k) for k in ("adc_flagged_scans", "railed", "lost")},
         map_id=map_id, whisker_set=wset, day=rn.date if rn else "",
         positions=e.get("positions") or {}, motion=e.get("motion") or {})
+
+
+def _minor_levels(m) -> dict:
+    """The sidecar's minor inputs ({axis: {"max", "share"}}, round 2; a bare level
+    in older ones) as {axis: the largest |u|}."""
+    out = {}
+    for k, v in (m or {}).items():
+        try:
+            out[k] = float(v.get("max", 0.0)) if isinstance(v, dict) else float(v)
+        except (TypeError, ValueError):
+            continue
+    return out
 
 
 def _matches(q: EventQuery, r: EventRef) -> bool:
@@ -250,9 +269,11 @@ def _matches(q: EventQuery, r: EventRef) -> bool:
             return False
         if q.depth_max_cm is not None and r.depth_cm > q.depth_max_cm:
             return False
-    if q.alive:
-        keys = r.alive.keys() if q.alive == "all" else q.alive
+    if q.alive or q.alive_known:
+        keys = r.alive.keys() if q.alive in ("all", None, []) else q.alive
         if any(r.alive.get(k) is False for k in keys):
+            return False
+        if q.alive_known and any(r.alive.get(k) is not True for k in keys):
             return False
     if q.whisker_sets and r.whisker_set not in q.whisker_sets:
         return False
@@ -309,6 +330,8 @@ def read_sidecar(recording: Union[str, Path], sidecar_dir=None, build: bool = Tr
     """The recording's current sidecar (made when missing or outdated and
     ``build``); None if there is none and it could not be made."""
     rec = Path(recording)
+    if sidecar_dir is None:
+        sidecar_dir = mn.sidecar_dir_for(rec)
     mp = mn.manoeuvres_path(rec, sidecar_dir)
     try:
         st = mp.stat()
@@ -404,6 +427,8 @@ class EventSet:
                    "hold_s": r.hold_s, "mode": r.mode, "depth_cm": r.depth_cm,
                    "baseline_clean": r.baseline_clean, "steady": r.steady,
                    "minor": max((abs(float(v)) for v in r.minor.values()), default=0.0),
+                   "no_reference": r.no_reference,
+                   "lost": [k for k, a in r.alive.items() if a is False],
                    "map_id": r.map_id, "whisker_set": r.whisker_set, "day": r.day,
                    "pinned": r.pinned, "excluded": r.excluded}
             for k, p in r.positions.items():
@@ -552,19 +577,24 @@ def _try_save(fn, path: Path) -> None:
         pass
 
 
-def event_selections(es: EventSet, cache: StoreCache, number0: int = 1) -> list:
+def event_selections(es: EventSet, cache: StoreCache, number0: int = 1,
+                     progress=None) -> list:
     """``daq/analysis.Selection``\\ s of the set's events (see the module doc), in
-    its order; an event whose recording does not open is left out."""
+    its order; an event whose recording does not open is left out.
+    ``progress(k, n, stem)`` before each recording's store is fetched."""
     from wavi_py.daq.analysis import SelSource, Selection
     from wavi_py.replay.dome_maps import dome_map_for
     maps: dict = {}
     sources: dict = {}
     out = []
+    recs = list(dict.fromkeys(r.recording for r in es.events))
     for r in es.events:
         if r.recording not in sources:
+            if progress is not None:
+                progress(len(sources), len(recs), r.stem)
             try:
                 idx, st = cache.get(r.recording)
-            except (OSError, ValueError):
+            except (OSError, ValueError, KeyError, IndexError):
                 sources[r.recording] = None
                 continue
             sources[r.recording] = SelSource(st, idx.depth())
@@ -582,3 +612,106 @@ def event_selections(es: EventSet, cache: StoreCache, number0: int = 1) -> list:
                              group=r.group, pinned=r.pinned, baseline=r.baseline_t,
                              dome_map=maps[r.recording], label=r.label, event=r))
     return out
+
+
+# ---------------------------------------------------------------------------
+# the overlay: what the event waveform draws (computed off the GUI thread)
+# ---------------------------------------------------------------------------
+@dataclass
+class Overlay:
+    """The traces of an event set for the event waveform: ``per_event[(number,
+    key)] = (t, y)`` of the drawn selections (time from the onset, decimated);
+    ``thin[(group, key)] = (t, y, owner)``: a group's drawn traces of one variable
+    in one curve (NaN between events; ``owner`` the selection number of each
+    point); ``aggregates[key]``: ``Dataset.aggregate`` over every event."""
+    selections: list
+    drawn: list
+    per_event: dict
+    thin: dict
+    aggregates: dict
+    variables: list
+    compute_s: float = 0.0
+
+    @property
+    def by_number(self) -> dict:
+        return {s.number: s for s in self.selections}
+
+
+def overlay(selections: list, variables: list, n_px: int = 800,
+            max_traces: Optional[int] = None, aggregates: bool = True) -> Overlay:
+    """The ``Overlay`` of ``selections`` (event selections) for ``variables``:
+    baseline mode (``daq/analysis.Dataset``), at most ``max_traces`` drawn."""
+    from wavi_py.daq.analysis import MAX_TRACES, Dataset
+    import numpy as np
+    t0 = time.perf_counter()
+    ds = Dataset(selections, list(variables), baseline=True,
+                 max_traces=MAX_TRACES if max_traces is None else max_traces)
+    drawn = ds.drawn()
+    per = {}
+    for tr in ds.traces(n_px):
+        per[(tr.sel.number, tr.var.key)] = (tr.t, tr.y)
+    thin = {}
+    groups = list(dict.fromkeys(s.group for s in drawn))
+    for g in groups:
+        sels = [s for s in drawn if s.group == g]
+        for v in variables:
+            ts, ys, os_ = [], [], []
+            for s in sels:
+                got = per.get((s.number, v.key))
+                if got is None or not len(got[0]):
+                    continue
+                ts += [got[0], [np.nan]]
+                ys += [got[1], [np.nan]]
+                os_ += [np.full(len(got[0]) + 1, s.number, np.int32)]
+            if ts:
+                thin[(g, v.key)] = (np.concatenate(ts), np.concatenate(ys), np.concatenate(os_))
+    ag = {v.key: ds.aggregate(v) for v in variables} if aggregates else {}
+    return Overlay(list(selections), drawn, per, thin, ag, list(variables),
+                   time.perf_counter() - t0)
+
+
+def event_traces(sel, variables: list, n_px: int = 800) -> dict:
+    """``{key: (t, y)}`` of one event selection (a highlighted one beyond the cap)."""
+    from wavi_py.daq.analysis import Dataset
+    ds = Dataset([sel], list(variables), baseline=True, max_traces=None)
+    return {tr.var.key: (tr.t, tr.y) for tr in ds.traces(n_px)}
+
+
+# ---------------------------------------------------------------------------
+# features: the table's column and the scatter's axes
+# ---------------------------------------------------------------------------
+QUANTITIES = ("steady", "peak", "band RMS", "tau", "rise 63 %")
+EVENT_FIELDS = ("level", "|level|", "hold", "depth", "t")
+
+
+def feature(r: EventRef, source: str, quantity: str = "steady"):
+    """A number of the event: ``source`` an ``EVENT_FIELDS`` name, a position axis
+    (``"LFM drag"``) or a motion channel (``"motion acc_x"``), ``quantity`` one of
+    ``QUANTITIES`` (positions: steady / peak / band RMS (uV) / tau; motion:
+    steady / peak / tau / rise 63 %); None where the sidecar has none."""
+    if source == "level":
+        return r.level
+    if source == "|level|":
+        return abs(r.level)
+    if source == "hold":
+        return r.hold_s
+    if source == "depth":
+        return r.depth_cm
+    if source == "t":
+        return r.t
+    if source.startswith("motion "):
+        m = r.motion.get(source[7:]) or {}
+        k = {"steady": "steady", "peak": "peak", "tau": "tau_s", "rise 63 %": "rise63_s"}.get(quantity)
+        return m.get(k) if k else None
+    pos, _, ax = source.partition(" ")
+    p = r.positions.get(pos) or {}
+    f = p.get(ax) or {}
+    k = {"steady": "steady", "peak": "peak", "band RMS": "band_uv", "tau": "tau_s"}.get(quantity)
+    return f.get(k) if k else None
+
+
+def feature_sources(es: Optional[EventSet] = None) -> list[str]:
+    """The ``feature`` sources there are: positions' axes (dome order), then motion."""
+    from wavi_py.daq.analysis import DOME_ORDER
+    out = [f"{p} {ax}" for p in DOME_ORDER for ax in ("drag", "lift")]
+    return out + [f"motion {m}" for m in mn.MOTION]

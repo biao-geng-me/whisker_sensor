@@ -33,7 +33,7 @@ from typing import Optional, Union
 SAME_S = 3.0
 # longest first: ".jsonl.idx.npz" before ".jsonl"; ".notes.jsonl" before ".jsonl"
 SUFFIXES = (".jsonl.store.npz", ".jsonl.idx.npz", ".dat.store.npz", ".dat.idx.npz",
-            ".notes.jsonl", ".card.json", ".faults.txt", ".jsonl", ".dat")
+            ".notes.jsonl", ".card.json", ".manoeuvres.json", ".faults.txt", ".jsonl", ".dat")
 RECORDING_SUFFIXES = (".jsonl", ".dat")     # the data; the rest are sidecars
 CACHE_SUFFIXES = (".jsonl.store.npz", ".jsonl.idx.npz", ".dat.store.npz", ".dat.idx.npz")
 

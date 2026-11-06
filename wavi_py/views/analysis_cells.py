@@ -126,8 +126,10 @@ def _input_key(ds: Dataset, sel, var, *opts) -> tuple:
     """Everything a spectrum / spectrogram of (sel, var) depends on."""
     v0 = (float(ds.v0[var.col]) if var.source == WSK and ds.v0 is not None
           and var.col < len(ds.v0) else 0.0)
-    return (ds.span(sel), id(sel.source), ds.despike and var.source == WSK, v0,
-            ds.scale if var.source == WSK else 1.0, *opts)
+    gauge = var.source in (WSK, "pos")
+    return (ds.span(sel), id(sel.source), ds.despike and gauge, v0,
+            ds.scale if gauge else 1.0, getattr(ds, "baseline", False), ds.gauge(sel, var)
+            if var.source == "pos" else None, *opts)
 
 
 def _hook_drag(vb: pg.ViewBox, handler: Callable) -> None:

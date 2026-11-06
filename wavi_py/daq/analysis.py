@@ -54,7 +54,8 @@ recording's ``SelSource``):
 - ``Dataset.baseline``: the gauges (``wsk`` and ``pos``) minus each selection's
   baseline (the median over its baseline window) and minus the reference drift
   where its map has a reference: the mean of the reference gauges, low-passed at
-  ``REF_LP_HZ`` (as ``replay/manoeuvres.py``), minus its own baseline. V0 does
+  ``REF_LP_HZ`` over the whole recording (``reference_drift``, cached per
+  series; as ``replay/manoeuvres.py``), minus its own baseline. V0 does
   not apply then (the baseline replaces it); the scale does;
 - ``max_traces``: ``traces`` draws at most this many selections (the pinned ones
   first, then evenly spread over the rest); ``aggregate`` uses every one: per
@@ -65,6 +66,7 @@ recording's ``SelSource``):
 from __future__ import annotations
 
 import math
+import weakref
 from dataclasses import dataclass, field
 from typing import Optional, Sequence
 
@@ -80,6 +82,11 @@ UNIT_GROUPS = ("mV", "mg", "mrad/s", "deg", "cm", "demand")   # Compare's rows, 
 MAX_TRACES = 200                # selections ``traces`` draws at most
 REF_LP_HZ = 0.5                 # the reference drift's low-pass (replay/manoeuvres.py)
 AGG_DT = 0.02                   # the aggregates' grid step (s)
+# the dome's positions as seen from behind: columns left back, left front, right
+# front, right back; rows upper, middle, lower (the event waveform's dome grid)
+DOME_COLS = ("LB", "LF", "RF", "RB")
+DOME_ROWS = ("U", "M", "L")
+DOME_ORDER = tuple(c + r for r in DOME_ROWS for c in DOME_COLS)
 _RAD_DEG = 180.0 / math.pi
 
 # (IMU column, group label, axis label, unit, factor): the IMU window's units
@@ -291,6 +298,38 @@ BASELINE_S = 1.0                # a selection without a baseline window: this mu
 _REF_PAD_S = 2.0                # the reference is low-passed over its span plus this either side
 
 
+_REF_CACHE: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+
+
+def reference_drift(series: Series, cols: Sequence[int]) -> Optional[tuple[np.ndarray, np.ndarray]]:
+    """(t, mV): the mean of the reference gauges ``cols`` over the whole recording,
+    low-passed at ``REF_LP_HZ`` (zero phase, as ``replay/manoeuvres.py``: over the
+    whole recording, so an event's value does not depend on its window). Cached
+    per series and columns while the series' extent is unchanged; None without
+    samples."""
+    ext = series.extent(WSK)
+    if ext is None:
+        return None
+    try:
+        per = _REF_CACHE.setdefault(series, {})
+    except TypeError:                         # not weak-referenceable: no cache
+        per = {}
+    key = tuple(int(c) for c in cols)
+    got = per.get(key)
+    if got is not None and got[0] == ext:
+        return got[1]
+    t, y = series.get(WSK, list(key), ext[0], ext[1])
+    if not len(t):
+        return None
+    y = np.asarray(y, float)
+    with np.errstate(all="ignore"):
+        r = np.nanmean(y, axis=1) if y.shape[1] > 1 else y[:, 0]
+    r = np.where(np.isfinite(r), r, np.nanmedian(r) if np.isfinite(r).any() else 0.0)
+    out = (np.asarray(t, float), _lowpass(np.asarray(t, float), r, REF_LP_HZ))
+    per[key] = (ext, out)
+    return out
+
+
 @dataclass
 class _Gauged:
     """A selection's baseline-mode terms, computed once: per gauge column its
@@ -382,11 +421,12 @@ class Dataset:
             from whisker_link.channels import CHANNEL_NAMES
             names = ser.names(WSK)
             cols = [names.index(CHANNEL_NAMES[c]) for c in rg if CHANNEL_NAMES[c] in names]
-            if cols:
-                a, b = min(bw[0], sel.t0) - _REF_PAD_S, sel.t1 + _REF_PAD_S
-                t, y = ser.get(WSK, cols, a, b)
+            got = reference_drift(ser, cols) if cols else None
+            if got is not None:
+                t, r = got
+                i0, i1 = span_index(t, min(bw[0], sel.t0) - _REF_PAD_S, sel.t1 + _REF_PAD_S)
+                t, r = t[i0:i1], r[i0:i1]
                 if len(t):
-                    r = _lowpass(t, np.nanmean(np.asarray(y, float), axis=1), REF_LP_HZ)
                     inb = (t >= bw[0]) & (t <= bw[1])
                     rb = float(np.nanmedian(r[inb])) if inb.any() else float(np.nanmedian(r))
                     ref = (t, r - rb)

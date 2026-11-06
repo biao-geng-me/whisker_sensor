@@ -77,6 +77,10 @@ class RenderScheduler(QObject):
         budget stretches that to no less than ``min_hz`` (default: a quarter)."""
         self._entries[win] = _Entry(render, max_hz, min_hz or max_hz / _MAX_STRETCH)
 
+    def unregister(self, win: QWidget) -> None:
+        """Forget ``win`` (before it is deleted while Python may still hold it)."""
+        self._entries.pop(win, None)
+
     def request(self, win: QWidget) -> None:
         """Redraw ``win`` soon; repeated requests coalesce."""
         e = self._entries.get(win)

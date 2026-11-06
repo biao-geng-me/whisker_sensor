@@ -23,6 +23,16 @@ room for it.
 
 The rows are kept (a unit's plot and its overlay are made once and only moved
 in the layout), so checking variables does not rebuild the regions.
+
+The manoeuvre lane (when the recording has its sidecar, ``replay/manoeuvres.py``;
+``set_manoeuvres``): a row at the bottom with the stick segments as bars,
+coloured by axis and sign (``LANE_COLORS``; the minus side a darker shade),
+stronger the higher the level; rest is empty, the first ``COAST_S`` of a rest
+after a release (the coast) hatched in the released axis' colour, combos grey.
+Hover: class, level, duration. A click makes a selection of the event's
+window (the transition starting the segment, else the hold; ``laneClicked``);
+right-click: Compare similar... (``laneCompare``: the event, for an Events
+window).
 """
 
 from __future__ import annotations
@@ -32,7 +42,8 @@ from typing import Callable, Optional
 
 import numpy as np
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtWidgets import QWidget
+from PyQt6.QtGui import QBrush, QColor
+from PyQt6.QtWidgets import QMenu, QWidget
 
 import pyqtgraph as pg
 
@@ -48,6 +59,52 @@ _HEAD_PEN = pg.mkPen((210, 0, 0), width=2)
 _BARE = ""                                       # the row shown with no variable
 ROW_MIN = 58                                     # px a row keeps (its y labels don't overlap)
 _AXIS_H = 34                                     # the bottom row's time axis and label
+LANE = "stick"                                   # the manoeuvre lane's row key
+LANE_H = 34
+LANE_COLORS = {"surge": (31, 119, 180), "sway": (44, 160, 44), "heave": (148, 103, 189),
+               "yaw": (230, 120, 0)}
+COMBO_COLOR = (120, 120, 120)
+COAST_S = 2.0
+_AXES = ("surge", "sway", "heave", "yaw")
+
+
+def lane_bars(doc: dict) -> list[tuple]:
+    """[(t0, t1, QBrush, segment)] of a sidecar's segments (see the module doc)."""
+    out = []
+    segs = doc.get("segments") or []
+    prev = None
+    for sg in segs:
+        cls = sg.get("class", "")
+        t0, t1 = float(sg["t0"]), float(sg["t1"])
+        if cls == "rest":
+            if prev is not None and prev.get("class", "").startswith("single:"):
+                ax = prev["class"].split(":")[1][:-1]
+                c = QColor(*LANE_COLORS.get(ax, COMBO_COLOR))
+                out.append((t0, min(t1, t0 + COAST_S), QBrush(c, Qt.BrushStyle.BDiagPattern), sg))
+        elif cls == "combo":
+            out.append((t0, t1, QBrush(QColor(*COMBO_COLOR, 150)), sg))
+        elif cls.startswith("single:"):
+            ax, sign = cls.split(":")[1][:-1], cls[-1]
+            lv = sg.get("level") or [0, 0, 0, 0]
+            a = abs(float(lv[_AXES.index(ax)] or 0)) if ax in _AXES else 0.5
+            c = QColor(*LANE_COLORS.get(ax, COMBO_COLOR))
+            if sign == "-":
+                c = c.darker(160)
+            c.setAlpha(int(70 + 185 * min(1.0, a)))
+            out.append((t0, t1, QBrush(c), sg))
+        if cls != "disarmed":
+            prev = sg
+    return out
+
+
+def segment_text(sg: dict) -> str:
+    lv = sg.get("level") or []
+    parts = [f"{a} {float(v):+.2f}" for a, v in zip(_AXES, lv) if v]
+    minor = sg.get("minor") or {}
+    extra = (" · minor " + ", ".join(minor)) if minor else ""
+    return (f"{sg.get('class', '')}  {', '.join(parts) or 'rest'} · "
+            f"{float(sg['t1']) - float(sg['t0']):.2f} s ({float(sg['t0']):.2f} .. "
+            f"{float(sg['t1']):.2f} s){extra}")
 
 
 class TimelineCell(_Cell):
@@ -55,6 +112,8 @@ class TimelineCell(_Cell):
     action); ``replay``: the ``ReplayModel`` (playhead, seek) or None."""
 
     madeSelection = pyqtSignal(object)           # a Select drag here made this one
+    laneClicked = pyqtSignal(float, float)       # the lane: a selection of this window
+    laneCompare = pyqtSignal(object)             # the lane: Compare similar (the event)
 
     def __init__(self, model: SelectionModel, win, select_act, replay=None,
                  parent: Optional[QWidget] = None):
@@ -71,7 +130,11 @@ class TimelineCell(_Cell):
         self._anchor: Optional[pg.PlotItem] = None       # the top row shown: the X link
         self.zoomed = False
         self._extent: Optional[tuple] = None
+        self._lane_doc: Optional[dict] = None
+        self._lane_bars: list = []
+        self._lane_item = None
         self._show_rows([_BARE])
+        self.glw.scene().sigMouseMoved.connect(self._lane_hover)
 
     # ----- rows
 
@@ -87,6 +150,10 @@ class TimelineCell(_Cell):
         p.getAxis("left").enableAutoSIPrefix(False)
         p.getAxis("left").setWidth(AXIS_W)
         p.setLabel("left", unit)
+        if unit == LANE:
+            p.setYRange(0, 1, padding=0)
+            p.getAxis("left").setTicks([[]])
+            p.showGrid(x=True, y=False)
         if unit == "cm":
             p.getViewBox().invertY(True)                 # depth goes down
         vb = p.getViewBox()
@@ -103,7 +170,7 @@ class TimelineCell(_Cell):
             if len(self.model) > n:
                 self.madeSelection.emit(self.model.selections[-1])
         vb.mouseDragEvent = drag
-        hook_click(vb, self._click)
+        hook_click(vb, self._lane_click if unit == LANE else self._click)
         head = pg.InfiniteLine(angle=90, movable=False, pen=_HEAD_PEN)
         head.setZValue(20)
         head.setVisible(False)
@@ -137,10 +204,13 @@ class TimelineCell(_Cell):
             self._anchor.setXRange(*xr, padding=0)
         last = self.rows[units[-1]]
         last.setLabel("bottom", "Recording time", units="s")
-        for p in self.rows.values():
-            p.setMinimumHeight(ROW_MIN + (_AXIS_H if p is last else 0))
+        for u, p in self.rows.items():
+            base = LANE_H if u == LANE else ROW_MIN
+            p.setMinimumHeight(base + (_AXIS_H if p is last else 0))
+            if u == LANE:
+                p.setMaximumHeight(base + (_AXIS_H if p is last else 0))
         # the splitter keeps the timeline at least this tall (it grows with the rows)
-        self.setMinimumHeight(len(units) * ROW_MIN + _AXIS_H + 6)
+        self.setMinimumHeight(sum(LANE_H if u == LANE else ROW_MIN for u in units) + _AXIS_H + 6)
         self.show_position()
 
     def _on_manual(self, *_a) -> None:
@@ -212,6 +282,8 @@ class TimelineCell(_Cell):
         elif extent is not None and len(depth_t):
             extent = (min(extent[0], float(depth_t[0])), max(extent[1], float(depth_t[-1])))
         units = [u for u in UNIT_GROUPS if any(v.unit == u for v in ds.variables)] or [_BARE]
+        if self._lane_doc is not None:
+            units = units + [LANE]
         self._show_rows(units)
         new_extent = extent != self._extent
         self._extent = extent
@@ -255,6 +327,8 @@ class TimelineCell(_Cell):
             return
         self._legend_key = key
         for u, p in self.rows.items():
+            if u == LANE:                         # the lane has no curves (no empty box)
+                continue
             if p.legend is None:
                 p.addLegend(offset=(-10, 2), labelTextColor="k", verSpacing=-6,
                             brush=pg.mkBrush(255, 255, 255, 200), pen=pg.mkPen(180, 180, 180))
@@ -263,6 +337,81 @@ class TimelineCell(_Cell):
                 c = self.curves.get(v.key)
                 if v.unit == u and c is not None:
                     p.legend.addItem(c, v.label)
+
+    # ----- the manoeuvre lane
+
+    def set_manoeuvres(self, doc: Optional[dict]) -> None:
+        """The lane from a manoeuvres sidecar (None: no lane)."""
+        if doc is self._lane_doc:
+            return
+        self._lane_doc = doc
+        p = self._row(LANE)
+        if self._lane_item is not None:
+            p.removeItem(self._lane_item)
+            self._lane_item = None
+        self._lane_bars = lane_bars(doc) if doc is not None else []
+        if self._lane_bars:
+            x0 = np.array([b[0] for b in self._lane_bars])
+            w = np.array([b[1] - b[0] for b in self._lane_bars])
+            self._lane_item = pg.BarGraphItem(x0=x0, width=w, y0=0.12, height=0.76,
+                                              brushes=[b[2] for b in self._lane_bars],
+                                              pens=[pg.mkPen(None)] * len(self._lane_bars))
+            self._lane_item.setZValue(-10)
+            p.addItem(self._lane_item)
+        self._last = None
+        self.changed.emit()
+
+    def lane_segment_at(self, t: float) -> Optional[dict]:
+        if self._lane_doc is None:
+            return None
+        for sg in self._lane_doc.get("segments") or []:
+            if float(sg["t0"]) <= t < float(sg["t1"]):
+                return sg
+        return None
+
+    def lane_event_at(self, t: float) -> Optional[dict]:
+        """The event of the segment at ``t``: the transition starting it, else its hold."""
+        sg = self.lane_segment_at(t)
+        if sg is None or sg.get("class") in ("rest", "disarmed"):
+            return None
+        t0 = float(sg["t0"])
+        evs_ = [e for e in self._lane_doc.get("events") or [] if abs(float(e["t"]) - t0) < 1e-6]
+        ev = next((e for e in evs_ if e.get("kind") == "transition"), None) or \
+            next((e for e in evs_ if e.get("kind") == "hold"), None)
+        if ev is not None:
+            ev = dict(ev, _stem=self._lane_doc.get("stem", ""))
+        return ev
+
+    def _lane_hover(self, pos) -> None:
+        p = self._plots.get(LANE)
+        if p is None or LANE not in self.rows or not p.sceneBoundingRect().contains(pos):
+            return
+        t = float(p.getViewBox().mapSceneToView(pos).x())
+        sg = self.lane_segment_at(t)
+        self.glw.setToolTip(segment_text(sg) if sg is not None else "")
+
+    def _lane_click(self, vb: pg.ViewBox, ev) -> bool:
+        t = float(vb.mapSceneToView(ev.scenePos()).x())
+        if ev.button() == Qt.MouseButton.RightButton:
+            e = self.lane_event_at(t)
+            if e is None:
+                return False
+            ev.accept()
+            m = QMenu(self)
+            m.addAction(f"Compare similar... ({e.get('type')} {e.get('class')})").triggered.connect(
+                lambda: self.laneCompare.emit(e))
+            m.popup(ev.screenPos().toPoint())
+            self._lane_menu = m
+            return True
+        if ev.button() != Qt.MouseButton.LeftButton:
+            return False
+        if ev.double():
+            return self._click(vb, ev)
+        ev.accept()
+        e = self.lane_event_at(t)
+        if e is not None:
+            self.laneClicked.emit(float(e["t_start"]), float(e["t_end"]))
+        return True
 
     def overlays(self) -> list[SelectionOverlay]:
         return list(self._overlays.values())
