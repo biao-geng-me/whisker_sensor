@@ -534,3 +534,86 @@ def test_events_mode_spectra_header(app, tmp_path):
         assert "Select (S)" not in w.spectrogram.header.sub.text()
     finally:
         w.close()
+
+
+def _recs_swapped(tmp_path):
+    """Two 11-05 recordings: the first on the history's map, the second carrying a
+    map line where LBM's sensor sits on RBU's gauges (a slot swap)."""
+    import copy
+    import json
+    d = tmp_path / "recmap"
+    d.mkdir(exist_ok=True)
+    a, b = d / "st_2026-11-05_1200_00.00_a.jsonl", d / "st_2026-11-05_1300_00.00_b.jsonl"
+    write_rec(a)
+    write_rec(b)
+    doc = copy.deepcopy(dm.dome_map_for(a).doc)
+    p = doc["positions"]
+    p["LBM"]["daq"], p["RBU"]["daq"] = p["RBU"]["daq"], p["LBM"]["daq"]
+    doc["id"] = "test-swap"
+    line = (json.dumps({"k": "dome_map", "id": "test-swap", "map": doc}) + "\n").encode()
+    head, rest = b.read_bytes().split(b"\n", 1)
+    b.write_bytes(head + b"\n" + line + rest)
+    return [a, b]
+
+
+def test_selections_read_positions_through_their_recordings_map(app, tmp_path):
+    """Selections mode: a selection keeps its recording's own dome map (11-03 3x vs
+    11-05), so the same pos: variable reads that recording's gauge; live (no map),
+    the window's active map; the main window stamps the replayed recording's map."""
+    from wavi_py.views.analysis_window import AnalysisWindow
+    from wavi_py.views.selections import SelectionModel
+    from wavi_py.replay.index import RecordingIndex
+    from wavi_py.replay.store import RecordingStore
+    recs = _recs_swapped(tmp_path)
+    maps = [dm.dome_map_for(r) for r in recs]
+    assert maps[1].id == "test-swap" and maps[0].id != maps[1].id
+    pk = "LBM"                                    # its gauges moved in the second map
+    assert int(maps[0].position(pk).daq["drag"].ch) != int(maps[1].position(pk).daq["drag"].ch)
+    v = an.variable_of(f"pos:{pk}:drag")
+    srcs = []
+    for r in recs:
+        idx = RecordingIndex.build(r)
+        srcs.append(an.SelSource(RecordingStore.build(idx), idx.depth(), rov=idx.rov()))
+    model = SelectionModel()
+    sels = []
+    for src, m in zip(srcs, maps):
+        model.source_fn, model.dome_map_fn = (lambda s=src: s), (lambda m=m: m)
+        sels.append(model.create(1.0, 4.0))
+    assert [s.dome_map.id for s in sels] == [m.id for m in maps]
+    active = DomeMap.load(DEFAULT_MAP)
+    w = AnalysisWindow(model, _variables, 1, dome_map_fn=lambda: active)
+    try:
+        for s in sels:
+            w.include(s)
+        ds = w.dataset()
+        for s, m in zip(sels, maps):
+            c, pol = ds.gauge(s, v)
+            assert c == int(m.position(pk).daq["drag"].ch)
+        assert ds.gauge(sels[0], v)[0] != ds.gauge(sels[1], v)[0]
+        # live (no recording map): the active map
+        model.source_fn, model.dome_map_fn = (lambda: srcs[0]), (lambda: None)
+        live = model.create(1.0, 4.0)
+        assert live.dome_map is None
+        assert w.dataset().gauge(live, v)[0] == int(active.position(pk).daq["drag"].ch)
+    finally:
+        w.close()
+
+
+def test_main_window_stamps_the_replayed_recordings_map(app, tmp_path):
+    from wavi_py.main_window import MainWindow
+    recs = _recs_swapped(tmp_path)
+    w = MainWindow(transport="replay", nsensor=16, fs=80.0, replay_path=str(recs[0]),
+                   t_buffer_s=2.0)
+    w.show()
+    try:
+        ids = []
+        for r in recs:
+            w.open_replay(str(r))
+            assert _pump(app, lambda: w._store is not None
+                         and str(w._index.path) == str(r), 60)
+            s = w._selections.create(1.0, 3.0)
+            ids.append(s.dome_map.id)
+        assert ids == [dm.dome_map_for(r).id for r in recs] and ids[1] == "test-swap" != ids[0]
+        assert w.recording_dome_map().id == ids[1]
+    finally:
+        w.close()

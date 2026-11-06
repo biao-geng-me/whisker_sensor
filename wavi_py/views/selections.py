@@ -70,6 +70,9 @@ class SelectionModel(QObject):
         self.hovered: Optional[Selection] = None
         # the source of a new selection: a SelSource, or a str saying why there is none
         self.source_fn: Callable[[], Union[SelSource, str]] = lambda: "no data"
+        # the dome map of a new selection's recording (its Positions read through it);
+        # None (live): the Analysis window's active map
+        self.dome_map_fn: Callable[[], object] = lambda: None
         self._frozen: Optional[SelSource] = None
         self.despike = False
         self.v0 = None
@@ -96,7 +99,8 @@ class SelectionModel(QObject):
         bounds = src.extent()
         if bounds is None:
             return "no data to select"
-        sel = Selection(self._next, 0.0, 0.0, src, bounds)
+        sel = Selection(self._next, 0.0, 0.0, src, bounds,
+                        dome_map=None if self._frozen is not None else self.dome_map_fn())
         sel.t0, sel.t1 = sel.clamp(t0, t1)
         self._next += 1
         self._sels.append(sel)

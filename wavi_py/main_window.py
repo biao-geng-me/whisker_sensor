@@ -342,6 +342,7 @@ class MainWindow(QMainWindow):
         self._rov_view = None
         # whisker positions / sensors / calibration (None: W1 .. W16, placeholder dome holes)
         self._dome_map: Optional[DomeMap] = None
+        self._map_of_rec: Optional[tuple] = None             # (recording, its own dome map)
         self._selections = SelectionModel(self)
         self._analysis: list[AnalysisWindow] = []          # open, oldest focused first
         self._analysis_spare: list[AnalysisWindow] = []    # closed: reused by the next new one
@@ -1348,6 +1349,7 @@ class MainWindow(QMainWindow):
         strip, Select mode in the Line and IMU windows, and the Analysis windows."""
         m = self._selections
         m.source_fn = self._selection_source
+        m.dome_map_fn = self.recording_dome_map
         lv, iv = self._line_view, self._imu_view
         self._sel_overlays = [
             SelectionOverlay(m, lv._all_plots(), self._line_vars_at, self),
@@ -1359,6 +1361,22 @@ class MainWindow(QMainWindow):
         self._imu_select = attach_select(iv, m, [p.getViewBox() for p in iv._plots],
                                          after=iv._act_link)
         m.requested.connect(self._on_selection_request)
+
+    def recording_dome_map(self):
+        """The replayed recording's own dome map (``replay/dome_maps.dome_map_for``:
+        the embedded line, else the history entry at its start), cached per recording;
+        None live (the Positions then read the active map). A new selection keeps it
+        (``SelectionModel.dome_map_fn``), so each reads its recording's map."""
+        if not self._replaying or self._index is None:
+            return None
+        path = str(self._index.path)
+        if self._map_of_rec is None or self._map_of_rec[0] != path:
+            from wavi_py.replay.dome_maps import dome_map_for
+            try:
+                self._map_of_rec = (path, dome_map_for(path))
+            except (OSError, ValueError):
+                self._map_of_rec = (path, None)
+        return self._map_of_rec[1]
 
     def _selection_source(self):
         """What a new selection reads (``SelectionModel.source_fn``): the whole

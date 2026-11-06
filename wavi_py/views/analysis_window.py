@@ -416,8 +416,9 @@ class AnalysisWindow(ViewWindow):
     the dome's positions); ``source_fn()`` is what the timeline shows (a
     ``SelSource``: the whole recording, the live buffers; or None / a str when
     there is none); ``replay``: the ``ReplayModel`` (playhead, seek);
-    ``dome_map_fn()``: the dome map the Positions variables read in Selections
-    mode; ``manoeuvres_fn()``: the open recording's manoeuvres sidecar (the
+    ``dome_map_fn()``: the active dome map (the grids' layout; the Positions of a
+    selection without its own map, i.e. live data: a replayed recording's selection
+    carries its recording's map, ``SelectionModel.dome_map_fn``); ``manoeuvres_fn()``: the open recording's manoeuvres sidecar (the
     timeline's lane) or None. ``mode``: SELECTIONS or EVENTS (fixed for the
     window); EVENTS starts on ``query`` and fetches stores through ``cache``."""
 
@@ -771,8 +772,10 @@ class AnalysisWindow(ViewWindow):
     def timeline_dataset(self) -> Dataset:
         keys = set(self.timeline_keys())
         m = self.model
+        rec_map = m.dome_map_fn()             # the replayed recording's own map, if any
         return Dataset([], [v for v in self._vars if v.key in keys],
-                       despike=m.despike, v0=m.v0, scale=m.scale, dome_map=self._position_map())
+                       despike=m.despike, v0=m.v0, scale=m.scale,
+                       dome_map=rec_map if rec_map is not None else self._position_map())
 
     @property
     def sub(self) -> Optional[tuple]:
@@ -903,8 +906,8 @@ class AnalysisWindow(ViewWindow):
         return self.grid_view.currentText() == POSITIONS_VIEW
 
     def _position_map(self):
-        """The map the Positions read without an event's own (Selections mode, the
-        timeline): the window's dome map, else the default one."""
+        """The map the Positions read when neither the selection nor the replayed
+        recording has its own (live data): the window's dome map, else the default one."""
         m = self._dome_map_fn()
         if m is None:
             if self._default_map is None:
