@@ -207,3 +207,36 @@ def test_zoom_cursor_fit_key_and_colour_default(app, win):
     (x0, x1), (y0, y1) = vb.viewRange()
     assert x0 < 0.1 and x1 > 2.5 and y1 - y0 < 50
     aw.close()
+
+
+def test_right_click_solo(app, win):
+    from PyQt6.QtTest import QTest
+
+    from wavi_py.tests.test_analysis_r2 import _window
+    from wavi_py.views.analysis_window import PLOTS, POSITIONS_VIEW
+    aw, _sels = _window(app, win, n_sel=1, keys=("wsk:2",))
+    aw.grid_view.setCurrentText(POSITIONS_VIEW)
+    g = aw.grids[PLOTS]
+    start = ["pos:LFM:drag", "pos:LFM:lift", "pos:RFM:drag", "pos:LBU:lift"]
+    aw.set_checked(start)
+    g.grab()
+    rects = g.map_rects()
+    s_l, s_r = g.grid.names.index("LFM"), g.grid.names.index("RFM")
+    right = Qt.MouseButton.RightButton
+
+    def keys():
+        return {k for k in aw.checked_keys() if k.startswith("pos:")}
+    # right-click LFM's drag chip: that alone
+    QTest.mouseClick(g, right, pos=rects[s_l][2].center().toPoint())
+    app.processEvents()
+    assert keys() == {"pos:LFM:drag"}
+    assert "wsk:2" in aw.checked_keys()                # the other view's checks stay
+    # another target meanwhile (RFM's plot, both halves): solos it, keeps the hidden
+    QTest.mouseClick(g, right, pos=rects[s_r][4].center().toPoint())
+    app.processEvents()
+    assert keys() == {"pos:RFM:drag", "pos:RFM:lift"}
+    # the same again: everything hidden comes back (RFM lift stays on)
+    QTest.mouseClick(g, right, pos=rects[s_r][4].center().toPoint())
+    app.processEvents()
+    assert keys() == set(start) | {"pos:RFM:lift"}
+    aw.close()

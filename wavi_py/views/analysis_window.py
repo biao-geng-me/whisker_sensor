@@ -540,7 +540,8 @@ class AnalysisWindow(ViewWindow):
         self._head_lines: dict = {}               # id(row) -> (row, line)
         self.grids = {PLOTS: SensorGrid("Plots"), TIMELINE: SensorGrid("Timeline")}
         for col, g in self.grids.items():
-            g.setToolTip("Click a sensor's name for both gauges, its A or B half for one")
+            g.setToolTip("Click a sensor's name for both gauges, its A or B half for one;"
+                         " right-click for that alone, again for the rest back")
             g.toggled.connect(lambda keys, on, col=col: self.set_checked(keys, on, col))
             sl.addWidget(g)
         self.var_tree = QTreeWidget()
@@ -993,9 +994,9 @@ class AnalysisWindow(ViewWindow):
             g.positions, g.pos_off = pos, off
             g.set_grid(grid)
             g.labels = {v.col: v.label for v in wsk}
-            g.setToolTip("Click a position's name for its drag and lift, a half for one"
-                         if pos else "Click a sensor's name for both gauges, its A or B half"
-                         " for one")
+            g.setToolTip(("Click a position's name for its drag and lift, a half for one"
+                          if pos else "Click a sensor's name for both gauges, its A or B half"
+                          " for one") + "; right-click for that alone, again for the rest back")
         self.compare.grid = self.spectrum.grid = grid
         self._sync_grids()
         self._request()

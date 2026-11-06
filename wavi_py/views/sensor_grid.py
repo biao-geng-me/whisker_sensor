@@ -243,7 +243,8 @@ class _HeadArrow:
 
 class SensorGrid(QWidget):
     """The picker (see the module doc): ``toggled(keys, on)`` with the gauge keys
-    (``wsk:<col>``) a click toggles: the name strip both, a half that gauge.
+    (``wsk:<col>``) a click toggles: the name strip both, a half that gauge; a
+    right-click shows that alone, again brings back the rest (``solo``).
     ``checked`` is the set of checked columns; ``color`` gives a lit gauge's
     colour."""
 
@@ -267,6 +268,7 @@ class SensorGrid(QWidget):
         self._base_key = None                            # ... and what they were drawn for
         self._ov_version = 0
         self._rects: dict = {}
+        self._solo: Optional[tuple] = None               # right-click: (its keys, the keys it hid)
         self.setMouseTracking(True)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setMinimumHeight(60)
@@ -584,7 +586,37 @@ class SensorGrid(QWidget):
                 return 2 * s + self.AXES.index(ax)
         return None
 
+    def solo(self, cols: list[int]) -> None:
+        """Right-click: only ``cols`` (a name, a half, a cell) on, the other checked
+        halves of this grid hidden; the same right-click again brings back what was
+        hidden. A right-click on another target meanwhile solos that one and keeps
+        the hidden ones to bring back."""
+        keys = [k for k in (self.key_of(c) for c in cols) if k]
+        if not keys:
+            return
+        lit = [k for k in (self.key_of(c) for c in sorted(self.checked)) if k]
+        if self._solo is not None and set(self._solo[0]) == set(keys):
+            hidden = self._solo[1]
+            self._solo = None
+            if hidden:
+                self.toggled.emit(hidden, True)
+            return
+        hidden = list(self._solo[1]) if self._solo is not None else []
+        off = [k for k in lit if k not in keys]
+        hidden += [k for k in off if k not in hidden]
+        self._solo = (keys, hidden)
+        if off:
+            self.toggled.emit(off, False)
+        if not all(k in lit for k in keys):
+            self.toggled.emit(keys, True)
+
     def mousePressEvent(self, ev) -> None:  # noqa: N802 — Qt naming
+        if ev.button() == Qt.MouseButton.RightButton:
+            cols = self.hit(ev.position())
+            if cols:
+                self.solo(cols)
+            ev.accept()
+            return
         if ev.button() != Qt.MouseButton.LeftButton:
             return super().mousePressEvent(ev)
         cols = self.hit(ev.position())
