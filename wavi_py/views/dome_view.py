@@ -150,6 +150,7 @@ _DOME_COLOR = (0.80, 0.82, 0.86, 1.0)
 _GRID_COLOR = (0.25, 0.35, 0.55, 0.35)
 _SURFACE_COLOR = (0.55, 0.65, 0.85, 0.07)
 TRAIL_MAX_S = 10.0
+SEEK_SETTLE_S = 0.25                   # a seek re-feeds this much before the new position (the smoothing tau is 0.03 s)
 TRAIL_RATE_HZ = 60.0                   # trail samples per second at most
 ARROW_PTS = 8                          # points along each arrow's shaft
 _ARROW_COLOR = (0.85, 0.25, 0.08, 1.0)
@@ -1406,11 +1407,22 @@ class DomeView(ViewWindow):
         """A replay seek: the stream jumps. Read on from bus index ``at`` (the new
         position: the preroll before it would only be chewed through in one frame;
         the trails are drawn in wall time), and restart the trails and the
-        smoothing; the tare stays."""
-        if self._bus is not None:
-            self._cursor = max(self._cursor, int(at))
+        smoothing; the tare stays. The smoothing restarts from the last
+        ``SEEK_SETTLE_S`` before ``at`` and the pose is drawn at once: a seek
+        while the replay is paused brings no samples after ``at``, so without
+        this the whiskers would stay empty (grey) until Play."""
         self.pose.smoother.reset()
         self._restart_trail()
+        if self._bus is None:
+            return
+        at = int(at)
+        n = max(1, int(round(SEEK_SETTLE_S * self._fs)))
+        samples, end = self._bus.read_since(max(0, at - n), block=False)
+        self._cursor = max(self._cursor, end if samples is not None else at)
+        if samples is not None and not self._paused:
+            self.pose.feed(samples, self._fs)
+            self._apply_attitude()
+            self._render_pose()
 
     def set_target_fps(self, fps: float) -> None:
         self._timer.setInterval(max(1, int(round(1000.0 / float(fps)))))
