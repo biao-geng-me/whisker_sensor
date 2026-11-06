@@ -8,8 +8,9 @@
   recordings; it is the sign each servo takes against the mixed demand, the same
   on every 2026-11-05 run, and ``replay/manoeuvres.mix_check`` checks it per run).
 
-``CMD_CHANNELS`` is the store's ``cmd`` source (``replay/store.py``): the four
-demands, then the projected thrust per DOF.
+The Analysis window reads the demand and the thrust per axis as ROV variables
+(``replay/rov.py``: ``rov:fwd`` ..., ``rov:th_surge`` ...); the manoeuvres
+sidecar (``replay/manoeuvres.py``) takes the same pilot and thruster tracks.
 """
 
 from __future__ import annotations
@@ -26,8 +27,6 @@ MIX = np.array([[0, 0, 1, 0, -1, 1], [0, 0, -1, 0, -1, -1], [0, 0, -1, 0, 1, 1],
                 [0, 0, 1, 0, 1, -1], [1, -1, 0, -1, 0, 0], [-1, -1, 0, -1, 0, 0],
                 [1, 1, 0, -1, 0, 0], [-1, 1, 0, -1, 0, 0]], dtype=np.float64)
 MOTOR_DIRECTION = (-1, -1, 1, 1, -1, 1, 1, -1)
-THRUST_ORDER = ("surge", "sway", "heave", "yaw", "roll", "pitch")
-CMD_CHANNELS = [f"u_{a}" for a in AXES] + [f"thrust_{d}" for d in THRUST_ORDER]
 
 
 def demand(rc_raw: np.ndarray) -> np.ndarray:
@@ -41,8 +40,3 @@ def thrust(servo_us: np.ndarray) -> np.ndarray:
     a = MIX * np.asarray(MOTOR_DIRECTION, np.float64)[:, None]
     return th @ np.linalg.pinv(a).T
 
-
-def thrust_ordered(servo_us: np.ndarray) -> np.ndarray:
-    """(n, 6) thrust in ``THRUST_ORDER`` (the cmd source's order)."""
-    th = thrust(servo_us)
-    return th[:, [DOF.index(d) for d in THRUST_ORDER]]

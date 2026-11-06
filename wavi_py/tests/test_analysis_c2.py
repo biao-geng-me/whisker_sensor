@@ -193,16 +193,16 @@ def test_sub_range_from_compare(app, win):
     assert aw.sub is not None and abs(aw.sub[0] - 0.5) < 0.05 and abs(aw.sub[1] - 2.0) < 0.05
     assert all(band.isVisible() for band in aw.compare.bands)
     ds = aw.dataset()
-    assert ds.span(a) == pytest.approx((1.0 + aw.sub[0], 1.0 + aw.sub[1]))
-    assert ds.span(b) == pytest.approx((5.0 + aw.sub[0], 6.5))        # clipped to its length
-    assert "Sub-range 0.50 .. 2.00 s" in aw.spectrum.header.sub.text()
+    assert ds.span(a, ds.subs[0]) == pytest.approx((1.0 + aw.sub[0], 1.0 + aw.sub[1]))
+    assert ds.span(b, ds.subs[0]) == pytest.approx((5.0 + aw.sub[0], 6.5))   # clipped to its length
+    assert "Sub-range s1 0.50 .. 2.00 s" in aw.spectrum.header.sub.text()
     # the band's edge drags the sub-range
     aw.compare.bands[0].lines[1].setValue(1.5)
     assert aw.sub[1] == pytest.approx(1.5)
     # Spectrum uses it
     aw.set_tab("Spectrum")
-    assert _pump(app, lambda: (1, "wsk:0") in aw.spectrum.curves, 2)
-    f, _ = aw.spectrum.curves[(1, "wsk:0")].getData()
+    assert _pump(app, lambda: (1, "wsk:0", 1) in aw.spectrum.curves, 2)
+    f, _ = aw.spectrum.curves[(1, "wsk:0", 1)].getData()
     assert abs(f[1] - f[0] - 1 / (aw.sub[1] - aw.sub[0])) < 0.05
     aw._act_clear_sub.trigger()                                         # Esc
     assert aw.sub is None and not any(b_.isVisible() for b_ in aw.compare.bands)

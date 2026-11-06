@@ -41,7 +41,8 @@ spectrogram views work unchanged. Differences:
   wall clock ``unix0`` (``t0_unix`` is then the recording's, not now) and the
   V0 of the file's first scans, which is kept across seeks.
 - ``tracker`` (``replay/events.py``) follows the arm state, modes, STATUSTEXT,
-  faults, seq gaps, counters and the depth of a live stream, for the timeline
+  faults, seq gaps, counters, the depth and the vehicle telemetry
+  (``replay/rov.py``) of a live stream, for the timeline and the Analysis window
   (off in replay: the recording's index has them).
 """
 
@@ -59,13 +60,14 @@ import numpy as np
 from wavi_py.daq.bus import SampleBus
 from wavi_py.daq.clock import LiveClock
 from wavi_py.replay.events import EventTracker
+from wavi_py.replay.rov import TYPES as ROV_TYPES
 from wavi_py.transports.base import Transport
 from whisker_link.esp32_frame import MV_PER_CODE
 
 FS_WINDOW_S = 10.0        # sliding window for the rate estimate
 FS_MIN_SPAN_S = 2.0       # report nothing until the window spans this long
 
-_TRACKED_MAV = ("HEARTBEAT", "STATUSTEXT", "SCALED_PRESSURE2")
+_TRACKED_MAV = ("HEARTBEAT", "STATUSTEXT", "SCALED_PRESSURE2", "PARAM_VALUE") + ROV_TYPES
 
 IMU_CHANNELS = [
     "ax_mg", "ay_mg", "az_mg",               # RAW_IMU accel

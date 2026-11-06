@@ -102,8 +102,9 @@ from wavi_py.config import (
     DEFAULT_VIEW_SPAN_S,
     MIN_REC_LEN_S,
 )
-from wavi_py.daq.analysis import (DOME_ORDER, SelSource, cmd_variables, imu_variables,
-                                  position_variables, snapshot_of, whisker_variables)
+from wavi_py.daq.analysis import (DOME_ORDER, SelSource, imu_variables, position_variables,
+                                  rov_axis_variables, rov_variables, snapshot_of,
+                                  whisker_variables)
 from wavi_py.daq.despike import Despiker
 from wavi_py.daq.ring import Window
 from wavi_py.daq.series import IMU, WSK, ArraySeries, Series
@@ -349,7 +350,6 @@ class MainWindow(QMainWindow):
         self._event_cache = evs.StoreCache()               # the Events windows' stores
         self._last_event_scope: list = []
         self._manoeuvres: Optional[tuple] = None             # (recording, sidecar) of the replay
-        self._map_of_rec: Optional[tuple] = None             # (recording, its dome map)
         self._manoeuvres_ready.connect(self._on_manoeuvres_ready)
         self.set_dome_map(dome_map)
         for v, btn in ((self._line_view, self._toggle_line), (self._spectrum_view, self._toggle_spectrum),
@@ -1311,6 +1311,7 @@ class MainWindow(QMainWindow):
         act = menu.addAction("Events...", self.show_events)
         act.setToolTip("Manoeuvre events of the open recording (else the last scope)")
         menu.addAction("Recordings...", self.show_recordings)
+        menu.addAction("Uploads...", self._sync.show_uploads)
 
     def show_recordings(self) -> None:
         """The Recordings window (made on first use)."""
@@ -1365,8 +1366,9 @@ class MainWindow(QMainWindow):
         unpaused there is none."""
         if self._store is not None:
             src = self._replay.source
-            return SelSource(self._store, src.depth() if src is not None else
-                             (np.empty(0), np.empty(0)))
+            if src is None:
+                return SelSource(self._store)
+            return SelSource(self._store, src.depth(), rov=src.rov())
         if self._replaying:
             return "the whole-recording store is still loading"
         if self._client is None:
@@ -1379,8 +1381,9 @@ class MainWindow(QMainWindow):
         if self._store is None and self._client is None:
             return None
         src = self._replay.source
-        return SelSource(self.series(), src.depth() if src is not None
-                         else (np.empty(0), np.empty(0)))
+        if src is None:
+            return SelSource(self.series())
+        return SelSource(self.series(), src.depth(), rov=src.rov())
 
     def _freeze_selections(self, on: bool) -> None:
         """Live Pause: copy the buffers (and the depth so far) for the selections made
@@ -1391,7 +1394,7 @@ class MainWindow(QMainWindow):
             return
         src = self._replay.source
         self._selections.freeze(snapshot_of(self.series(), src.depth() if src is not None
-                                            else None))
+                                            else None, src.rov() if src is not None else None))
 
     def _line_vars_at(self, plot, scene_pos) -> list[str]:
         """The gauges of the Line plot a region menu opened in (tile, stacked row,
@@ -1417,24 +1420,20 @@ class MainWindow(QMainWindow):
 
     def analysis_variables(self) -> list:
         """The variables an Analysis window lists: every gauge (by the Line window's
-        sensor names), the IMU and depth, the demand / thrust and the dome's
-        positions (drag / lift through the recording's dome map)."""
+        sensor names), the IMU and depth, the vehicle telemetry the source has (with
+        the demand and thrust per axis) and the dome's positions (drag / lift through
+        the dome map)."""
+        src = self._replay.source
         return (whisker_variables(self._nch, self._line_view._names) + imu_variables()
-                + cmd_variables() + position_variables(DOME_ORDER))
+                + rov_variables(src.rov() if src is not None else None)
+                + position_variables(DOME_ORDER))
 
-    def analysis_dome_map(self):
-        """The map the Positions variables read in Selections mode: the replayed
-        recording's own (``replay/dome_maps.dome_map_for``), else the active one."""
-        if self._replaying and self._index is not None:
-            path = str(self._index.path)
-            if self._map_of_rec is None or self._map_of_rec[0] != path:
-                from wavi_py.replay.dome_maps import dome_map_for
-                try:
-                    self._map_of_rec = (path, dome_map_for(path))
-                except (OSError, ValueError):
-                    self._map_of_rec = (path, self._dome_map)
-            return self._map_of_rec[1]
-        return self._dome_map if self._dome_map is not None else DomeMap.load(DEFAULT_MAP)
+    def events_variables(self) -> list:
+        """An Events window's variables: as ``analysis_variables``, the ROV's per-axis
+        demand and thrust (every recording with a vehicle has them) in place of the
+        open source's telemetry."""
+        return (whisker_variables(self._nch, self._line_view._names) + imu_variables()
+                + rov_axis_variables() + position_variables(DOME_ORDER))
 
     def manoeuvres_doc(self) -> Optional[tuple]:
         """(recording, sidecar) of the replayed recording, once there is one."""
@@ -1490,8 +1489,9 @@ class MainWindow(QMainWindow):
         q = query or evs.EventQuery(types=["onset"], group_by="run")
         if q.recordings:
             self._last_event_scope = list(q.recordings)
-        win = AnalysisWindow(self._selections, self.analysis_variables, self._analysis_n,
-                             None, self._replay, mode=EVENTS, query=q, cache=self._event_cache)
+        win = AnalysisWindow(self._selections, self.events_variables, self._analysis_n,
+                             None, self._replay, dome_map_fn=lambda: self._dome_map,
+                             mode=EVENTS, query=q, cache=self._event_cache)
         win.closed.connect(lambda w=win: self._on_events_closed(w))
         win.openEvent.connect(self.open_event)
         self._add_chrome(win)
@@ -1545,7 +1545,7 @@ class MainWindow(QMainWindow):
         else:
             win = AnalysisWindow(self._selections, self.analysis_variables, self._analysis_n,
                                  self._timeline_source, self._replay,
-                                 dome_map_fn=self.analysis_dome_map,
+                                 dome_map_fn=lambda: self._dome_map,
                                  manoeuvres_fn=self.manoeuvres_doc)
             win.compareSimilar.connect(self.new_events_window)
             win.closed.connect(lambda w=win: self._on_analysis_closed(w))

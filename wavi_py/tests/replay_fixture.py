@@ -11,6 +11,11 @@
 - STATUSTEXT "Lost manual control" (critical) three times 3 s apart and one
   "#Gain is 50%" (info); one info line; one fault mark; a 1 Hz status whose
   adc_crc counter goes up at ``CRC_AT``;
+- with ``rov``: the vehicle telemetry at 20 Hz (``rov_truth``): RC_CHANNELS
+  (ch5 a 0.5 Hz sine of +-200 us), SERVO_OUTPUT_RAW (servo1 a ramp, servo8
+  unused = 0), VFR_HUD (heading through north, climb), BATTERY_STATUS (1.5 A),
+  VIBRATION, NAMED_VALUE_FLOAT PilotGain (0.25, then 0.5 from ``MODE_AT``), and
+  an RC_CHANNELS of another component (``[1,2]``) that must be ignored;
 - a block of MAVLink lines written 0.2 s late (``t`` steps back in file order);
 - a truncated last line.
 """
@@ -52,6 +57,11 @@ def depth_profile(t: float) -> float:
     return MAX_DEPTH_CM * math.sin(math.pi * (t - 2.5) / 5.0)
 
 
+def rov_truth(s: float) -> tuple[float, float, float]:
+    """(pilot forward -1..1, thruster 1 -1..1, heading deg unwrapped) at ``s``."""
+    return 0.5 * math.sin(2 * math.pi * 0.5 * s), -0.5 + s / DUR_S, 350.0 + 20.0 * s
+
+
 def raw_of(seq: int) -> list[int]:
     r = [1_800_000 + 3000 * c + int(20000 * math.sin(2 * math.pi * 3.0 * seq / FS + c))
          for c in range(32)]
@@ -61,7 +71,7 @@ def raw_of(seq: int) -> list[int]:
 
 
 def write_recording(path, compact_hello: bool = False, truncated: bool = True,
-                    vehicle: bool = True, spikes: bool = False) -> dict:
+                    vehicle: bool = True, spikes: bool = False, rov: bool = False) -> dict:
     """Write the recording; returns the ground truth for the tests."""
     rng = np.random.default_rng(1)
     lines: list[tuple[float, bytes]] = []          # (sort key, line)
@@ -146,6 +156,36 @@ def write_recording(path, compact_hello: bool = False, truncated: bool = True,
                                     "chunk_seq": 0}})
         add(t_first + 5.5, {"k": "mav", "type": "STATUSTEXT", "src": [1, 1],
                             "d": {"severity": 6, "text": "#Gain is 50%", "id": 0, "chunk_seq": 0}})
+    if vehicle and rov:
+        for i in range(int(DUR_S * 20)):
+            s = i / 20
+            t = t_first + s + 0.004
+            fwd, ramp, hdg = rov_truth(s)
+            add(t, {"k": "mav", "type": "RC_CHANNELS", "src": [1, 1],
+                    "d": {"time_boot_ms": i, "chancount": 0,
+                          **{f"chan{c}_raw": 1500 for c in range(1, 12)},
+                          "chan5_raw": int(round(1500 + 400 * fwd)), "rssi": 255}})
+            add(t + 0.001, {"k": "mav", "type": "SERVO_OUTPUT_RAW", "src": [1, 1],
+                            "d": {"time_usec": i, "port": 0,
+                                  **{f"servo{c}_raw": 1500 for c in range(1, 9)},
+                                  "servo1_raw": int(round(1500 + 400 * ramp)), "servo8_raw": 0}})
+            add(t + 0.002, {"k": "mav", "type": "VFR_HUD", "src": [1, 1],
+                            "d": {"airspeed": 0.0, "groundspeed": 0.0, "heading": int(hdg) % 360,
+                                  "throttle": 0, "alt": 0.0, "climb": 0.1}})
+            add(t + 0.003, {"k": "mav", "type": "NAMED_VALUE_FLOAT", "src": [1, 1],
+                            "d": {"time_boot_ms": i, "name": "PilotGain",
+                                  "value": 0.5 if s >= MODE_AT else 0.25}})
+            add(t + 0.0035, {"k": "mav", "type": "NAMED_VALUE_FLOAT", "src": [1, 1],
+                             "d": {"time_boot_ms": i, "name": "CamTilt", "value": 0.9}})
+            if i % 7 == 0:
+                add(t + 0.0037, {"k": "mav", "type": "RC_CHANNELS", "src": [1, 2],
+                                 "d": {"time_boot_ms": i, "chan5_raw": 1900}})
+            if i % 6 == 0:
+                add(t + 0.0040, {"k": "mav", "type": "BATTERY_STATUS", "src": [1, 1],
+                                 "d": {"id": 0, "current_battery": 150, "voltages": [16000]}})
+                add(t + 0.0042, {"k": "mav", "type": "VIBRATION", "src": [1, 1],
+                                 "d": {"time_usec": i, "vibration_x": 0.5, "vibration_y": 0.25,
+                                       "vibration_z": 1.0}})
     # the pilot2 hello's INFO (wide 250 Hz, OSR 128, selects 0123457)
     cfg = {"proto": 4, "nch": 32, "device_id": 9221, "clock_rb": 3842, "clkin_hz": 8000000,
            "fdata_sps": 31250, "baud": 921600, "osr": 128, "settle_us": 200,

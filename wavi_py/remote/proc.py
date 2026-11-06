@@ -17,7 +17,12 @@ POSIX shell, whatever the client's OS.
   a 5 s connect timeout and keepalives, so a dead link fails in ~30 s rather
   than waiting for the call's own timeout;
 - ``run``: one call with a timeout, cancellable from another thread (the GUI
-  closing), stdin optionally an open file or bytes;
+  closing), stdin optionally an open file or bytes. An open file is fed
+  through a pipe in ``FEED_CHUNK`` pieces by a writer thread, so an upload can
+  report its bytes (``on_bytes``, at most ``EMIT_HZ`` times a second, plus once
+  at the end); the count is what went into ssh's stdin, i.e. ahead of the wire
+  by ssh's own buffers (a few MB), which is why the caller shows "verifying"
+  while it waits for the remote check after the last byte;
 - ``classify``: why a call failed, in words, from the exit code and stderr;
   ``offline`` says whether it was the network (retry later) or the setup.
 """
@@ -29,12 +34,17 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from dataclasses import dataclass
-from typing import IO, Optional, Sequence, Union
+from typing import IO, Callable, Optional, Sequence, Union
 
 CONNECT_TIMEOUT_S = 5
 SSH_OPTS = ("-o", "BatchMode=yes", "-o", f"ConnectTimeout={CONNECT_TIMEOUT_S}",
             "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=3")
+
+
+FEED_CHUNK = 1 << 20      # bytes per write into ssh's stdin
+EMIT_HZ = 4.0             # byte callbacks per second, at most
 
 
 class SshMissing(RuntimeError):
@@ -76,6 +86,51 @@ def ssh_argv(ssh: str, host: str, remote_cmd: str) -> list[str]:
     return [ssh, *SSH_OPTS, host, remote_cmd]
 
 
+class Throttle:
+    """Calls ``fn(done, total)`` at most ``hz`` times a second; ``final=True``
+    always goes through (the 100 % that ends a file)."""
+
+    def __init__(self, fn, hz: float = EMIT_HZ):
+        self._fn, self._dt, self._last = fn, 1.0 / hz, -1e9
+
+    def __call__(self, done: int, total: int, final: bool = False) -> None:
+        now = time.monotonic()
+        if final or now - self._last >= self._dt:
+            self._last = now
+            try:
+                self._fn(done, total)
+            except Exception:  # noqa: BLE001 — a display callback never breaks a transfer
+                pass
+
+
+def _feed(src: IO[bytes], dst: IO[bytes], on_bytes: Optional[Callable[[int, int], None]],
+          total: int) -> None:
+    """The writer thread: ``src`` into the pipe ``dst`` in chunks, then close it
+    (the remote ``cat`` sees EOF). A dead process (killed by the timeout or a
+    cancel, or ssh exiting on a dropped link) ends it with a broken pipe."""
+    tick = Throttle(on_bytes) if on_bytes else None
+    done = 0
+    try:
+        while True:
+            b = src.read(FEED_CHUNK)
+            if not b:
+                break
+            dst.write(b)
+            done += len(b)
+            if tick:
+                tick(done, total)
+        dst.flush()
+        if tick:
+            tick(done, total, final=True)
+    except (OSError, ValueError):             # BrokenPipe / closed: the process is gone
+        pass
+    finally:
+        try:
+            dst.close()
+        except (OSError, ValueError):
+            pass
+
+
 @dataclass
 class Result:
     rc: int                  # exit code; -1: timed out, -2: cancelled, -3: no ssh
@@ -112,27 +167,41 @@ class Runner:
                     pass
 
     def run(self, host: str, remote_cmd: str, timeout: float,
-            stdin: Union[IO[bytes], bytes, None] = None) -> Result:
+            stdin: Union[IO[bytes], bytes, None] = None,
+            on_bytes: Optional[Callable[[int, int], None]] = None) -> Result:
         try:
             argv = ssh_argv(self.ssh(), host, remote_cmd)
         except SshMissing as exc:
             return Result(-3, b"", str(exc))
-        return self.run_argv(argv, timeout, stdin)
+        return self.run_argv(argv, timeout, stdin, on_bytes)
 
     def run_argv(self, argv: Sequence[str], timeout: float,
-                 stdin: Union[IO[bytes], bytes, None] = None) -> Result:
+                 stdin: Union[IO[bytes], bytes, None] = None,
+                 on_bytes: Optional[Callable[[int, int], None]] = None) -> Result:
+        """stdin: bytes (handed to ``communicate``), an open binary file (fed by
+        ``_feed`` from a thread; ``on_bytes(done, total)`` reports it), or None.
+        The timeout counts from the start, the whole transfer included."""
         with self._lock:
             if self._cancelled:
                 return Result(-2, b"", "cancelled")
             data = stdin if isinstance(stdin, (bytes, bytearray)) else None
-            src = (subprocess.PIPE if data is not None else
-                   stdin if stdin is not None else subprocess.DEVNULL)
+            src = subprocess.PIPE if stdin is not None else subprocess.DEVNULL
             try:
                 p = subprocess.Popen(list(argv), stdin=src, stdout=subprocess.PIPE,
                                      stderr=subprocess.PIPE, **popen_kwargs())
             except FileNotFoundError:
                 return Result(-3, b"", f"no ssh at {argv[0]}")
             self._proc = p
+        feeder = None
+        if stdin is not None and data is None:
+            pipe, p.stdin = p.stdin, None         # communicate() must not touch it
+            try:
+                total = os.fstat(stdin.fileno()).st_size - stdin.tell()
+            except (OSError, AttributeError, ValueError):
+                total = 0
+            feeder = threading.Thread(target=_feed, args=(stdin, pipe, on_bytes, total),
+                                      name="wavi-ssh-feed", daemon=True)
+            feeder.start()
         try:
             out, err = p.communicate(input=data, timeout=timeout)
             rc = p.returncode
@@ -141,12 +210,15 @@ class Runner:
             out, err = p.communicate()
             rc = -1
         finally:
+            if feeder is not None:
+                if p.poll() is None:              # an exception above: don't leave it
+                    p.kill()
+                feeder.join(10)
             with self._lock:
                 self._proc = None
                 if self._cancelled:
                     rc = -2
         return Result(rc, out, err.decode("utf-8", "replace"))
-
 
     def stream(self, host: str, remote_cmd: str, sink, timeout: float) -> Result:
         """Run ``remote_cmd`` and hand its stdout to ``sink(chunk)`` as it comes (a

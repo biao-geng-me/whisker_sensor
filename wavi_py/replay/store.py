@@ -13,11 +13,7 @@ it too):
   ``despike=True`` gives the scans with the index's spikes replaced, rounded
   as the transport rewrites them (a lazily made copy);
 - ``IMU``: every RAW_IMU row (accel, gyro) with the newest ATTITUDE before it
-  in file order (roll, pitch, yaw), ``IMU_CHANNELS``, at its fitted time;
-- ``CMD``: the pilot's demand and the thrust (``daq/vehicle.py``,
-  ``CMD_CHANNELS``): a row at every autopilot RC_CHANNELS and SERVO_OUTPUT_RAW
-  message, each holding the newest of the other (NaN before the first), at its
-  receive time (no device clock: these come ~20 ms apart, RC -> servo).
+  in file order (roll, pitch, yaw), ``IMU_CHANNELS``, at its fitted time.
 
 So the values are bit for bit what the pipeline delivers for the same span
 (the tests check it), except the attitude of the first IMU rows after a seek,
@@ -43,21 +39,17 @@ from typing import Callable, Optional
 
 import numpy as np
 
-from wavi_py.daq.series import CMD, IMU, WSK, Cols, Series, span_index
-from wavi_py.daq.vehicle import AXES, CMD_CHANNELS, RC_CHANNEL, demand, thrust_ordered
+from wavi_py.daq.series import IMU, WSK, Cols, Series, span_index
 from wavi_py.daq.server_reader import IMU_CHANNELS
 from wavi_py.replay.index import K, RecordingIndex, _int_after, cache_paths
 from whisker_link.esp32_frame import MV_PER_CODE
 
-STORE_VERSION = 2
+STORE_VERSION = 1
 PYR_BASE = 16                   # the finest pyramid level's block (samples)
 PYR_FACTOR = 4                  # each level's blocks are this many of the one below
 _CHUNK_LINES = 50_000           # lines read at once while building
 _IMU_FIELDS = (b'"xacc":', b'"yacc":', b'"zacc":', b'"xgyro":', b'"ygyro":', b'"zgyro":')
 _ATT_FIELDS = (b'"roll":', b'"pitch":', b'"yaw":')
-_RC_FIELDS = tuple(f'"chan{RC_CHANNEL[a]}_raw":'.encode() for a in AXES)
-_SERVO_FIELDS = tuple(f'"servo{i}_raw":'.encode() for i in range(1, 9))
-_AUTOPILOT = b'"src":[1,1]'
 
 
 def _num_after(line: bytes, key: bytes, start: int = 0):
@@ -127,8 +119,6 @@ class RecordingStore(Series):
         self.wsk = np.empty((0, 0), np.float32)
         self.imu_t = np.empty(0)
         self.imu = np.empty((0, len(IMU_CHANNELS)), np.float32)
-        self.cmd_t = np.empty(0)
-        self.cmd = np.empty((0, len(CMD_CHANNELS)), np.float32)
         self.wsk_names: list[str] = []
         self.spk_row = np.empty(0, np.int64)          # despike: scan row, gauge, value (mV)
         self.spk_ch = np.empty(0, np.int64)
@@ -141,15 +131,11 @@ class RecordingStore(Series):
     # ----- the read API (daq/series.py)
 
     def names(self, source: str) -> list[str]:
-        if source == CMD:
-            return list(CMD_CHANNELS) if len(self.cmd_t) else []
         return list(self.wsk_names) if source == WSK else list(IMU_CHANNELS)
 
     def _arrays(self, source: str, despike: bool) -> tuple[np.ndarray, np.ndarray]:
         if source == IMU:
             return self.imu_t, self.imu
-        if source == CMD:
-            return self.cmd_t, self.cmd
         return self.wsk_t, (self.despiked() if despike and len(self.spk_row) else self.wsk)
 
     def despiked(self) -> np.ndarray:
@@ -199,8 +185,7 @@ class RecordingStore(Series):
 
     @property
     def nbytes(self) -> int:
-        n = (self.wsk.nbytes + self.wsk_t.nbytes + self.imu.nbytes + self.imu_t.nbytes
-             + self.cmd.nbytes + self.cmd_t.nbytes)
+        n = self.wsk.nbytes + self.wsk_t.nbytes + self.imu.nbytes + self.imu_t.nbytes
         if self._desp is not None:
             n += self._desp.nbytes
         for levels in self._pyr.values():
@@ -250,11 +235,6 @@ class RecordingStore(Series):
         i_us: list[float] = []
         i_rows: list[tuple] = []
         att = (0.0, 0.0, 0.0)
-        c_rx: list[float] = []
-        c_rows: list[tuple] = []
-        nan = float("nan")
-        rc = (nan,) * 4
-        sv = (nan,) * 8
         nan = float("nan")
         k_wsk = K["wsk"]
         with open(path_of(idx), "rb") as f:
@@ -285,15 +265,6 @@ class RecordingStore(Series):
                     if mtype == b"ATTITUDE":
                         d = line.find(b'"d":', ty)
                         att = tuple(float(_num_after(line, key, d) or 0) for key in _ATT_FIELDS)
-                    elif mtype in (b"RC_CHANNELS", b"SERVO_OUTPUT_RAW") and _AUTOPILOT in line:
-                        d = line.find(b'"d":', ty)
-                        if mtype == b"RC_CHANNELS":
-                            rc = tuple(float(_num_after(line, key, d) or nan) for key in _RC_FIELDS)
-                        else:
-                            sv = tuple(float(_num_after(line, key, d) or nan)
-                                       for key in _SERVO_FIELDS)
-                        c_rx.append(t)
-                        c_rows.append(rc + sv)
                     elif mtype == b"RAW_IMU":
                         d = line.find(b'"d":', ty)
                         us = _num_after(line, b'"time_usec":', d)
@@ -328,11 +299,6 @@ class RecordingStore(Series):
         self.imu_t = map_segments(idx.imu_segs, np.asarray(i_rx, np.float64),
                                   np.asarray(i_us, np.float64)) - t0
         self.imu = (np.asarray(i_rows, dtype=np.float32).reshape(-1, len(IMU_CHANNELS)))
-        if c_rows:
-            raw = np.asarray(c_rows, dtype=np.float64)
-            self.cmd_t = np.asarray(c_rx, np.float64) - t0
-            self.cmd = np.column_stack([demand(raw[:, :4]),
-                                        thrust_ordered(raw[:, 4:])]).astype(np.float32)
         self._sort()
         return self
 
@@ -340,7 +306,7 @@ class RecordingStore(Series):
         """Times are sorted after the fit (the device clocks are monotonic) except at
         a reboot, where a segment can start before the last one ended: a stable sort,
         so ``searchsorted`` holds. The spikes' rows follow."""
-        for name in ("wsk", "imu", "cmd"):
+        for name in ("wsk", "imu"):
             t = getattr(self, f"{name}_t")
             if len(t) > 1 and (np.diff(t) < 0).any():
                 order = np.argsort(t, kind="stable")
@@ -357,7 +323,6 @@ class RecordingStore(Series):
         tmp = path.with_name(path.name + ".tmp")
         with open(tmp, "wb") as f:
             np.savez(f, wsk_t=self.wsk_t, wsk=self.wsk, imu_t=self.imu_t, imu=self.imu,
-                     cmd_t=self.cmd_t, cmd=self.cmd,
                      spk_row=self.spk_row, spk_ch=self.spk_ch, spk_mv=self.spk_mv,
                      meta=np.asarray(json.dumps(meta)))
         os.replace(tmp, path)
@@ -371,8 +336,7 @@ class RecordingStore(Series):
                         or meta.get("mtime_ns") != index.mtime_ns):
                     return None
                 self = cls()
-                for name in ("wsk_t", "wsk", "imu_t", "imu", "cmd_t", "cmd", "spk_row", "spk_ch",
-                             "spk_mv"):
+                for name in ("wsk_t", "wsk", "imu_t", "imu", "spk_row", "spk_ch", "spk_mv"):
                     setattr(self, name, z[name])
         except (OSError, ValueError, KeyError):
             return None
@@ -382,7 +346,6 @@ class RecordingStore(Series):
 
     def summary(self) -> str:
         return (f"store: {len(self.wsk_t)} scans x {self.wsk.shape[1]}, {len(self.imu_t)} IMU rows,"
-                f" {len(self.cmd_t)} cmd rows,"
                 f" {self.nbytes / 1e6:.0f} MB, {self.build_s:.1f} s"
                 + (" (cached)" if self.from_cache else ""))
 

@@ -10,11 +10,12 @@ and scipy only. (``replay/events.py`` is the system events: arm, modes,
 STATUSTEXT.)
 
 Inputs, all through the repo's loaders: ``RecordingIndex`` (session zero,
-armed spans, the surface-referenced depth of ``EventTracker``), the whole
-``RecordingStore`` (whisker mV, IMU) and one pass over the autopilot's
-(``src [1,1]``) MAVLink lines for what the store does not keep: RC_CHANNELS,
-SERVO_OUTPUT_RAW, HEARTBEAT mode, RANGEFINDER, NAMED_VALUE_FLOAT PilotGain, and
-the scans' ADC flags. All of it is put on one ``FS_HZ`` grid of session seconds
+armed spans, the surface-referenced depth of ``EventTracker``, and the vehicle
+telemetry ``rov()``, ``replay/rov.py``: the pilot channels RC_CHANNELS, the
+thrusters SERVO_OUTPUT_RAW, the pilot gain, as the Analysis window's ROV
+variables read them), the whole ``RecordingStore`` (whisker mV, IMU) and one
+pass over the autopilot's (``src [1,1]``) MAVLink lines for the rest: HEARTBEAT
+mode, RANGEFINDER, and the scans' ADC flags. All of it is put on one ``FS_HZ`` grid of session seconds
 (the replay's time axis: the scans and IMU at their fitted times, the other
 MAVLink at receive time; ``Flight``).
 
@@ -106,6 +107,7 @@ from wavi_py.daq.vehicle import (AXES, DOF, FULL_US, MIX, MOTOR_DIRECTION, NEUTR
 from wavi_py.replay import recname
 from wavi_py.replay.events import ARDUSUB_MODES, AUTOPILOT, MAV_MODE_FLAG_SAFETY_ARMED
 from wavi_py.replay.index import K, RecordingIndex, _int_after, cache_paths
+from wavi_py.replay.rov import AXIS_KEYS as ROV_AXIS_KEYS, FIELDS as ROV_FIELDS
 from wavi_py.replay.store import RecordingStore
 from wavi_py.replay.dome_maps import dome_map_for
 from whisker_link.dome_map import DEFAULT_MAP, DomeMap
@@ -269,11 +271,11 @@ def _hold(t_src: np.ndarray, y: np.ndarray, grid: np.ndarray, fill=np.nan) -> np
 
 
 def _read_vehicle(index: RecordingIndex) -> dict:
-    """The autopilot's MAVLink the store does not keep, and the scans' ADC flags:
+    """The autopilot's MAVLink neither the store nor the index's ``rov()`` keeps
+    (the custom mode number, the rangefinder), and the scans' ADC flags:
     {name: (session seconds, values)}, receive time."""
-    want = {b"RC_CHANNELS", b"SERVO_OUTPUT_RAW", b"HEARTBEAT", b"RANGEFINDER",
-            b"NAMED_VALUE_FLOAT"}
-    rc, sv, hb, rf, gain, flg, wrx = [], [], [], [], [], [], []
+    want = {b"HEARTBEAT", b"RANGEFINDER"}
+    hb, rf, flg, wrx = [], [], [], []
     lines = np.nonzero((index.kind == K["mav"]) | (index.kind == K["wsk"]))[0]
     lines = lines[lines > index.hello_line]
     k_wsk = K["wsk"]
@@ -308,24 +310,18 @@ def _read_vehicle(index: RecordingIndex) -> dict:
                 if tuple(ev.get("src") or ()) != AUTOPILOT:
                     continue
                 t, d = float(ev["t"]) - t0, ev.get("d") or {}
-                if mtype == b"RC_CHANNELS":
-                    rc.append([t] + [d.get(f"chan{RC_CHANNEL[a]}_raw", 0) for a in AXES])
-                elif mtype == b"SERVO_OUTPUT_RAW":
-                    sv.append([t] + [d.get(f"servo{i}_raw", 0) for i in range(1, 9)])
-                elif mtype == b"HEARTBEAT":
+                if mtype == b"HEARTBEAT":
                     hb.append((t, int(d.get("base_mode", 0)) & MAV_MODE_FLAG_SAFETY_ARMED,
                                int(d.get("custom_mode", -1))))
                 elif mtype == b"RANGEFINDER":
                     rf.append((t, float(d.get("distance", 0.0))))
-                elif d.get("name") == "PilotGain":
-                    gain.append((t, float(d.get("value", np.nan))))
 
     def arr(rows, w):
         a = np.asarray(rows, np.float64).reshape(-1, w)
         return a[np.argsort(a[:, 0], kind="stable")] if len(a) else a
 
-    return {"rc": arr(rc, 5), "servo": arr(sv, 9), "hb": arr(hb, 3), "rf": arr(rf, 2),
-            "gain": arr(gain, 2), "flag_t": np.sort(np.asarray(flg, np.float64)),
+    return {"hb": arr(hb, 3), "rf": arr(rf, 2),
+            "flag_t": np.sort(np.asarray(flg, np.float64)),
             "wsk_rx": np.asarray(wrx, np.float64)}
 
 
@@ -354,11 +350,15 @@ def load_flight(recording: Union[str, Path], cache: bool = True) -> Flight:
     armed = np.zeros(n, bool)
     for a, b in index.armed_spans:
         armed[(t >= a) & (t < b)] = True
-    rc = veh["rc"]
-    u = (_hold(rc[:, 0], rc[:, 1:], t, fill=NEUTRAL_US) - NEUTRAL_US) / FULL_US if len(rc) \
+    rov = index.rov()
+    # the pilot's axes as the ROV variables have them ((raw - 1500) / 400, NaN
+    # where a channel is unused: neutral), in AXES order (rov.AXIS_KEYS)
+    rc_t, rc_y = rov.tracks.get("RC_CHANNELS", (np.empty(0), np.empty((0, 6))))
+    cols = [[f[0] for f in ROV_FIELDS["RC_CHANNELS"]].index(p) for _a, p, _t in ROV_AXIS_KEYS]
+    u = np.nan_to_num(_hold(rc_t, rc_y[:, cols], t, fill=0.0), nan=0.0) if len(rc_t) \
         else np.zeros((n, 4))
-    sv = veh["servo"]
-    servo = _hold(sv[:, 0], sv[:, 1:], t) if len(sv) else None
+    sv_t, sv_y = rov.tracks.get("SERVO_OUTPUT_RAW", (np.empty(0), np.empty((0, 8))))
+    servo = _hold(sv_t, NEUTRAL_US + FULL_US * sv_y, t) if len(sv_t) else None
     hb = veh["hb"]
     mode = _hold(hb[:, 0], hb[:, 2], t, fill=-1).astype(int) if len(hb) else None
     wsk = _bin_mean(store.wsk_t, store.despiked() if len(store.spk_row) else store.wsk, n)
@@ -379,11 +379,11 @@ def load_flight(recording: Union[str, Path], cache: bool = True) -> Flight:
     rng = None
     if len(rf) and (rf[:, 1] > 0).any():
         rng = _hold(rf[:, 0], np.where(rf[:, 1] > 0, rf[:, 1], np.nan), t)
-    gn = veh["gain"]
-    gain = _hold(gn[:, 0], gn[:, 1], t) if len(gn) else None
+    gn_t, gn_y = rov.tracks.get("NAMED_VALUE_FLOAT", (np.empty(0), np.empty((0, 1))))
+    gain = _hold(gn_t, gn_y[:, 0], t) if len(gn_t) else None
     meta = {"duration_s": round(float(dur), 3), "fs_scan_hz": round(float(index.fs), 4),
             "armed_spans": [[round(a, 3), round(b, 3)] for a, b in index.armed_spans],
-            "n_rc": int(len(rc)), "n_servo": int(len(sv))}
+            "n_rc": int(len(rc_t)), "n_servo": int(len(sv_t))}
     wrx = veh["wsk_rx"]
     if len(wrx) == len(store.wsk_t) and len(wrx):
         d = (store.wsk_t - wrx) * 1e3                # fitted scan time - receive time

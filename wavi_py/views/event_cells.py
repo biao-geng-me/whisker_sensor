@@ -11,8 +11,10 @@ of the solid variables a light fill. The highlighted events (the browser's
 selection, a click here) are drawn thick in their group's colour on top. The
 header says how many are drawn ("drawn 200 of 340": ``Dataset.drawn``, the
 aggregates use all). Dome grid (the header's toggle, on by default): the
-positions sit where they are on the dome as seen from behind (columns LB, LF,
-RF, RB; rows U, M, L; one y range per row), the other variables in a row above;
+positions sit where the variable grids put them (the window's ``grid``, the
+Dome view's plane map, ``views/sensor_grid.py``: port left, starboard right,
+each side seen from inside with its front column toward the centre, so LB LF |
+RF RB across, U M L down; one y range per row), the other variables in a row above;
 off, the panels fill a grid in the checked order. A click on a thin trace
 (within ``PICK_PX``) picks that event (``eventClicked``). Probe reads the
 medians and the highlighted events of the panel under the mouse.
@@ -107,7 +109,8 @@ class EventWaveCell(_Cell):
     TITLE = "Waveform"
     eventClicked = pyqtSignal(int)
     clicked = pyqtSignal(float, object)          # as WaveCell's (the window's cursor code)
-    subChanged = pyqtSignal(object)              # (no sub-range here; WaveCell's signals)
+    subChanged = pyqtSignal(object)              # (no sub-ranges here; WaveCell's signals)
+    subsChanged = pyqtSignal(list)
     xChanged = pyqtSignal(float, float)          # the time range shown (the spectrogram copies it)
 
     def __init__(self, parent: Optional[QWidget] = None):
@@ -122,8 +125,9 @@ class EventWaveCell(_Cell):
         h.row.addStretch(1)
         self.dome_box = h.add("", QCheckBox("Dome grid"))
         self.dome_box.setChecked(True)
-        self.dome_box.setToolTip("Positions where they sit on the dome, seen from behind (LB LF RF"
-                                 " RB across, U M L down; one y range per row)")
+        self.dome_box.setToolTip("Positions where they sit on the dome, laid out as the variable"
+                                 " grids (the plane map: LB LF | RF RB across, U M L down; one"
+                                 " y range per row)")
         self.band_box = h.add("", QCheckBox("25-75 %"))
         self.band_box.setChecked(True)
         self.band_box.setToolTip("Each group's 25-75 % band (solid variables)")
@@ -146,6 +150,9 @@ class EventWaveCell(_Cell):
         self.highlight: tuple = ()
         self._auto = True
         self._drawn_key = None
+        self.grid = None                             # the window's GridLayout (the plane map)
+        self.color_by = "group"                      # always (the window's Colour by is off)
+        self.hovered_sub = None
 
     # rows: the window's cursor lines go into every panel
     @property
@@ -160,6 +167,12 @@ class EventWaveCell(_Cell):
         pass
 
     def set_sub(self, _sub, emit: bool = False) -> None:
+        pass
+
+    def add_sub(self, _a: float, _b: float) -> Optional[int]:
+        return None                              # no sub-ranges in Events mode
+
+    def delete_sub(self, _n: int) -> None:
         pass
 
     sub = None
@@ -208,16 +221,33 @@ class EventWaveCell(_Cell):
         other = [k for k in keys if k not in pos]
         out = []
         if self.dome_box.isChecked() and pos:
-            ncol = len(DOME_COLS)
+            place = self._places()
+            cols = sorted({place[k][0] for k in pos})          # the grid's gap column dropped
+            ncol = max(len(cols), 1)
             for i, k in enumerate(other):
                 out.append((k, i // ncol, i % ncol, titles[k]))
             r0 = -(-len(other) // ncol)
             for k in pos:
-                out.append((k, r0 + DOME_ROWS.index(k[2]), DOME_COLS.index(k[:2]), titles[k]))
+                out.append((k, r0 + place[k][1], cols.index(place[k][0]), titles[k]))
             return out
         n = len(keys)
         ncol = 1 if n <= 2 else min(4, math.ceil(math.sqrt(n)))
         return [(k, i // ncol, i % ncol, titles[k]) for i, k in enumerate(keys)]
+
+    def _places(self) -> dict:
+        """Position -> (column, row) on the plane map (``views/sensor_grid``: the
+        window's ``grid``, as its variable grids are laid out); without one, or for a
+        position it does not place, the same layout by name (LB LF | RF RB, U M L)."""
+        out = {c + r: (DOME_COLS.index(c), DOME_ROWS.index(r)) for r in DOME_ROWS
+               for c in DOME_COLS}
+        g = self.grid
+        if g is not None:
+            got = {name: g.cells[sn] for sn, name in enumerate(g.names)
+                   if name in out and sn in g.cells}
+            rows = sorted({r for _c, r in got.values()})
+            if len(got) == len(out):                         # all twelve placed: the map's
+                out = {k: (c, rows.index(r)) for k, (c, r) in got.items()}
+        return out
 
     def _layout(self, variables) -> None:
         grid = self._grid(variables)
@@ -240,6 +270,7 @@ class EventWaveCell(_Cell):
             p.getAxis("left").enableAutoSIPrefix(False)
             p.getAxis("left").setWidth(AXIS_W if c == 0 else 38)
             p.setMinimumHeight(PANEL_MIN_H)
+            self._apply_zoom_box(p)                      # the window's Zoom box (Z)
             if r == nrows - 1:
                 p.setLabel("bottom", "s from the onset")
             if first is None:

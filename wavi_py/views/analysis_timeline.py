@@ -17,6 +17,11 @@ There is no click-seek, so a click on a region or a near miss does not move
 the playhead. The view starts on the whole source and keeps a hand zoom
 (``zoomed``) until Reset (R).
 
+The vehicle's mode / gain / armed (``rov:mode``) is a band row, not a curve:
+one labelled band per flight-mode span (MANUAL blue, ALT_HOLD yellow, ...),
+the armed spans as a green bar along its bottom, and the pilot gain as a step
+line on its 0 .. 1 axis.
+
 Each row keeps at least ``ROW_MIN`` px, so its y labels don't overlap; the
 cell's minimum height grows with the rows, and the window's splitter makes
 room for it.
@@ -25,8 +30,8 @@ The rows are kept (a unit's plot and its overlay are made once and only moved
 in the layout), so checking variables does not rebuild the regions.
 
 The manoeuvre lane (when the recording has its sidecar, ``replay/manoeuvres.py``;
-``set_manoeuvres``): a row at the bottom with the stick segments as bars,
-coloured by axis and sign (``LANE_COLORS``; the minus side a darker shade),
+``set_manoeuvres``): a row under the mode band, above the variables' rows,
+with the stick segments as bars, coloured by axis and sign (``LANE_COLORS``; the minus side a darker shade),
 stronger the higher the level; rest is empty, the first ``COAST_S`` of a rest
 after a release (the coast) hatched in the released axis' colour, combos grey.
 Hover: class, level, duration. A click makes a selection of the event's
@@ -48,13 +53,16 @@ from PyQt6.QtWidgets import QMenu, QWidget
 import pyqtgraph as pg
 
 from wavi_py.daq.analysis import UNIT_GROUPS, Dataset
-from wavi_py.views.analysis_cells import AXIS_W, _Cell, hook_click, probe_line
+from wavi_py.replay.rov import MODE_KEY
+from wavi_py.daq.series import WSK
+from wavi_py.views.analysis_cells import AXIS_W, SENSOR, SELECTION, _Cell, hook_click, probe_line
+from wavi_py.views.sensor_grid import gauge_color
 from wavi_py.views.selections import SelectionModel, SelectionOverlay, _hook_drag
 from wavi_py.views.whisker_plots import _show_grid
 
 # the timeline's curves: dark, plain (the regions carry the selections' colours)
 TIMELINE_COLORS = ((40, 90, 170), (70, 70, 70), (20, 120, 60), (150, 30, 30), (100, 60, 150),
-                   (0, 110, 120))
+                   (0, 110, 120), (120, 110, 0), (190, 80, 150))
 _HEAD_PEN = pg.mkPen((210, 0, 0), width=2)
 _BARE = ""                                       # the row shown with no variable
 ROW_MIN = 58                                     # px a row keeps (its y labels don't overlap)
@@ -105,6 +113,12 @@ def segment_text(sg: dict) -> str:
     return (f"{sg.get('class', '')}  {', '.join(parts) or 'rest'} · "
             f"{float(sg['t1']) - float(sg['t0']):.2f} s ({float(sg['t0']):.2f} .. "
             f"{float(sg['t1']):.2f} s){extra}")
+# the mode band: a light fill per ArduSub mode (none of the selections' colours)
+MODE_COLORS = {"MANUAL": (200, 222, 255), "ALT_HOLD": (250, 240, 165), "STABILIZE": (225, 205, 245),
+               "POSHOLD": (195, 238, 228), "SURFTRAK": (240, 215, 200)}
+_MODE_OTHER = (225, 225, 225)
+_ARMED_BRUSH = pg.mkBrush(60, 170, 60, 200)
+_GAIN_PEN = pg.mkPen((40, 40, 40), width=1.5)
 
 
 class TimelineCell(_Cell):
@@ -133,6 +147,9 @@ class TimelineCell(_Cell):
         self._lane_doc: Optional[dict] = None
         self._lane_bars: list = []
         self._lane_item = None
+        self.color_by = SELECTION                        # sensor: the gauges in their own colour
+        self._mode_items: list = []                      # the mode band's spans and labels
+        self._mode_key = None
         self._show_rows([_BARE])
         self.glw.scene().sigMouseMoved.connect(self._lane_hover)
 
@@ -149,7 +166,10 @@ class TimelineCell(_Cell):
         p.setMouseEnabled(x=True, y=False)
         p.getAxis("left").enableAutoSIPrefix(False)
         p.getAxis("left").setWidth(AXIS_W)
-        p.setLabel("left", unit)
+        p.setLabel("left", "mode / gain" if unit == "mode" else unit)
+        if unit == "mode":                               # 0 .. 1: the pilot gain's axis
+            p.setYRange(0.0, 1.05, padding=0)
+            p.getViewBox().setLimits(yMin=-0.02, yMax=1.1)
         if unit == LANE:
             p.setYRange(0, 1, padding=0)
             p.getAxis("left").setTicks([[]])
@@ -228,8 +248,11 @@ class TimelineCell(_Cell):
     def reset_view(self) -> None:
         super().reset_view()
         self.zoomed = False
-        for p in self.rows.values():
-            p.enableAutoRange(y=True)
+        for u, p in self.rows.items():
+            if u == "mode":
+                p.setYRange(0.0, 1.05, padding=0)
+            else:
+                p.enableAutoRange(y=True)
         self.fit()
 
     def fit(self) -> None:
@@ -277,13 +300,16 @@ class TimelineCell(_Cell):
         ``ds``: the Timeline variables with the display context (no selections)."""
         extent = source.extent() if source is not None else None
         depth_t = source.depth[0] if source is not None else np.empty(0)
-        if extent is None and len(depth_t):
-            extent = (float(depth_t[0]), float(depth_t[-1]))
-        elif extent is not None and len(depth_t):
-            extent = (min(extent[0], float(depth_t[0])), max(extent[1], float(depth_t[-1])))
-        units = [u for u in UNIT_GROUPS if any(v.unit == u for v in ds.variables)] or [_BARE]
-        if self._lane_doc is not None:
-            units = units + [LANE]
+        more = [(float(depth_t[0]), float(depth_t[-1]))] if len(depth_t) else []
+        rex = source.rov.extent() if source is not None else None
+        more += [rex] if rex is not None else []
+        for e in more:
+            extent = e if extent is None else (min(extent[0], e[0]), max(extent[1], e[1]))
+        units = [u for u in UNIT_GROUPS if any(v.unit == u for v in ds.variables)]
+        if self._lane_doc is not None:     # mode band, stick lane, then the variables' rows
+            band = [u for u in units if u == "mode"]
+            units = band + [LANE] + [u for u in units if u != "mode"]
+        units = units or [_BARE]
         self._show_rows(units)
         new_extent = extent != self._extent
         self._extent = extent
@@ -293,7 +319,8 @@ class TimelineCell(_Cell):
         n_px = max(50, int(self._anchor.getViewBox().width()) or 600)
         v0 = None if ds.v0 is None else np.asarray(ds.v0).tobytes()
         inputs = (id(source.series) if source is not None else None, extent, round(x0, 6),
-                  round(x1, 6), n_px, tuple(v.key for v in ds.variables), ds.despike, v0, ds.scale)
+                  round(x1, 6), n_px, tuple(v.key for v in ds.variables), ds.despike, v0, ds.scale,
+                  self.color_by)
         if inputs == self._last:
             return
         self._last = inputs
@@ -311,18 +338,69 @@ class TimelineCell(_Cell):
                 c.unit, c.label = v.unit, v.label
                 self._plots[v.unit].addItem(c)
                 self.curves[v.key] = c
-            c.setPen(pg.mkPen(TIMELINE_COLORS[order.index(v.key) % len(TIMELINE_COLORS)],
-                              width=1.5 if v.unit == "cm" else 1))
+            color = gauge_color(v.col) if self.color_by == SENSOR and v.source == WSK else \
+                TIMELINE_COLORS[order.index(v.key) % len(TIMELINE_COLORS)]
+            c.setPen(pg.mkPen(color, width=1.5 if v.unit == "cm" else 1))
             c.setData(tr.t, tr.y)
             seen.add(v.key)
+        if any(v.key == MODE_KEY for v in ds.variables) and source is not None:
+            self._draw_modes(source.rov)
+            seen.add(MODE_KEY)
+        else:
+            self._draw_modes(None)
         for k in [k for k in self.curves if k not in seen]:
             c = self.curves.pop(k)
             self._plots[c.unit].removeItem(c)
         self._legends(ds)
         self.glw.scene().prepareForPaint()
 
+    def _draw_modes(self, rov) -> None:
+        """The mode band row (see the module doc); rebuilt only when the spans, the
+        armed spans or the gain changed (live: they grow)."""
+        gt, gy = rov.series("rov:gain") if rov else (np.empty(0), np.empty(0))
+        key = None if not rov else (tuple(rov.modes), tuple(map(tuple, rov.armed)), len(gt))
+        if key == self._mode_key:
+            return
+        self._mode_key = key
+        p = self._row("mode")
+        for it in self._mode_items:
+            p.removeItem(it)
+        self._mode_items = []
+        if key is None:
+            return
+        from PyQt6.QtWidgets import QGraphicsRectItem
+        for t0, t1, name in rov.modes:
+            r = QGraphicsRectItem(t0, 0.0, max(t1 - t0, 1e-3), 1.05)
+            r.setBrush(pg.mkBrush(*MODE_COLORS.get(name, _MODE_OTHER)))
+            r.setPen(pg.mkPen(None))
+            r.setZValue(-30)
+            p.addItem(r, ignoreBounds=True)
+            lab = pg.TextItem(name, color=(60, 60, 60), anchor=(0, 0))
+            lab.setPos(t0, 1.05)
+            lab.setZValue(-29)
+            p.addItem(lab, ignoreBounds=True)
+            self._mode_items += [r, lab]
+        for a, b in rov.armed:
+            r = QGraphicsRectItem(a, 0.0, max(b - a, 1e-3), 0.07)
+            r.setBrush(_ARMED_BRUSH)
+            r.setPen(pg.mkPen(None))
+            r.setZValue(-28)
+            r.setToolTip("armed")
+            p.addItem(r, ignoreBounds=True)
+            self._mode_items.append(r)
+        c = self.curves.get(MODE_KEY)
+        if c is None:
+            c = self.curves[MODE_KEY] = pg.PlotCurveItem(pen=_GAIN_PEN)
+            c.unit, c.label = "mode", "pilot gain"
+            p.addItem(c)
+        if len(gt):                                       # a step: each value until the next
+            ts = np.r_[np.repeat(gt, 2)[1:], self._extent[1] if self._extent else gt[-1]]
+            c.setData(ts, np.repeat(gy, 2))
+        else:
+            c.setData([], [])
+
     def _legends(self, ds: Dataset) -> None:
-        key = tuple(v.key for v in ds.variables)
+        key = (tuple(v.key for v in ds.variables), self.color_by)
         if getattr(self, "_legend_key", None) == key:
             return
         self._legend_key = key
@@ -333,10 +411,11 @@ class TimelineCell(_Cell):
                 p.addLegend(offset=(-10, 2), labelTextColor="k", verSpacing=-6,
                             brush=pg.mkBrush(255, 255, 255, 200), pen=pg.mkPen(180, 180, 180))
             p.legend.clear()
-            for v in ds.variables:
-                c = self.curves.get(v.key)
-                if v.unit == u and c is not None:
-                    p.legend.addItem(c, v.label)
+            vs = [v for v in ds.variables if v.unit == u and v.key in self.curves]
+            p.legend.setColumnCount(max(1, math.ceil(len(vs) / 3)))   # at most 3 lines: the row is short
+            for v in vs:
+                p.legend.addItem(self.curves[v.key], "pilot gain · armed (green)"
+                                 if v.key == MODE_KEY else v.label)
 
     # ----- the manoeuvre lane
 

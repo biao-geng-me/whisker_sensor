@@ -15,7 +15,10 @@ depth and the seek state are parsed):
   line, gauge and replacement of each, sparse (~30 in a 13 min dive), so the
   replay transport can serve the scans raw or despiked (``read_lines``);
 - the line numbers of every hello / info / status line (the state a seek
-  restores) and the events and depth (``replay/events.py``).
+  restores) and the events and depth (``replay/events.py``);
+- the vehicle telemetry (``replay/rov.py``: pilot commands, thrusters,
+  current, climb, heading, vibration, the pilot gain and the mode spans),
+  pulled from the bytes of its ~75k lines in a 13 min dive (``rov``).
 
 The kinds are written two ways: ``"k": "hello"`` (``json.dumps`` default
 spacing; the GUI's tee writes the hello like that) and ``"k":"wsk"``
@@ -50,9 +53,10 @@ import numpy as np
 from wavi_py.daq.clock import FittedClock, fit_segments
 from wavi_py.daq.despike import find_spikes
 from wavi_py.replay.events import WATER_DENSITY, Event, EventTracker, TimelineQueries, hpa_per_cm
+from wavi_py.replay.rov import TYPES_B as ROV_TYPES_B, RovData, rov_data
 from whisker_link.esp32_frame import MV_PER_CODE
 
-INDEX_VERSION = 2
+INDEX_VERSION = 3                # 3: the vehicle telemetry (rov)
 V0_S = 0.25                    # V0 = mean of this much of the first scans
 
 KINDS = ("other", "hello", "wsk", "mav", "status", "info", "txt", "mark", "ack")
@@ -129,6 +133,7 @@ class RecordingIndex(TimelineQueries):
         self.press_t = np.empty(0)                 # session seconds
         self.press_hpa = np.empty(0)
         self.surface_hpa: Optional[float] = None
+        self.rov_data = RovData()                  # the vehicle telemetry, session seconds
         self.from_cache = False
 
     # ----- construction
@@ -236,6 +241,8 @@ class RecordingIndex(TimelineQueries):
                             imu_us.append(us)
                     elif mtype in _PARSED_MAV:
                         tracker.feed(json.loads(line))
+                    elif mtype in ROV_TYPES_B or mtype == b"PARAM_VALUE":
+                        tracker.rov.feed_line(t, mtype, line, tend)
                 elif kind != k_other:
                     ev = json.loads(line)
                     if kind == K["hello"]:
@@ -314,6 +321,7 @@ class RecordingIndex(TimelineQueries):
         self.press_t = np.asarray(tr.press_t, dtype=np.float64) - t0
         self.press_hpa = np.asarray(tr.press_hpa, dtype=np.float64)
         self.surface_hpa = tr.surface_hpa()
+        self.rov_data = rov_data(tr.rov, t0, tr.mode_changes, self.armed_spans, end)
 
     # ----- cache
 
@@ -323,13 +331,14 @@ class RecordingIndex(TimelineQueries):
                 "fs": self.fs, "wsk_segs": self.wsk_segs, "imu_segs": self.imu_segs,
                 "n_wsk": self.n_wsk, "n_raw_imu": self.n_raw_imu,
                 "events": [e.to_dict() for e in self.events],
-                "armed_spans": self.armed_spans, "surface_hpa": self.surface_hpa}
+                "armed_spans": self.armed_spans, "surface_hpa": self.surface_hpa,
+                "rov_modes": self.rov_data.modes, "rov_frame": self.rov_data.frame}
         tmp = path.with_name(path.name + ".tmp")
         with open(tmp, "wb") as f:
             np.savez(f, off=self.off, t=self.t, kind=self.kind, v0=self.v0,
                      press_t=self.press_t, press_hpa=self.press_hpa,
                      spk_line=self.spk_line, spk_ch=self.spk_ch, spk_val=self.spk_val,
-                     meta=np.asarray(json.dumps(meta)))
+                     meta=np.asarray(json.dumps(meta)), **self.rov_data.to_npz())
         os.replace(tmp, path)
 
     @classmethod
@@ -344,6 +353,8 @@ class RecordingIndex(TimelineQueries):
                 self.off, self.t, self.kind = z["off"], z["t"], z["kind"]
                 self.v0, self.press_t, self.press_hpa = z["v0"], z["press_t"], z["press_hpa"]
                 self.spk_line, self.spk_ch, self.spk_val = z["spk_line"], z["spk_ch"], z["spk_val"]
+                self.rov_data = RovData.from_npz(z, meta["rov_modes"], meta["armed_spans"],
+                                                 meta["rov_frame"])
         except (OSError, ValueError, KeyError):
             return None
         self.path, self.size, self.mtime_ns = path, st.st_size, st.st_mtime_ns
@@ -436,6 +447,9 @@ class RecordingIndex(TimelineQueries):
         if self.surface_hpa is None or not len(self.press_t):
             return np.empty(0), np.empty(0)
         return self.press_t, (self.press_hpa - self.surface_hpa) / hpa_per_cm(rho)
+
+    def rov(self) -> RovData:
+        return self.rov_data
 
     def summary(self) -> str:
         n_ev = len(self.events)

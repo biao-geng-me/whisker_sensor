@@ -597,7 +597,7 @@ def event_selections(es: EventSet, cache: StoreCache, number0: int = 1,
             except (OSError, ValueError, KeyError, IndexError):
                 sources[r.recording] = None
                 continue
-            sources[r.recording] = SelSource(st, idx.depth())
+            sources[r.recording] = SelSource(st, idx.depth(), rov=idx.rov())
             maps[r.recording] = dome_map_for(r.recording)
         src = sources[r.recording]
         if src is None:

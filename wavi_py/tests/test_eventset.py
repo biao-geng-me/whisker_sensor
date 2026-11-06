@@ -26,8 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from test_manoeuvres import BASE_MV, write_rec  # noqa: E402
 from wavi_py.daq import analysis as an  # noqa: E402
-from wavi_py.daq.series import CMD, IMU, WSK, ArraySeries  # noqa: E402
-from wavi_py.daq.vehicle import CMD_CHANNELS  # noqa: E402
+from wavi_py.daq.series import IMU, WSK, ArraySeries  # noqa: E402
 from wavi_py.replay import dome_maps as dm  # noqa: E402
 from wavi_py.replay import eventset as evs  # noqa: E402
 from wavi_py.replay import manoeuvres as mn  # noqa: E402
@@ -105,7 +104,8 @@ def test_dome_map_line_round_trip_and_embedded_wins(tmp_path):
     a, b = RecordingIndex.build(plain), RecordingIndex.build(withm)
     assert a.t0 == b.t0 and a.n_wsk == b.n_wsk and a.duration == b.duration
     sa, sb = RecordingStore.build(a), RecordingStore.build(b)
-    assert np.array_equal(sa.wsk, sb.wsk) and np.array_equal(sa.cmd, sb.cmd, equal_nan=True)
+    assert np.array_equal(sa.wsk, sb.wsk) and np.array_equal(sa.imu, sb.imu)
+    assert a.rov().series("rov:fwd")[1].tolist() == b.rov().series("rov:fwd")[1].tolist()
     from whisker_link import convert
     ca, cb = convert.load(plain), convert.load(withm)
     assert len(ca["wsk"]["t"]) == len(cb["wsk"]["t"]) and cb["hello"]["k"] == "hello"
@@ -124,26 +124,36 @@ def test_start_tee_writes_the_map_after_the_hello(tmp_path):
     assert json.loads(lines[1])["k"] == "dome_map" and json.loads(lines[1])["id"] == m.id
 
 
-# ----- cmd in the store
+# ----- the per-axis ROV variables (demand, thrust)
 
-def test_cmd_source_in_the_store(tmp_path):
+def test_rov_axis_variables(tmp_path):
+    """The pilot's demand per axis and the thrust projected from the thrusters are
+    ROV variables (``replay/rov.py``, from the index), the same keys everywhere."""
     rec = tmp_path / "st_2026-11-05_1200_00.00_cmd.jsonl"
     first = write_rec(rec)
-    st = RecordingStore.build(RecordingIndex.build(rec))
-    assert st.names(CMD) == CMD_CHANNELS
-    t, y = st.get(CMD, slice(None), 0.0, st.duration)
-    i_u, i_th = CMD_CHANNELS.index("u_surge"), CMD_CHANNELS.index("thrust_surge")
-    on = (t > 7.0 - first) & (t < 11.0 - first)
+    idx = RecordingIndex.build(rec)
+    rov = idx.rov()
+    keys = [k for k, *_ in rov.variables()]
+    for k in ("rov:fwd", "rov:th_surge", "rov:th_sway", "rov:th_heave", "rov:th_yaw"):
+        assert k in keys
+    assert [v.key for v in an.rov_axis_variables()] == [
+        "rov:fwd", "rov:lat", "rov:vert", "rov:yaw",
+        "rov:th_surge", "rov:th_sway", "rov:th_heave", "rov:th_yaw"]
+    on = lambda t: (t > 7.0 - first) & (t < 11.0 - first)            # noqa: E731
+    t, u = rov.series("rov:fwd")
     off = (t > 1.0) & (t < 5.0 - first)
-    assert np.allclose(y[on, i_u], 0.5) and np.allclose(y[off, i_u], 0.0)
-    assert np.allclose(y[on, i_th], 0.5, atol=0.01)
-    assert np.allclose(y[on, CMD_CHANNELS.index("thrust_yaw")], 0.0, atol=0.01)
-    # the Dataset reads it as a variable of unit group "demand"
-    v = an.variable_of(f"cmd:{i_u}")
-    assert v.unit == "demand" and v.label == "Demand surge"
-    ds = an.Dataset([an.Selection(1, 0.0, st.duration, an.SelSource(st))], [v])
+    assert np.allclose(u[on(t)], 0.5) and np.allclose(u[off], 0.0)
+    t, th = rov.series("rov:th_surge")
+    assert np.allclose(th[on(t)], 0.5, atol=0.01)
+    assert np.allclose(rov.series("rov:th_yaw")[1][on(t)], 0.0, atol=0.01)
+    # the Dataset reads them as ROV variables (unit groups pilot / thrust)
+    v = an.variable_of("rov:fwd")
+    assert v.source == an.ROV and v.unit == "pilot"
+    assert an.variable_of("rov:th_surge").unit == "thrust"
+    st = RecordingStore.build(idx)
+    ds = an.Dataset([an.Selection(1, 0.0, st.duration, an.SelSource(st, rov=rov))], [v])
     tr = ds.traces(200)
-    assert len(tr) == 1 and tr[0].y.max() == pytest.approx(0.5)
+    assert len(tr) == 1 and np.nanmax(tr[0].y) == pytest.approx(0.5)
 
 
 # ----- the query
@@ -237,7 +247,7 @@ def test_two_recordings_aligned(tmp_path):
     for s, r in zip(sels, es.events):
         assert s.zero == pytest.approx(r.t) and s.align == pytest.approx(r.t - s.t0)
         assert s.dome_map.id == r.map_id
-    u = an.variable_of(f"cmd:{CMD_CHANNELS.index('u_surge')}")
+    u = an.variable_of("rov:fwd")
     lbm = an.variable_of("pos:LBM:drag")
     ds = an.Dataset(sels, [u, lbm], baseline=True)
     tr = {(t.sel.number, t.var.key): t for t in ds.traces(400)}
@@ -249,7 +259,7 @@ def test_two_recordings_aligned(tmp_path):
         assert abs(y[t < -0.1]).max() < 0.01 and y[(t > 0.1) & (t < 4)].min() == pytest.approx(1.0, abs=0.01)
     ag = ds.aggregate(lbm)
     assert len(ag) == 2 and all(a.events == 1 for a in ag)
-    for a in ds.aggregate(u):                 # cmd: 40 /s on a 50 /s grid, held between
+    for a in ds.aggregate(u):                 # RC: 20 /s on a 50 /s grid, held between
         inside = (a.t > -1.9) & (a.t < 4.9)
         assert np.all(a.n[inside] == 1)
         assert np.all(a.median[inside & (a.t > 0.1)] == 0.5)
@@ -362,6 +372,6 @@ def test_variable_keys():
     assert an.variable_of("imu:0").source == IMU
     assert an.variable_of("pos:RFU:lift").pos == "RFU" and an.variable_of("pos:RFU:lift").axis == "lift"
     assert an.variable_of("depth").source == an.DEPTH
-    assert an.variable_of("pos:RFU") is None and an.variable_of("cmd:99") is None
+    assert an.variable_of("pos:RFU") is None and an.variable_of("rov:nope") is None
     assert [v.key for v in an.position_variables(["LFU"])] == ["pos:LFU:drag", "pos:LFU:lift"]
-    assert "demand" in an.UNIT_GROUPS and len(an.cmd_variables()) == len(CMD_CHANNELS)
+    assert an.variable_of("rov:th_heave").label == "thrust heave"

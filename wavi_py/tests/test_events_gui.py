@@ -82,7 +82,7 @@ def _recs(tmp_path):
 
 def _variables():
     return (an.whisker_variables(32, [f"S{i // 2 + 1}" for i in range(32)]) + an.imu_variables()
-            + an.cmd_variables() + an.position_variables(an.DOME_ORDER))
+            + an.rov_axis_variables() + an.position_variables(an.DOME_ORDER))
 
 
 def _events_window(app, query, cache=None):
@@ -243,7 +243,7 @@ def test_events_mode_window(app, tmp_path):
 
 def test_selections_mode_is_unchanged(app, tmp_path):
     """A Selections window: the timeline, the selections list, no events panel;
-    Positions and Demand / Thrust are in the tree but nothing is checked by them."""
+    the grids by gauge; the ROV group in the tree; nothing checked by them."""
     from wavi_py.views.analysis_window import AnalysisWindow
     from wavi_py.views.selections import SelectionModel
     model = SelectionModel()
@@ -255,8 +255,8 @@ def test_selections_mode_is_unchanged(app, tmp_path):
         assert w.timeline.isVisible() and w.sel_list.isVisible()
         assert "Analysis 1" in w.windowTitle()
         tops = [w.var_tree.topLevelItem(i).text(0) for i in range(w.var_tree.topLevelItemCount())]
-        assert tops == ["Whiskers", "IMU", "Demand / Thrust", "Positions"]
-        assert not any(k.startswith(("pos:", "cmd:")) for k in w.checked_keys())
+        assert tops == ["IMU", "ROV"] and not w.grid_positions
+        assert not any(k.startswith(("pos:", "rov:")) for k in w.checked_keys())
     finally:
         w.close()
 
@@ -428,3 +428,109 @@ def test_minor_inputs_of_the_round_2_sidecar():
                      no_reference=True, alive={"LFM": False}).items():
         object.__setattr__(r, k, v)
     assert flags_text(r) == "clean · minor yaw+0.07 · no ref · lost LFM"
+
+
+# ----- merged with the Analysis round 3 (grid picker, ROV, mode band)
+
+def test_grid_position_view(app):
+    """The grid picker's by-position view: the same cells, halves drag / lift, keys
+    pos:<position>:<axis>; gauge and position checks are kept apart."""
+    from PyQt6.QtCore import QPointF
+    from wavi_py.views.analysis_window import POSITIONS_VIEW, PLOTS, AnalysisWindow
+    from wavi_py.views.selections import SelectionModel
+    from wavi_py.views.sensor_grid import cell_rects
+    m = DomeMap.load(DEFAULT_MAP)
+    w = AnalysisWindow(SelectionModel(), _variables, 1, dome_map_fn=lambda: m)
+    w.show()
+    app.processEvents()
+    try:
+        g = w.grids[PLOTS]
+        w.set_checked(["wsk:10"])
+        w.grid_view.setCurrentText(POSITIONS_VIEW)
+        assert w.grid_positions and g.positions
+        s = g.grid.names.index("LFM")
+        assert g.key_of(2 * s) == "pos:LFM:drag" and g.key_of(2 * s + 1) == "pos:LFM:lift"
+        assert g.col_of("pos:LFM:lift") == 2 * s + 1 and g.checked == set()
+        g.grab()
+        _cell, name, _a, b = cell_rects(g.grid, g._area())[s]
+        g.toggled.emit([g.key_of(c) for c in g.hit(QPointF(name.center()))], True)
+        assert {"pos:LFM:drag", "pos:LFM:lift", "wsk:10"} <= set(w.checked_keys())
+        assert g.checked == {2 * s, 2 * s + 1}
+        assert g.hit(QPointF(b.center())) == [2 * s + 1]
+        # a position whose gauge the map lists dead is dimmed in this view
+        dead = [p for p in m.positions if any(int(x.ch) in g.grid.dead for x in p.daq.values())]
+        for p in dead:
+            sn = g.grid.names.index(p.key)
+            assert any(c in g.pos_off for c in (2 * sn, 2 * sn + 1))
+        # the dataset reads the positions through the window's map
+        ds = w.dataset()
+        assert ds.dome_map is m
+    finally:
+        w.close()
+
+
+def test_events_mode_switches_and_dome_places(app, tmp_path):
+    from wavi_py.views.analysis_window import TIMELINE
+    recs, side = _recs(tmp_path)
+    w = _events_window(app, _query(recs, side))
+    try:
+        assert w.grid_positions and not w.grids[TIMELINE].isVisible()
+        assert w.var_tree.isColumnHidden(TIMELINE)
+        assert not w.color_box.isEnabled() and not w._act_select.isEnabled()
+        tops = [w.var_tree.topLevelItem(i).text(0) for i in range(w.var_tree.topLevelItemCount())]
+        assert tops == ["IMU", "ROV"]
+        # the dome grid's places are the grid picker's (plane map): LB LF | RF RB, U M L
+        pl = w.compare._places()
+        assert pl["LBU"][0] < pl["LFU"][0] < pl["RFU"][0] < pl["RBU"][0]
+        assert pl["LFU"][1] < pl["LFM"][1] < pl["LFL"][1]
+        cols = {k: c for k, _r, c, _t in w.compare._grid(w._checked_vars())}
+        assert sorted(set(cols.values())) == [0, 1, 2, 3]                # no gap column
+        # Zoom box reaches the event panels; demand and thrust per axis plot per event
+        w._act_zoom.setChecked(True)
+        assert all(p.getViewBox().state["mouseMode"] == p.getViewBox().RectMode
+                   for p in w.compare.panels.values()) and w.compare.zoom_box
+        w.set_checked(["rov:fwd", "rov:th_surge"])
+        assert _pump(app, lambda: not w.loader.busy and w.overlay is not None and
+                     "rov:th_surge" in [v.key for v in w.overlay.variables], 30)
+        ag = {a.group: a for a in w.overlay.aggregates["rov:fwd"]}
+        for a in ag.values():
+            assert np.nanmax(a.median[a.t > 0.2]) == pytest.approx(0.5)
+    finally:
+        w.close()
+
+
+def test_timeline_order_mode_band_lane_variables(app, tmp_path):
+    from wavi_py.views.analysis_timeline import LANE
+    from wavi_py.views.analysis_window import AnalysisWindow
+    from wavi_py.views.selections import SelectionModel
+    from wavi_py.daq.analysis import SelSource, rov_variables
+    from wavi_py.replay.index import RecordingIndex
+    from wavi_py.replay.store import RecordingStore
+    recs, side = _recs(tmp_path)
+    rec = recs[1]
+    _p, doc, _ = mn.write_manoeuvres_for(rec, side, cache=False)
+    idx = RecordingIndex.build(rec)
+    src = SelSource(RecordingStore.build(idx), idx.depth(), rov=idx.rov())
+    model = SelectionModel()
+    w = AnalysisWindow(model, lambda: _variables()[:-24] + rov_variables(idx.rov())
+                       + an.position_variables(an.DOME_ORDER), 1, lambda: src,
+                       manoeuvres_fn=lambda: (str(rec), doc))
+    w.show()
+    app.processEvents()
+    try:
+        w.set_timeline(["rov:mode", "depth", "rov:fwd"])
+        w._render()
+        units = list(w.timeline.rows)
+        assert units[:2] == ["mode", LANE] and set(units[2:]) == {"cm", "pilot"}
+    finally:
+        w.close()
+
+
+def test_events_mode_spectra_header(app, tmp_path):
+    recs, side = _recs(tmp_path)
+    w = _events_window(app, _query(recs, side))
+    try:
+        assert "no sub-ranges" in w.spectrum.header.sub.text()
+        assert "Select (S)" not in w.spectrogram.header.sub.text()
+    finally:
+        w.close()

@@ -7,11 +7,16 @@ on; adjusting it is limited to what was copied). The selection model and its
 drawing are in ``views/selections.py``.
 
 A ``Variable`` is one curve's worth of data by key: ``wsk:<col>`` (a gauge, the
-series' stream-order column), ``imu:<col>`` (``IMU_CHANNELS``) or ``depth`` (the
-source's depth from the external pressure, which is not in the series). Each has
-a unit group, the rows of Compare (and of C2's Spectrum): mV, mg, mrad/s, deg,
-cm, as the IMU window shows them (accel and gyro as the series has them, the
-attitude's rad in degrees). The gauges are
+series' stream-order column), ``imu:<col>`` (``IMU_CHANNELS``), ``depth`` (the
+source's depth from the external pressure, which is not in the series) or
+``rov:<name>`` (the vehicle telemetry, ``replay/rov.py``: pilot commands,
+thrusters, current, climb, heading, vibration; not in the series either, so
+read like the depth). Each has a unit group, the rows of the waveform and the
+spectrum: mV, mg, mrad/s, deg, cm, as the IMU window shows them (accel and gyro
+as the series has them, the attitude's rad in degrees), then the ROV's: pilot
+and thrust (-1 .. +1), A, m/s, hdg (deg, unwrapped), m/s². ``rov:mode`` (the
+mode spans, armed and the pilot gain) is a timeline band only (``plots``
+False): it is not a curve. The gauges are
 drawn as the Line window draws them, (raw - V0) * scale, so the curves line up
 with what was selected.
 
@@ -22,9 +27,13 @@ Compare's: the time relative to each selection's start, min / max decimated to
 source per selection, from the store's pyramid in replay), so a long selection
 costs about what a short one does. ``samples(sel, var)`` is every sample.
 
-The spectra read the dataset's ``span(sel)``: the whole selection, or with a
-Compare sub-range ``sub = (a, b)`` (seconds from each selection's start)
-[t0 + a, t0 + b] clipped to the selection, None when it is shorter than a.
+The spectra read the dataset's ``span(sel, sub)``: the whole selection, or with
+a sub-range ``sub = (a, b)`` (seconds from each selection's start) [t0 + a,
+t0 + b] clipped to the selection, None when it is shorter than a. The window
+can have several numbered sub-ranges (``subs``: ``(number, a, b)``); each is
+then its own trace per (selection, variable) (``triples``: sub None is the
+whole selection, used when there are none). ``sub`` (one range, no number) is
+the older single sub-range, still taken when ``subs`` is empty.
 ``spectrum`` is the amplitude spectrum of every sample of the span (the method
 of ``daq/spectra.amp_spectra``: a sine of amplitude a reads a), at the span's
 own mean sample rate, so selections of different lengths each have their own
@@ -45,8 +54,10 @@ recording's ``SelSource``):
   set, the time axis is relative to the onset (t = 0 at the stick), not to the
   start. ``group`` names its group, ``pinned`` keeps it drawn, ``baseline`` is
   its pre-event baseline window (absolute), ``dome_map`` its recording's map;
-- ``cmd:<col>``: the store's demand and thrust (``daq/vehicle.py``), unit group
-  "demand";
+- the ROV variables per axis (``rov_axis_variables``): the pilot's demand
+  (``rov:fwd`` ...) and the thrust projected from the eight thrusters through the
+  frame's mix (``rov:th_surge`` ..., ``daq/vehicle.py``), the same keys in every
+  recording;
 - ``pos:<position>:<drag|lift>``: a dome position's gauge, resolved per
   selection through its ``dome_map`` (else the dataset's), polarity applied, so
   one variable reads different gauges in recordings wired or mounted
@@ -72,18 +83,20 @@ from typing import Optional, Sequence
 
 import numpy as np
 
-from wavi_py.daq.series import (CMD, IMU, SOURCES, WSK, ArraySeries, Series, peak_decimate,
-                                span_index)
-from wavi_py.daq.vehicle import CMD_CHANNELS
+from wavi_py.daq.series import IMU, WSK, ArraySeries, Series, peak_decimate, span_index
+from wavi_py.replay.rov import AXIS_KEYS, MODE_KEY, RovData, axis_variables
 
 DEPTH = "depth"
+ROV = "rov"
 POS = "pos"
-UNIT_GROUPS = ("mV", "mg", "mrad/s", "deg", "cm", "demand")   # Compare's rows, top to bottom
+# the rows, top to bottom ("mode" is the timeline's band row)
+UNIT_GROUPS = ("mV", "mg", "mrad/s", "deg", "cm", "mode", "pilot", "thrust", "A", "m/s", "hdg",
+               "m/s²")
 MAX_TRACES = 200                # selections ``traces`` draws at most
 REF_LP_HZ = 0.5                 # the reference drift's low-pass (replay/manoeuvres.py)
 AGG_DT = 0.02                   # the aggregates' grid step (s)
-# the dome's positions as seen from behind: columns left back, left front, right
-# front, right back; rows upper, middle, lower (the event waveform's dome grid)
+# the dome's positions in the plane map's order (``views/sensor_grid``: port left,
+# starboard right, front columns toward the centre; rows upper, middle, lower)
 DOME_COLS = ("LB", "LF", "RF", "RB")
 DOME_ROWS = ("U", "M", "L")
 DOME_ORDER = tuple(c + r for r in DOME_ROWS for c in DOME_COLS)
@@ -101,11 +114,19 @@ IMU_VARS = (
 
 @dataclass
 class SelSource:
-    """What a selection reads: a ``Series`` and the depth ``(t, cm)`` (may be empty).
-    ``snapshot``: a copy of the live buffers (one version: Despike does not apply)."""
+    """What a selection reads: a ``Series``, the depth ``(t, cm)`` (may be empty) and
+    the vehicle telemetry (``RovData``, may be empty). ``snapshot``: a copy of the
+    live buffers (one version: Despike does not apply)."""
     series: Series
     depth: tuple = (np.empty(0), np.empty(0))
     snapshot: bool = False
+    rov: RovData = field(default_factory=RovData)
+
+    def aux(self, var: "Variable") -> tuple[np.ndarray, np.ndarray]:
+        """(t, y) of a variable that is not in the series (depth, ROV)."""
+        if var.source == DEPTH:
+            return self.depth
+        return self.rov.series(var.key)
 
     def extent(self) -> Optional[tuple[float, float]]:
         """The span the selection can cover: whisker and IMU data together."""
@@ -115,10 +136,10 @@ class SelSource:
         return min(e[0] for e in ex), max(e[1] for e in ex)
 
 
-def snapshot_of(series: Series, depth=None) -> SelSource:
+def snapshot_of(series: Series, depth=None, rov: Optional[RovData] = None) -> SelSource:
     """A copy of ``series`` (the live buffers: they move on) as a ``SelSource``."""
     data, names = {}, {}
-    for src in SOURCES:
+    for src in (WSK, IMU):
         ext = series.extent(src)
         if ext is None:
             continue
@@ -126,7 +147,8 @@ def snapshot_of(series: Series, depth=None) -> SelSource:
         names[src] = series.names(src)
     d = (np.empty(0), np.empty(0)) if depth is None else \
         (np.array(depth[0], dtype=float), np.array(depth[1], dtype=float))
-    return SelSource(ArraySeries(data, names), d, snapshot=True)
+    return SelSource(ArraySeries(data, names), d, snapshot=True,
+                     rov=rov.copy() if rov else RovData())
 
 
 @dataclass(eq=False)
@@ -166,13 +188,14 @@ class Selection:
 
 @dataclass(frozen=True)
 class Variable:
-    key: str                 # wsk:<col>, imu:<col>, cmd:<col>, pos:<name>:<axis>, depth
+    key: str                 # wsk:<col>, imu:<col>, rov:<name>, pos:<name>:<axis>, depth
     label: str               # "W3 A", "Accel x", "Depth"
     unit: str                # one of UNIT_GROUPS
-    source: str              # WSK, IMU, CMD, POS or DEPTH
+    source: str              # WSK, IMU, DEPTH, ROV or POS
     col: int = 0
     factor: float = 1.0
     group: str = ""          # the tree's parent: the sensor name, "Accel", ...
+    plots: bool = True       # False: timeline only (the mode band)
     pos: str = ""            # POS: the position (e.g. "LFM") and axis ("drag" / "lift")
     axis: str = ""
 
@@ -195,26 +218,39 @@ def imu_variables(depth: bool = True) -> list[Variable]:
     return out
 
 
-def cmd_variables() -> list[Variable]:
-    """The store's demand and thrust (``daq/vehicle.CMD_CHANNELS``)."""
-    out = []
-    for c, name in enumerate(CMD_CHANNELS):
-        kind, ax = name.split("_", 1)
-        g = "Demand" if kind == "u" else "Thrust"
-        out.append(Variable(f"cmd:{c}", f"{g} {ax}", "demand", CMD, c, 1.0, g))
-    return out
+def rov_variables(rov: Optional[RovData]) -> list[Variable]:
+    """The vehicle telemetry ``rov`` has (``RovData.variables``); none without."""
+    if not rov:
+        return []
+    return [Variable(k, lab, u, ROV, 0, 1.0, g, plots=(k != MODE_KEY))
+            for k, lab, u, g in rov.variables()]
+
+
+def rov_axis_variables() -> list[Variable]:
+    """The pilot's demand and the projected thrust per axis (surge, sway, heave,
+    yaw; ``replay/rov.axis_variables``): the ROV variables every recording with a
+    vehicle has, so an Events window lists them without a recording open."""
+    return [Variable(k, lab, u, ROV, 0, 1.0, g) for k, lab, u, g in axis_variables()]
+
+
+def _aux_samples(t: np.ndarray, y: np.ndarray, t0: float, t1: float):
+    """The samples of an aux series in [t0, t1], NaN (not sent) dropped."""
+    i0, i1 = span_index(t, t0, t1)
+    t, y = np.asarray(t[i0:i1], float), np.asarray(y[i0:i1], float)
+    ok = np.isfinite(y)
+    return (t, y) if ok.all() else (t[ok], y[ok])
 
 
 def position_variables(positions: Sequence[str]) -> list[Variable]:
     """``pos:<name>:drag`` and ``pos:<name>:lift`` of each position (resolved per
     selection through its dome map)."""
-    return [Variable(f"pos:{p}:{ax}", f"{p} {ax}", "mV", POS, 0, 1.0, p, p, ax)
+    return [Variable(f"pos:{p}:{ax}", f"{p} {ax}", "mV", POS, 0, 1.0, p, pos=p, axis=ax)
             for p in positions for ax in ("drag", "lift")]
 
 
 def variable_of(key: str, sensor_names: Sequence[str] = ()) -> Optional[Variable]:
-    """The variable of a key (``wsk:3``, ``imu:0``, ``cmd:4``, ``pos:LFM:drag``,
-    ``depth``); None if malformed."""
+    """The variable of a key (``wsk:3``, ``imu:0``, ``pos:LFM:drag``, ``depth``, a
+    per-axis ``rov:`` key); None if malformed or unknown."""
     try:
         kind, _, rest = key.partition(":")
         if kind == POS:
@@ -222,13 +258,13 @@ def variable_of(key: str, sensor_names: Sequence[str] = ()) -> Optional[Variable
             return position_variables([p])[("drag", "lift").index(ax)]
         if kind == DEPTH:
             return imu_variables()[-1]
+        if kind == ROV:
+            return next((v for v in rov_axis_variables() if v.key == key), None)
         c = int(rest)
         if kind == WSK:
             return whisker_variables(c + 1, sensor_names)[c]
         if kind == IMU:
             return imu_variables(False)[c]
-        if kind == CMD:
-            return cmd_variables()[c]
     except (ValueError, IndexError):
         return None
     return None
@@ -346,19 +382,22 @@ class Dataset:
     despike: bool = False
     v0: Optional[np.ndarray] = None     # per gauge column, raw mV
     scale: float = 1.0
-    sub: Optional[tuple] = None         # the Compare sub-range (a, b), relative
+    sub: Optional[tuple] = None         # one sub-range (a, b), relative (see the module doc)
+    subs: tuple = ()                    # the numbered sub-ranges ((number, a, b), ...)
     baseline: bool = False              # gauges relative to each selection's baseline
     dome_map: object = None             # POS without a selection map (and the timeline)
     max_traces: Optional[int] = MAX_TRACES
     _names: dict = field(default_factory=dict, repr=False)
     _gauged: dict = field(default_factory=dict, repr=False)
 
-    def span(self, sel: Selection) -> Optional[tuple[float, float]]:
-        """The part of ``sel`` the spectra use (see the module doc; ``sub`` is
-        relative to the selection's zero)."""
-        if self.sub is None:
+    def span(self, sel: Selection, sub: Optional[tuple] = None) -> Optional[tuple[float, float]]:
+        """The part of ``sel`` the spectra use: ``sub`` = (a, b) or (number, a, b), or
+        None: ``self.sub`` if set, else the whole selection (see the module doc;
+        relative to the selection's zero: its start, or an event's onset)."""
+        sub = self.sub if sub is None else sub[-2:]
+        if sub is None:
             return sel.t0, sel.t1
-        a, b = self.sub
+        a, b = sub
         z = sel.zero
         lo, hi = max(sel.t0, z + a), min(sel.t1, z + b)
         return (lo, hi) if hi > lo else None
@@ -456,6 +495,15 @@ class Dataset:
         v0 = 0.0 if self.v0 is None or col >= len(self.v0) else float(self.v0[col])
         return pol * (y - v0) * self.scale
 
+    def sub_list(self) -> list:
+        """The sub-ranges the spectra use: ``subs``, or [None] (whole / ``sub``)."""
+        return list(self.subs) or [None]
+
+    def triples(self) -> list[tuple[Selection, Variable, Optional[tuple]]]:
+        """(selection, variable, sub-range or None) of every spectrum trace."""
+        return [(s, v, u) for s in self.selections for v in self.variables
+                for u in self.sub_list()]
+
     def _convert(self, var: Variable, y: np.ndarray) -> np.ndarray:
         if var.source == WSK:
             v0 = 0.0 if self.v0 is None or var.col >= len(self.v0) else float(self.v0[var.col])
@@ -468,6 +516,8 @@ class Dataset:
             return len(sel.source.depth[0])
         if source == POS:
             return len(sel.source.series.names(WSK))
+        if source == ROV:
+            return int(bool(sel.source.rov))
         return len(sel.source.series.names(source))
 
     @staticmethod
@@ -481,10 +531,12 @@ class Dataset:
         a, b = max(t0, ext[0]), min(t1, ext[1])
         return (a, b) if b > a else None
 
-    def _curves(self, sel: Optional[Selection], ser: Series, t0: float, t1: float, n: int,
-                zero: float, depth: tuple) -> list[Trace]:
-        """Every variable over [t0, t1] of ``ser``, decimated to ~``n``, time - ``zero``."""
+    def _curves(self, sel: Optional[Selection], source: SelSource, t0: float, t1: float,
+                n: int, zero: float) -> list[Trace]:
+        """Every variable over [t0, t1] of ``source``, decimated to ~``n``, time -
+        ``zero`` (``sel`` None: the timeline's, clipped to what the source has)."""
         out: list[Trace] = []
+        ser = source.series
         gv = []
         for v in self.variables:
             if v.source in _GAUGES:
@@ -498,23 +550,23 @@ class Dataset:
             for v, (c, pol) in gv:
                 out.append(Trace(sel, v, t - zero,
                                  self._gauge_values(sel, v, c, pol, t, y[:, cols.index(c)])))
-        for src in (IMU, CMD):
-            have = len(ser.names(src))
-            want = [v for v in self.variables if v.source == src and v.col < have]
-            span = self._clip(ser, src, t0, t1, sel)
-            if not want or span is None:
-                continue
-            t, y = envelope_within(ser, src, [v.col for v in want], span[0], span[1], n)
+        have = len(ser.names(IMU))
+        want = [v for v in self.variables if v.source == IMU and v.col < have]
+        span = self._clip(ser, IMU, t0, t1, sel)
+        if want and span is not None:
+            t, y = envelope_within(ser, IMU, [v.col for v in want], span[0], span[1], n)
             for j, v in enumerate(want):
                 out.append(Trace(sel, v, t - zero, self._convert(v, y[:, j])))
-        dt, dd = depth
-        if len(dt):
-            for v in self.variables:
-                if v.source == DEPTH:
-                    i0, i1 = span_index(dt, t0, t1)
-                    t, y = peak_decimate(dt[i0:i1], np.asarray(dd[i0:i1], float)[:, None],
-                                         max(1, (i1 - i0) // max(1, n)))
-                    out.append(Trace(sel, v, t - zero, y[:, 0]))
+        for v in self.variables:
+            if v.source not in (DEPTH, ROV) or not v.plots:
+                continue
+            dt, dd = source.aux(v)
+            i0, i1 = span_index(dt, t0, t1)
+            if i1 <= i0:
+                continue
+            t, y = peak_decimate(dt[i0:i1], np.asarray(dd[i0:i1], float)[:, None],
+                                 max(1, (i1 - i0) // max(1, n)))
+            out.append(Trace(sel, v, t - zero, y[:, 0]))
         return out
 
     def traces(self, n_px: int) -> list[Trace]:
@@ -528,8 +580,7 @@ class Dataset:
             if sel.duration <= 0:
                 continue
             n = max(8, int(round(n_px * sel.duration / longest))) if longest > 0 else n_px
-            out += self._curves(sel, sel.source.series, sel.t0, sel.t1, n, sel.zero,
-                                sel.source.depth)
+            out += self._curves(sel, sel.source, sel.t0, sel.t1, n, sel.zero)
         return out
 
     def samples(self, sel: Selection, var: Variable,
@@ -541,6 +592,10 @@ class Dataset:
             dt, dd = sel.source.depth
             i0, i1 = span_index(dt, t0, t1)
             return np.array(dt[i0:i1]), np.asarray(dd[i0:i1], dtype=float)
+        if var.source == ROV:
+            if not var.plots:
+                return np.empty(0), np.empty(0)
+            return _aux_samples(*sel.source.rov.series(var.key), t0, t1)
         ser = sel.source.series
         if var.source in _GAUGES:
             cp = self.gauge(sel, var)
@@ -581,7 +636,7 @@ class Dataset:
                 cnt = np.bincount(k, minlength=nb)
                 tot = np.bincount(k, y[ok], minlength=nb)
                 row[cnt > 0] = tot[cnt > 0] / cnt[cnt > 0]
-                # a source sparser than the grid (cmd at ~40 /s): each empty bin within
+                # a source sparser than the grid (the ROV's ~19 /s): each empty bin within
                 # the samples holds the previous value, so every event counts in every bin
                 have = np.flatnonzero(cnt > 0)
                 if len(have) > 1:
@@ -601,8 +656,8 @@ class Dataset:
             out.append(Aggregate(gname, var, grid, med, q25, q75, n, len(rs)))
         return out
 
-    def _span_samples(self, sel: Selection, var: Variable, n_min: int):
-        sp = self.span(sel)
+    def _span_samples(self, sel: Selection, var: Variable, n_min: int, sub=None):
+        sp = self.span(sel, sub)
         if sp is None:
             return None
         t, y = self.samples(sel, var, sp)
@@ -611,11 +666,12 @@ class Dataset:
         return t, y, (len(t) - 1) / (t[-1] - t[0])
 
     def spectrum(self, sel: Selection, var: Variable, window: str = "hann",
-                 detrend: str = "mean") -> Optional[tuple[np.ndarray, np.ndarray]]:
-        """(f Hz, amplitude in ``var.unit``) of the span (see the module doc); None if
-        it holds fewer than 8 samples."""
+                 detrend: str = "mean", sub: Optional[tuple] = None
+                 ) -> Optional[tuple[np.ndarray, np.ndarray]]:
+        """(f Hz, amplitude in ``var.unit``) of the span (``sub``: a sub-range, see
+        ``span``); None if it holds fewer than 8 samples."""
         from wavi_py.daq.spectra import amp_spectra
-        got = self._span_samples(sel, var, 8)
+        got = self._span_samples(sel, var, 8, sub)
         if got is None:
             return None
         t, y, fs = got
@@ -623,11 +679,13 @@ class Dataset:
         return np.fft.rfftfreq(len(t), 1.0 / fs), amp
 
     def spectrogram(self, sel: Selection, var: Variable, seg_s: float = 1.0,
-                    overlap: float = 0.75) -> Optional[tuple[np.ndarray, np.ndarray, np.ndarray]]:
+                    overlap: float = 0.75, sub: Optional[tuple] = None
+                    ) -> Optional[tuple[np.ndarray, np.ndarray, np.ndarray]]:
         """(segment centres s from the selection's zero, f Hz, amplitude (segments,
-        nfreq)); None if the span is shorter than one segment."""
+        nfreq)) of the span (``sub``: a sub-range); None if it is shorter than one
+        segment."""
         from wavi_py.daq.spectra import amp_spectra
-        got = self._span_samples(sel, var, 8)
+        got = self._span_samples(sel, var, 8, sub)
         if got is None:
             return None
         t, y, fs = got
@@ -647,17 +705,7 @@ class Dataset:
         decimated to ~``n_px`` columns (``Series.envelope``: the store's pyramid, so
         the whole recording costs about what a minute does), in ``var.unit``
         (POS through the dataset's ``dome_map``; no baseline)."""
-        out = self._curves(None, source.series, t0, t1, max(8, n_px), 0.0,
-                           (np.empty(0), np.empty(0)))
-        dt, dd = source.depth
-        if len(dt) and any(v.source == DEPTH for v in self.variables):
-            i0, i1 = span_index(dt, t0, t1)
-            if i1 > i0:
-                t, y = peak_decimate(dt[i0:i1], np.asarray(dd[i0:i1], float)[:, None],
-                                     max(1, (i1 - i0) // max(1, n_px)))
-                v = next(v for v in self.variables if v.source == DEPTH)
-                out.append(Trace(None, v, t, y[:, 0]))
-        return out
+        return self._curves(None, source, t0, t1, max(8, n_px), 0.0)
 
 
 def spectrogram_column(sg: Optional[tuple], t: float) -> Optional[tuple[np.ndarray, np.ndarray, float]]:
