@@ -100,8 +100,8 @@ TIMELINE_H = 190                                            # its default height
 
 KEYS_HELP = """\
 <table cellspacing=4>
-<tr><td><b>S</b></td><td>Select: drag in the waveform for the sub-range, in the timeline for a new selection</td></tr>
-<tr><td><b>Esc</b></td><td>clear the sub-range</td></tr>
+<tr><td><b>S</b></td><td>Select: drag in the waveform for another sub-range, in the timeline for a new selection</td></tr>
+<tr><td><b>Esc</b></td><td>clear the sub-ranges (all)</td></tr>
 <tr><td><b>Z</b></td><td>zoom box: drag a rectangle to zoom (waveform, spectra, spectrogram); off: a drag pans</td></tr>
 <tr><td><b>P</b></td><td>probe: values under the mouse (waveform, timeline, spectra, spectrogram)</td></tr>
 <tr><td><b>R</b></td><td>reset view: the cell under the mouse (outside the cells: all)</td></tr>
@@ -109,7 +109,7 @@ KEYS_HELP = """\
 <tr><td><b>+ &nbsp;_</b></td><td>zoom Y in / out: the row under the mouse</td></tr>
 <tr><td><b>. &nbsp;,</b></td><td>zoom Y in / out: all rows of the cell</td></tr>
 <tr><td><b>arrows</b></td><td>move the data (Left: traces slide left), the cell under the mouse</td></tr>
-<tr><td><b>Del</b></td><td>delete the cursor (else the selection) under the mouse</td></tr>
+<tr><td><b>Del</b></td><td>delete the cursor (else the sub-range, else the selection) under the mouse</td></tr>
 </table>
 Mouse: a click in the spectrogram adds a cursor. In the waveform a click on a trace
 shows it in the spectrogram (drawn thick); a click on the thick trace adds a cursor.
@@ -456,7 +456,7 @@ class AnalysisWindow(ViewWindow):
         self.at_cursors = CursorCell()
         self.timeline = TimelineCell(model, self, self._act_select, replay)
         self.grid = Grid2x2(self.compare, self.spectrum, self.spectrogram, self.at_cursors)
-        self.compare.subChanged.connect(self.set_sub)
+        self.compare.subsChanged.connect(self._on_subs)
         self.compare.clicked.connect(self._on_wave_click)
         self.spectrogram.clicked.connect(self.add_cursor)
         for cell in (self.spectrum, self.spectrogram, self.timeline):
@@ -471,7 +471,7 @@ class AnalysisWindow(ViewWindow):
         self.spectrogram.plot.getViewBox().sigXRangeChanged.connect(
             lambda _vb, r: self.compare.set_x(float(r[0]), float(r[1])))
         self.timeline.madeSelection.connect(self.include)
-        self.sub: Optional[tuple] = None              # the waveform's sub-range (relative)
+        self.subs: tuple = ()                         # the waveform's sub-ranges ((n, a, b), ...)
         self._wave_lines = CursorLines(self)
         self._spec_lines = CursorLines(self, halo=True)
 
@@ -516,7 +516,7 @@ class AnalysisWindow(ViewWindow):
             " new selection") if on else self.statusBar().clearMessage())
         self._act_clear_sub = QAction("Clear sub-range", self)
         self._act_clear_sub.setShortcut(QKeySequence(Qt.Key.Key_Escape))
-        self._act_clear_sub.setToolTip("Back to the whole selections [Esc]")
+        self._act_clear_sub.setToolTip("Clear every sub-range: back to the whole selections [Esc]")
         self._act_clear_sub.setEnabled(False)
         self._act_clear_sub.triggered.connect(lambda: self.set_sub(None))
         self._act_zoom = QAction("Zoom box", self, checkable=True)
@@ -677,7 +677,7 @@ class AnalysisWindow(ViewWindow):
         keys = set(self.checked_keys())
         m = self.model
         return Dataset(self.included, [v for v in self._vars if v.key in keys],
-                       despike=m.despike, v0=m.v0, scale=m.scale, sub=self.sub)
+                       despike=m.despike, v0=m.v0, scale=m.scale, subs=self.subs)
 
     def timeline_dataset(self) -> Dataset:
         keys = set(self.timeline_keys())
@@ -685,17 +685,31 @@ class AnalysisWindow(ViewWindow):
         return Dataset([], [v for v in self._vars if v.key in keys],
                        despike=m.despike, v0=m.v0, scale=m.scale)
 
+    @property
+    def sub(self) -> Optional[tuple]:
+        """The first sub-range (a, b), or None."""
+        return self.subs[0][1:] if self.subs else None
+
     def set_sub(self, sub) -> None:
-        """The sub-range (a, b) in seconds from each selection's start, or None: the
-        spectra use that part of every included selection."""
-        self.compare.set_sub(sub)
-        sub = self.compare.sub                     # normalised (sorted, >= 0, or None)
-        if sub == self.sub:
+        """Exactly one sub-range (a, b) in seconds from each selection's start, or
+        None: none (the whole selections)."""
+        self.compare.set_sub(sub, emit=True)
+
+    def add_sub(self, a: float, b: float) -> Optional[int]:
+        """Another sub-range (its number): the spectra use each of them."""
+        return self.compare.add_sub(a, b)
+
+    def delete_sub(self, n: int) -> None:
+        self.compare.delete_sub(n)
+
+    def _on_subs(self, subs: list) -> None:
+        subs = tuple(tuple(u) for u in subs)
+        if subs == self.subs:
             return
-        self.sub = sub
-        self._act_clear_sub.setEnabled(sub is not None)
+        self.subs = subs
+        self._act_clear_sub.setEnabled(bool(subs))
         for cell in (self.spectrum, self.spectrogram):
-            cell.set_sub_text(sub)
+            cell.set_sub_text(subs)
         self._request()
 
     # ----- cursors
@@ -747,8 +761,11 @@ class AnalysisWindow(ViewWindow):
             self.compare.set_picked(pick)
 
     def _delete_hovered(self) -> None:
+        """Del: the cursor under the mouse, else the sub-range, else the selection."""
         if self.hovered_cursor is not None:
             self.delete_cursor(self.hovered_cursor)
+        elif self.compare.hovered_sub is not None:
+            self.delete_sub(self.compare.hovered_sub)
         else:
             self.model.remove(self.model.hovered)
 

@@ -27,9 +27,13 @@ Compare's: the time relative to each selection's start, min / max decimated to
 source per selection, from the store's pyramid in replay), so a long selection
 costs about what a short one does. ``samples(sel, var)`` is every sample.
 
-The spectra read the dataset's ``span(sel)``: the whole selection, or with a
-Compare sub-range ``sub = (a, b)`` (seconds from each selection's start)
-[t0 + a, t0 + b] clipped to the selection, None when it is shorter than a.
+The spectra read the dataset's ``span(sel, sub)``: the whole selection, or with
+a sub-range ``sub = (a, b)`` (seconds from each selection's start) [t0 + a,
+t0 + b] clipped to the selection, None when it is shorter than a. The window
+can have several numbered sub-ranges (``subs``: ``(number, a, b)``); each is
+then its own trace per (selection, variable) (``triples``: sub None is the
+whole selection, used when there are none). ``sub`` (one range, no number) is
+the older single sub-range, still taken when ``subs`` is empty.
 ``spectrum`` is the amplitude spectrum of every sample of the span (the method
 of ``daq/spectra.amp_spectra``: a sine of amplitude a reads a), at the span's
 own mean sample rate, so selections of different lengths each have their own
@@ -218,19 +222,31 @@ class Dataset:
     despike: bool = False
     v0: Optional[np.ndarray] = None     # per gauge column, raw mV
     scale: float = 1.0
-    sub: Optional[tuple] = None         # the Compare sub-range (a, b), relative
+    sub: Optional[tuple] = None         # one sub-range (a, b), relative (see the module doc)
+    subs: tuple = ()                    # the numbered sub-ranges ((number, a, b), ...)
     _names: dict = field(default_factory=dict, repr=False)
 
-    def span(self, sel: Selection) -> Optional[tuple[float, float]]:
-        """The part of ``sel`` the spectra use (see the module doc)."""
-        if self.sub is None:
+    def span(self, sel: Selection, sub: Optional[tuple] = None) -> Optional[tuple[float, float]]:
+        """The part of ``sel`` the spectra use: ``sub`` = (a, b) or (number, a, b), or
+        None: ``self.sub`` if set, else the whole selection (see the module doc)."""
+        sub = self.sub if sub is None else sub[-2:]
+        if sub is None:
             return sel.t0, sel.t1
-        a, b = self.sub
+        a, b = sub
         lo, hi = sel.t0 + max(0.0, a), min(sel.t1, sel.t0 + b)
         return (lo, hi) if hi > lo else None
 
     def pairs(self) -> list[tuple[Selection, Variable]]:
         return [(s, v) for s in self.selections for v in self.variables]
+
+    def sub_list(self) -> list:
+        """The sub-ranges the spectra use: ``subs``, or [None] (whole / ``sub``)."""
+        return list(self.subs) or [None]
+
+    def triples(self) -> list[tuple[Selection, Variable, Optional[tuple]]]:
+        """(selection, variable, sub-range or None) of every spectrum trace."""
+        return [(s, v, u) for s in self.selections for v in self.variables
+                for u in self.sub_list()]
 
     def _convert(self, var: Variable, y: np.ndarray) -> np.ndarray:
         if var.source == WSK:
@@ -298,8 +314,8 @@ class Dataset:
         t, y = ser.channels([name], t0, t1, self.despike and var.source == WSK)[name]
         return t, self._convert(var, y)
 
-    def _span_samples(self, sel: Selection, var: Variable, n_min: int):
-        sp = self.span(sel)
+    def _span_samples(self, sel: Selection, var: Variable, n_min: int, sub=None):
+        sp = self.span(sel, sub)
         if sp is None:
             return None
         t, y = self.samples(sel, var, sp)
@@ -308,11 +324,12 @@ class Dataset:
         return t, y, (len(t) - 1) / (t[-1] - t[0])
 
     def spectrum(self, sel: Selection, var: Variable, window: str = "hann",
-                 detrend: str = "mean") -> Optional[tuple[np.ndarray, np.ndarray]]:
-        """(f Hz, amplitude in ``var.unit``) of the span (see the module doc); None if
-        it holds fewer than 8 samples."""
+                 detrend: str = "mean", sub: Optional[tuple] = None
+                 ) -> Optional[tuple[np.ndarray, np.ndarray]]:
+        """(f Hz, amplitude in ``var.unit``) of the span (``sub``: a sub-range, see
+        ``span``); None if it holds fewer than 8 samples."""
         from wavi_py.daq.spectra import amp_spectra
-        got = self._span_samples(sel, var, 8)
+        got = self._span_samples(sel, var, 8, sub)
         if got is None:
             return None
         t, y, fs = got
@@ -320,11 +337,13 @@ class Dataset:
         return np.fft.rfftfreq(len(t), 1.0 / fs), amp
 
     def spectrogram(self, sel: Selection, var: Variable, seg_s: float = 1.0,
-                    overlap: float = 0.75) -> Optional[tuple[np.ndarray, np.ndarray, np.ndarray]]:
+                    overlap: float = 0.75, sub: Optional[tuple] = None
+                    ) -> Optional[tuple[np.ndarray, np.ndarray, np.ndarray]]:
         """(segment centres s from the selection's start, f Hz, amplitude (segments,
-        nfreq)); None if the span is shorter than one segment."""
+        nfreq)) of the span (``sub``: a sub-range); None if it is shorter than one
+        segment."""
         from wavi_py.daq.spectra import amp_spectra
-        got = self._span_samples(sel, var, 8)
+        got = self._span_samples(sel, var, 8, sub)
         if got is None:
             return None
         t, y, fs = got

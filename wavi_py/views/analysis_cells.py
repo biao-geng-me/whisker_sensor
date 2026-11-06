@@ -25,19 +25,24 @@ mrad/s, deg, cm, and the ROV's).
 
 - ``WaveCell`` (top left, the former Compare tab): relative time, min / max
   decimated to the plot width (``Dataset.traces``). With the window's Select on,
-  a drag makes the sub-range (a shaded band in every row, edges draggable). A
+  a drag makes another sub-range (``SubBand``: a hatched band, numbered s1, s2,
+  ... in every row, a different hatch each; its edges and its body drag,
+  right-click or Del deletes it; the cell owns them: ``subs``,
+  ``subsChanged``). A
   click on a trace (within ``PICK_PX``) picks that (variable, selection) for the
   spectrogram, which the window then marks (``set_picked``: drawn thick, on
   top); a click on the picked trace adds a cursor; elsewhere nothing. Its time
   range is copied to and from the spectrogram (``xChanged`` / ``set_x``: the
   same span, whatever the two widths).
 - ``SpectrumCell`` (top right, the former Spectrum tab): ``Dataset.spectrum``
-  per (variable, selection), of the whole selections or the sub-range. Options:
+  per (variable, selection, sub-range), of the whole selections or each
+  sub-range (its own trace, told apart by line style; ``SUB_STYLES``). Options:
   window, detrend, log f, log amplitude (on by default), f range (0 .. the highest Nyquist until
   edited). A trace is recomputed only when its inputs change (the selection's
   span, the options, Despike, that gauge's V0 / scale).
-- ``SpecgramCell`` (bottom left): ONE tile, the picked (variable, selection),
-  full cell size, relative time; the picker is two combo boxes in its header.
+- ``SpecgramCell`` (bottom left): ONE tile, the picked (variable, selection,
+  sub-range), full cell size, relative time; the picker is three combo boxes in
+  its header (the sub-range one shows while there are sub-ranges).
   Colour range per unit group as in the Spec window (Auto: 1st to 99.5th
   percentile of the tile; or the min / max boxes, kept per unit and per lin /
   dB; ``spectral_base``): the controls show the picked variable's unit, so
@@ -75,7 +80,7 @@ from typing import Callable, Optional
 
 import numpy as np
 from PyQt6.QtCore import QPointF, Qt, pyqtSignal
-from PyQt6.QtGui import QColor
+from PyQt6.QtGui import QBrush, QColor
 from PyQt6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QHBoxLayout, QLabel,
                              QSizePolicy, QStackedWidget, QToolButton, QVBoxLayout, QWidget)
 
@@ -93,8 +98,10 @@ from wavi_py.views.whisker_plots import _show_grid
 # a row's variables: HSL lightness of the selection's colour, dark to light (one
 # variable keeps the colour itself); the light end stays readable as a 1 px line on white
 _L_DARK, _L_LIGHT = 0.18, 0.66
-_SUB_BRUSH = pg.mkBrush(60, 60, 60, 28)
 _SUB_PEN = pg.mkPen((60, 60, 60), width=1, style=Qt.PenStyle.DashLine)
+# sub-ranges: hatched (the selections are flat colours), one hatch each
+SUB_HATCH = (Qt.BrushStyle.BDiagPattern, Qt.BrushStyle.FDiagPattern,
+             Qt.BrushStyle.DiagCrossPattern, Qt.BrushStyle.CrossPattern)
 _PROBE_PEN = pg.mkPen((90, 90, 90), width=1)
 AXIS_W = 56                                    # left axes: the cells' plots line up
 SEGMENTS_S = (0.25, 0.5, 1.0, 2.0, 5.0)
@@ -151,19 +158,35 @@ def line_style(i: int) -> Qt.PenStyle:
     return LINE_STYLES[i % len(LINE_STYLES)]
 
 
+def sub_name(n: int) -> str:
+    return f"s{n}"
+
+
 def sub_text(sub) -> str:
-    """The spectral cells' header: what part of the selections they use."""
-    if sub is None:
+    """The spectral cells' header: what part of the selections they use (``sub``:
+    None, one (a, b), or the numbered ((n, a, b), ...))."""
+    if not sub:
         return "Whole selections (waveform: Select (S) and drag for a sub-range)"
-    return (f"Sub-range {sub[0]:.2f} .. {sub[1]:.2f} s from each selection's start, clipped to"
-            " its length (Esc clears)")
+    if not isinstance(sub[0], (tuple, list)):
+        sub = [(1, *sub)]
+    if len(sub) == 1:
+        n, a, b = sub[0]
+        return (f"Sub-range {sub_name(n)} {a:.2f} .. {b:.2f} s from each selection's start,"
+                " clipped to its length (Esc clears)")
+    parts = ", ".join(f"{sub_name(n)} {a:.2f} .. {b:.2f}" for n, a, b in sub)
+    return f"Sub-ranges {parts} s from each selection's start, clipped (Esc clears)"
 
 
-def _input_key(ds: Dataset, sel, var, *opts) -> tuple:
-    """Everything a spectrum / spectrogram of (sel, var) depends on."""
+def sub_style(i: int) -> Qt.PenStyle:
+    """The ``i``-th sub-range's line style in the spectrum (Colour by selection)."""
+    return LINE_STYLES[i % len(LINE_STYLES)]
+
+
+def _input_key(ds: Dataset, sel, var, *opts, sub=None) -> tuple:
+    """Everything a spectrum / spectrogram of (sel, var, sub-range) depends on."""
     v0 = (float(ds.v0[var.col]) if var.source == WSK and ds.v0 is not None
           and var.col < len(ds.v0) else 0.0)
-    return (ds.span(sel), id(sel.source), ds.despike and var.source == WSK, v0,
+    return (ds.span(sel, sub), id(sel.source), ds.despike and var.source == WSK, v0,
             ds.scale if var.source == WSK else 1.0, *opts)
 
 
@@ -289,7 +312,7 @@ class _Header(QWidget):
         outer.addLayout(v, 1)
         # the cell's expand and collapse buttons, top right (the window restores it from its bar)
         self.expand_btn = QToolButton()
-        self.expand_btn.setText("⤢")
+        self.expand_btn.setText("□")
         self.expand_btn.setAutoRaise(True)
         self.expand_btn.setCheckable(True)
         self.expand_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -552,18 +575,18 @@ class _RowsCell(_Cell):
             return self.var_color(var)
         return shade(QColor(128, 128, 128), shades[var.key])
 
-    def _legends(self, ds: Dataset, shades: dict, units: list[str]) -> None:
-        """Rebuilt when the variables, the selections or the colouring change; an edge
-        drag only re-labels (a rebuild per drag step would cost more than the curves).
-        The gauges' row has the grid legend instead of their names."""
+    def _legends(self, ds: Dataset, shades: dict, units: list[str], subs: tuple = ()) -> None:
+        """Rebuilt when the variables, the selections, the sub-ranges (``subs``: the
+        spectrum's) or the colouring change; an edge drag only re-labels (a rebuild
+        per drag step would cost more than the curves). The gauges' row has the grid
+        legend instead of their names."""
         key = (tuple(v.key for v in ds.variables), tuple(s.number for s in ds.selections),
-               tuple(units), self.color_by, id(self.grid),
+               tuple(units), self.color_by, id(self.grid), tuple(u[0] for u in subs),
                tuple(sorted((k, v) for k, v in shades.items() if v is not None)))
         if key == self._legend_key:
-            for s in ds.selections:
-                lab = self._sel_labels.get(s.number)
-                text = self._sel_text(s)
-                if lab is not None and lab.text != text:
+            for lab, text_of in self._sel_labels.values():
+                text = text_of(ds)
+                if lab.text != text:
                     lab.setText(text)
             return
         self._legend_key = key
@@ -593,17 +616,42 @@ class _RowsCell(_Cell):
                     p.legend.addItem(pg.PlotDataItem(pen=pg.mkPen(self._legend_color(v, shades),
                                                                   width=3)), v.label)
             if i == 0:
-                for j, s in enumerate(ds.selections):
-                    pen = (pg.mkPen((40, 40, 40), width=2, style=line_style(j))
-                           if self.color_by == SENSOR else pg.mkPen(sel_color(s.number), width=3))
-                    p.legend.addItem(pg.PlotDataItem(pen=pen), self._sel_text(s))
-                    self._sel_labels[s.number] = p.legend.items[-1][1]
+                self._top_legend(p, ds, subs)
             p.legend.setOffset((-10 - gl_w, 5))
             p.legend.setVisible(bool(p.legend.items))
         if self._grid_legend is not None and not (self.grid is not None and gauges and "mV" in units):
             if self._grid_legend.scene() is not None:
                 self._grid_legend.scene().removeItem(self._grid_legend)
             self._grid_legend = None
+
+    def _top_legend(self, p: pg.PlotItem, ds: Dataset, subs: tuple) -> None:
+        """The selections (in their colour, or by sensor in their line style) and the
+        sub-ranges (their line style; by sensor each (selection, sub-range) pair's)."""
+        def add(pen, key, text_of):
+            p.legend.addItem(pg.PlotDataItem(pen=pen), text_of(ds))
+            self._sel_labels[key] = (p.legend.items[-1][1], text_of)
+
+        def sel_text(num):
+            return lambda d: next((self._sel_text(s) for s in d.selections if s.number == num), "")
+
+        def sub_text_of(n, prefix=""):
+            def f(d):
+                ab = next(((a, b) for m, a, b in d.subs if m == n), None)
+                return prefix + (f"{sub_name(n)} {ab[0]:.2f} .. {ab[1]:.2f} s" if ab else sub_name(n))
+            return f
+        grey = (40, 40, 40)
+        if self.color_by == SENSOR and subs:
+            for j, s in enumerate(ds.selections):
+                for k, u in enumerate(subs):
+                    add(pg.mkPen(grey, width=2, style=line_style(j * len(subs) + k)),
+                        (s.number, u[0]), sub_text_of(u[0], f"#{s.number} · "))
+            return
+        for j, s in enumerate(ds.selections):
+            pen = (pg.mkPen(grey, width=2, style=line_style(j)) if self.color_by == SENSOR
+                   else pg.mkPen(sel_color(s.number), width=3))
+            add(pen, s.number, sel_text(s.number))
+        for k, u in enumerate(subs):
+            add(pg.mkPen(grey, width=2, style=sub_style(k)), ("sub", u[0]), sub_text_of(u[0]))
 
     def probe_items(self, plot: pg.PlotItem):
         unit = next((u for u, p in self.rows.items() if p is plot), None)
@@ -616,13 +664,58 @@ class _RowsCell(_Cell):
         return "t", "s", (lambda x: x), (lambda y: y)
 
 
+class SubBand(pg.LinearRegionItem):
+    """One sub-range in one waveform row: hatched (``SUB_HATCH``) and labelled with
+    its number in device pixels (a brush pattern would be stretched by the view's
+    scale); edges and body drag; right-click deletes it; with the window's Select
+    on, a drag on the body is left to the row (a new sub-range there). ``owner``
+    is the ``WaveCell``."""
+
+    def __init__(self, number: int, region: tuple, owner: "WaveCell"):
+        super().__init__(region, movable=True, pen=_SUB_PEN,
+                         hoverPen=pg.mkPen((30, 30, 30), width=3), bounds=(0.0, None))
+        self.number, self._owner = number, owner
+        self.setZValue(-20)
+
+    def paint(self, p, *args) -> None:
+        dev = p.transform().mapRect(self.boundingRect())
+        p.save()
+        p.resetTransform()
+        a = 70 if self.mouseHovering or self.moving else 40
+        p.fillRect(dev, QBrush(QColor(40, 40, 40, a),
+                               SUB_HATCH[(self.number - 1) % len(SUB_HATCH)]))
+        p.setPen(QColor(40, 40, 40))
+        p.drawText(dev.adjusted(3, 1, 0, 0), int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop),
+                   sub_name(self.number))
+        p.restore()
+
+    def mouseDragEvent(self, ev) -> None:  # noqa: N802 — pyqtgraph naming
+        if self._owner._selecting() and ev.isStart():
+            ev.ignore()                              # Select: a new one, made by the row
+            return
+        super().mouseDragEvent(ev)
+
+    def mouseClickEvent(self, ev) -> None:  # noqa: N802 — pyqtgraph naming
+        if ev.button() == Qt.MouseButton.RightButton and not self.moving:
+            ev.accept()
+            self._owner.delete_sub(self.number)
+            return
+        super().mouseClickEvent(ev)
+
+    def hoverEvent(self, ev) -> None:  # noqa: N802 — pyqtgraph naming
+        super().hoverEvent(ev)
+        self._owner.hovered_sub = None if ev.isExit() else self.number
+
+
 class WaveCell(_RowsCell):
     """The waveform (see the module doc). ``selecting()``: the window's Select is on;
-    ``subChanged(sub or None)``; ``clicked(t, (sel number, var key) or None)``."""
+    ``subsChanged([(number, a, b), ...])``; ``subChanged(the first (a, b) or None)``
+    (the single sub-range of before); ``clicked(t, (sel number, var key) or None)``."""
 
     X_LABEL = ("Time from the selection's start", "s")
     TITLE = "Waveform"
     subChanged = pyqtSignal(object)
+    subsChanged = pyqtSignal(list)
     clicked = pyqtSignal(float, object)
     xChanged = pyqtSignal(float, float)          # the time range shown (the spectrogram copies it)
 
@@ -630,8 +723,11 @@ class WaveCell(_RowsCell):
                  parent: Optional[QWidget] = None):
         super().__init__(parent)
         self._selecting = selecting
-        self.sub: Optional[tuple] = None
-        self.bands: list[pg.LinearRegionItem] = []
+        self.subs: dict[int, tuple] = {}             # number -> (a, b), seconds from the start
+        self._next_sub = 1
+        self._making: Optional[int] = None           # the sub-range a Select drag is making
+        self.hovered_sub: Optional[int] = None
+        self._bands: dict[tuple, SubBand] = {}       # (row unit, number) -> its band
         self.title = self._add_title(
             "Waveform · click a trace: the spectrogram shows it (drawn thick) · click the thick"
             " one again: a cursor there")
@@ -642,8 +738,9 @@ class WaveCell(_RowsCell):
         return next(iter(self.rows.values()), None)
 
     def _rebuild_rows(self, units: list[str]) -> None:
-        self.bands = []
+        self._bands = {}
         super()._rebuild_rows(units)
+        self._sync_bands()
         first = self.x_plot()
         if first is not None:
             first.getViewBox().sigXRangeChanged.connect(
@@ -669,26 +766,97 @@ class WaveCell(_RowsCell):
     def _row_added(self, p: pg.PlotItem) -> None:
         _hook_drag(p.getViewBox(), self._drag)
         hook_click(p.getViewBox(), self._click)
-        band = pg.LinearRegionItem((0, 1), movable=True, brush=_SUB_BRUSH, pen=_SUB_PEN,
-                                   hoverPen=pg.mkPen((30, 30, 30), width=3))
-        band.movable = False                          # edges only: the body pans
-        band.setZValue(-20)
-        band.setVisible(self.sub is not None)
-        if self.sub is not None:
-            band.setRegion(self.sub)
-        band.sigRegionChanged.connect(self._band_dragged)
-        p.addItem(band, ignoreBounds=True)
-        self.bands.append(band)
+
+    @property
+    def bands(self) -> list[SubBand]:
+        """Every band, by sub-range number then row."""
+        return [b for _k, b in sorted(self._bands.items(), key=lambda kb: (kb[0][1],
+                                      list(self.rows).index(kb[0][0])))]
+
+    @property
+    def sub(self) -> Optional[tuple]:
+        """The first sub-range (a, b), or None (the single sub-range of before)."""
+        return next(iter(self.subs.values()), None)
+
+    def sub_list(self) -> list[tuple]:
+        return [(n, a, b) for n, (a, b) in self.subs.items()]
+
+    def _sync_bands(self) -> None:
+        """A band per (row, sub-range), at its range."""
+        want = {(u, n) for u in self.rows for n in self.subs}
+        for k in [k for k in self._bands if k not in want]:
+            b = self._bands.pop(k)
+            if b.scene() is not None:
+                self.rows[k[0]].removeItem(b) if k[0] in self.rows else b.scene().removeItem(b)
+        for u, n in sorted(want, key=lambda k: k[1]):
+            b = self._bands.get((u, n))
+            if b is None:
+                b = self._bands[(u, n)] = SubBand(n, self.subs[n], self)
+                b.sigRegionChanged.connect(self._band_dragged)
+                self.rows[u].addItem(b, ignoreBounds=True)
+            elif not b.moving and not any(ln.moving for ln in b.lines) and \
+                    tuple(b.getRegion()) != self.subs[n]:
+                b.blockSignals(True)
+                b.setRegion(self.subs[n])
+                b.blockSignals(False)
+
+    @staticmethod
+    def _norm(a: float, b: float) -> Optional[tuple]:
+        a, b = sorted((float(a), float(b)))
+        a, b = max(0.0, a), max(0.0, b)
+        return (a, b) if b > a else None
+
+    def _changed(self) -> None:
+        self._sync_bands()
+        self.subsChanged.emit(self.sub_list())
+        self.subChanged.emit(self.sub)
+
+    def add_sub(self, a: float, b: float) -> Optional[int]:
+        """A new sub-range (its number), or None if empty."""
+        r = self._norm(a, b)
+        if r is None:
+            return None
+        n = self._next_sub
+        self._next_sub += 1
+        self.subs[n] = r
+        self._changed()
+        return n
+
+    def move_sub(self, n: int, a: float, b: float) -> None:
+        r = self._norm(a, b)
+        if n in self.subs and r is not None and r != self.subs[n]:
+            self.subs[n] = r
+            self._changed()
+
+    def delete_sub(self, n: int) -> None:
+        if self.subs.pop(n, None) is not None:
+            if self.hovered_sub == n:
+                self.hovered_sub = None
+            self._changed()
+
+    def clear_subs(self) -> None:
+        if self.subs:
+            self.subs = {}
+            self.hovered_sub = None
+            self._changed()
+        self._next_sub = 1
 
     def _drag(self, vb: pg.ViewBox, ev) -> bool:
+        """Select on: a drag makes a new sub-range and sets its range as it goes."""
         if not self._selecting() or ev.button() != Qt.MouseButton.LeftButton:
             return False
         ev.accept()
         x0 = vb.mapSceneToView(ev.buttonDownScenePos()).x()
         x = vb.mapSceneToView(ev.scenePos()).x()
-        if ev.isFinish() and abs(ev.scenePos().x() - ev.buttonDownScenePos().x()) < 3:
-            return True                               # a click: nothing
-        self.set_sub((x0, x), emit=True)
+        short = abs(ev.scenePos().x() - ev.buttonDownScenePos().x()) < 3
+        if ev.isStart() or self._making not in self.subs:
+            self._making = None if short else self.add_sub(x0, x)
+        elif not short:
+            self.move_sub(self._making, x0, x)
+        if ev.isFinish():
+            if short and self._making is not None:  # shrank back to a click: none
+                self.delete_sub(self._making)
+            self._making = None
         return True
 
     def pick_at(self, vb: pg.ViewBox, scene_pos) -> Optional[tuple]:
@@ -730,27 +898,30 @@ class WaveCell(_RowsCell):
         self.clicked.emit(float(vb.mapSceneToView(ev.scenePos()).x()), self.pick_at(vb, ev.scenePos()))
         return True
 
-    def _band_dragged(self, band) -> None:
-        self.set_sub(tuple(band.getRegion()), emit=True)
+    def _band_dragged(self, band: SubBand) -> None:
+        self.move_sub(band.number, *band.getRegion())
 
     def set_sub(self, sub, emit: bool = False) -> None:
-        """The sub-range (a, b) seconds from each selection's start, or None."""
-        if sub is not None:
-            a, b = sorted(float(v) for v in sub)
-            sub = (max(0.0, a), max(0.0, b))
-            if sub[1] <= sub[0]:
-                sub = None
-        if sub == self.sub:
-            return
-        self.sub = sub
-        for band in self.bands:
-            band.blockSignals(True)
+        """Exactly one sub-range (a, b) seconds from each selection's start, or None
+        (none). The signals go out only with ``emit``."""
+        if sub is not None and len(self.subs) == 1:
+            r = self._norm(*sub)
+            if r is not None:
+                n = next(iter(self.subs))
+                if r != self.subs[n]:
+                    self.subs[n] = r
+                    self._sync_bands()
+                    if emit:
+                        self.subsChanged.emit(self.sub_list())
+                        self.subChanged.emit(self.sub)
+                return
+        self.blockSignals(not emit)
+        try:
+            self.clear_subs()
             if sub is not None:
-                band.setRegion(sub)
-            band.setVisible(sub is not None)
-            band.blockSignals(False)
-        if emit:
-            self.subChanged.emit(sub)
+                self.add_sub(*sub)
+        finally:
+            self.blockSignals(False)
 
     def fit_x(self, longest: float) -> None:
         """X from 0 to the longest selection, unless zoomed by hand."""
@@ -819,6 +990,14 @@ class SpectrumCell(_RowsCell):
         self._cache: dict[tuple, tuple] = {}          # (sel number, var key) -> (key, f, amp)
         self.computed = 0                             # spectra computed (tests)
 
+    def _style_index(self, number: int, sub_i: int, n_subs: int) -> Optional[int]:
+        """The line style of a (selection, sub-range) trace: by selection the
+        sub-range's (solid with none); by sensor the (selection, sub-range) pair's
+        place."""
+        if self.color_by == SENSOR:
+            return self._sel_index.get(number, 0) * max(1, n_subs) + sub_i
+        return sub_i if n_subs else None
+
     @property
     def options(self) -> tuple[str, str]:
         return (("hann", "rect")[self.window_box.currentIndex()],
@@ -830,17 +1009,18 @@ class SpectrumCell(_RowsCell):
                 (lambda y: 10 ** y) if la else (lambda y: y))
 
     def spectra(self, ds: Dataset) -> dict:
-        """{(sel number, var key): (f, amp) or None}, from the cache where the inputs
-        are unchanged."""
+        """{(sel number, var key[, sub number]): (f, amp) or None} (the sub-range's
+        number only when there are sub-ranges), from the cache where the inputs are
+        unchanged."""
         win, det = self.options
         out, keep = {}, {}
-        for sel, var in ds.pairs():
-            k = (sel.number, var.key)
-            key = _input_key(ds, sel, var, win, det)
+        for sel, var, sub in ds.triples():
+            k = (sel.number, var.key, sub[0]) if sub else (sel.number, var.key)
+            key = _input_key(ds, sel, var, win, det, sub=sub)
             hit = self._cache.get(k)
             if hit is None or hit[0] != key:
                 self.computed += 1
-                got = ds.spectrum(sel, var, win, det)
+                got = ds.spectrum(sel, var, win, det, sub=sub)
                 hit = (key, *(got if got is not None else (None, None)))
             keep[k] = hit
             out[k] = None if hit[1] is None else (hit[1], hit[2])
@@ -849,7 +1029,8 @@ class SpectrumCell(_RowsCell):
 
     def render(self, ds: Dataset, shades: dict) -> None:
         win, det = self.options
-        inputs = (tuple((s.number, _input_key(ds, s, v, win, det), v.key) for s, v in ds.pairs()),
+        inputs = (tuple((s.number, _input_key(ds, s, v, win, det, sub=u), v.key, u)
+                        for s, v, u in ds.triples()),
                   tuple(sorted(shades.items(), key=lambda kv: kv[0])),
                   self.log_f.isChecked(), self.log_a.isChecked(),
                   self.f_lo.value(), self.f_hi.value(), self._auto, self.color_by, id(self.grid))
@@ -861,11 +1042,14 @@ class SpectrumCell(_RowsCell):
         units = self._units(ds)
         lf, la = self.log_f.isChecked(), self.log_a.isChecked()
         seen, fmax, fmin_pos = set(), 0.0, np.inf
-        for (num, key), got in self.spectra(ds).items():
+        subs = [u[0] for u in ds.subs]
+        for k, got in self.spectra(ds).items():
             if got is None:
                 continue
+            num, key, sn = (*k, 0)[:3]
             sel = next(s for s in ds.selections if s.number == num)
             var = next(v for v in ds.variables if v.key == key)
+            si = subs.index(sn) if sn in subs else 0
             f, a = got
             if len(f):
                 fmax = max(fmax, float(f[-1]))
@@ -879,12 +1063,14 @@ class SpectrumCell(_RowsCell):
                     f, a = np.log10(f[1:]), a[1:]
                 if la:
                     a = np.where(a > 0, np.log10(a), np.nan)
-            seen.add((num, key))
-            self._curve(sel, var, shades[key]).setData(f, a)
+            seen.add(k)
+            label = f"{var.label} #{num}" + (f" {sub_name(sn)}" if sn else "")
+            self._curve(sel, var, shades[key], key=k, label=label,
+                        style_i=self._style_index(num, si, len(subs))).setData(f, a)
         self._drop(seen)
         for p in self.rows.values():
             p.setLogMode(x=lf, y=la)
-        self._legends(ds, shades, units)
+        self._legends(ds, shades, units, tuple(ds.subs))
         first = self.rows[units[0]]
         if self._auto and fmax > 0:
             lo, hi = self.f_lo.value(), self.f_hi.value() or fmax
@@ -915,6 +1101,9 @@ class SpecgramCell(_Cell):
         self.var_box.setToolTip("The variable shown (or click its trace in the waveform)")
         self.sel_box = h.add("", QComboBox())
         self.sel_box.setToolTip("The selection shown (or click its trace in the waveform)")
+        self.sub_box = h.add("", QComboBox())
+        self.sub_box.setToolTip("The sub-range shown (there are sub-ranges: the spectra use them)")
+        self.sub_box.hide()
         self.seg_box = h.add("Seg", QComboBox())
         self.seg_box.addItems([f"{s:g} s" for s in SEGMENTS_S])
         self.seg_box.setCurrentIndex(SEGMENTS_S.index(1.0))
@@ -941,6 +1130,7 @@ class SpecgramCell(_Cell):
             w.currentIndexChanged.connect(lambda _i: self.changed.emit())
         self.var_box.activated.connect(self._on_picker)
         self.sel_box.activated.connect(self._on_picker)
+        self.sub_box.activated.connect(self._on_picker)
         self.db_box.toggled.connect(self._on_db)
         self.auto_box.toggled.connect(self._on_auto)
         for b in (self.lo_box, self.hi_box):
@@ -961,6 +1151,7 @@ class SpecgramCell(_Cell):
         self.probe = probe_line(self.plot)
         hook_click(self.plot.getViewBox(), self._click)
         self.pick: Optional[tuple] = None             # (sel number, var key)
+        self.sub_n = 0                                # the picked sub-range (0: whole)
         self.var = None                               # the picked Variable / Selection
         self.sel = None
         self.levels: Optional[tuple] = None           # the range in use
@@ -970,15 +1161,30 @@ class SpecgramCell(_Cell):
 
     # ----- the picker
 
-    def set_pick(self, number: int, key: str) -> None:
-        if (number, key) != self.pick:
+    def set_pick(self, number: int, key: str, sub: Optional[int] = None) -> None:
+        """Show (selection, variable) and, with ``sub``, that sub-range."""
+        if (number, key) != self.pick or (sub is not None and sub != self.sub_n):
             self.pick = (number, key)
+            if sub is not None:
+                self.sub_n = sub
             self.changed.emit()
 
     def _on_picker(self, _i: int) -> None:
         num, key = self.sel_box.currentData(), self.var_box.currentData()
+        sub = self.sub_box.currentData() if self.sub_box.count() else None
         if num is not None and key is not None:
-            self.set_pick(num, key)
+            self.set_pick(num, key, sub)
+
+    @property
+    def tile_name(self) -> str:
+        """``W1 A #2`` (`` s1`` added for a sub-range)."""
+        if self.var is None or self.sel is None:
+            return ""
+        return f"{self.var.label} #{self.sel.number}" + (f" {sub_name(self.sub_n)}"
+                                                          if self.sub_n else "")
+
+    def _sub(self, ds: Dataset) -> Optional[tuple]:
+        return next((u for u in ds.subs if u[0] == self.sub_n), None)
 
     def _sync_picker(self, ds: Dataset) -> None:
         """The combo boxes list the dataset's variables / selections; the pick falls
@@ -989,9 +1195,16 @@ class SpecgramCell(_Cell):
         num = num if num in nums else nums[0]
         key = key if key in keys else keys[0]
         self.pick = (num, key)
+        subs = [u[0] for u in ds.subs]
+        self.sub_n = (self.sub_n if self.sub_n in subs else subs[0]) if subs else 0
+        self.sub_box.setVisible(bool(subs))
         for box, items, cur in ((self.var_box, [(v.label, v.key) for v in ds.variables], key),
                                 (self.sel_box, [(f"#{s.number}", s.number) for s in ds.selections],
-                                 num)):
+                                 num),
+                                (self.sub_box, [(sub_name(n), n) for n in subs], self.sub_n)):
+            if not items:
+                box.clear()
+                continue
             box.blockSignals(True)
             if [(box.itemText(i), box.itemData(i)) for i in range(box.count())] != items:
                 box.clear()
@@ -1084,7 +1297,7 @@ class SpecgramCell(_Cell):
         fi = int(np.argmin(np.abs(f - y)))
         a = col[1][fi]
         val = f"{float(to_db(np.array([a]))[0]):.1f} dB" if self.db else f"{a:.4g} {self.unit}"
-        return f"t = {x:.3f} s · f = {f[fi]:.2f} Hz · {self.var.label} #{self.sel.number}: {val}"
+        return f"t = {x:.3f} s · f = {f[fi]:.2f} Hz · {self.tile_name}: {val}"
 
     # ----- drawing
 
@@ -1092,14 +1305,15 @@ class SpecgramCell(_Cell):
         """The picked tile's ``Dataset.spectrogram`` (cached by its inputs)."""
         seg = SEGMENTS_S[self.seg_box.currentIndex()]
         ovl = OVERLAPS[self.ovl_box.currentIndex()]
-        k = (self.sel.number, self.var.key)
-        key = _input_key(ds, self.sel, self.var, seg, ovl)
+        k = (self.sel.number, self.var.key, self.sub_n)
+        sub = self._sub(ds)
+        key = _input_key(ds, self.sel, self.var, seg, ovl, sub=sub)
         hit = self._cache.get(k)
         if hit is None or hit[0] != key:
             self.computed += 1
-            hit = (key, ds.spectrogram(self.sel, self.var, seg, ovl))
-            self._cache = {kk: vv for kk, vv in self._cache.items()
-                           if any(kk == (s.number, v.key) for s, v in ds.pairs())}
+            hit = (key, ds.spectrogram(self.sel, self.var, seg, ovl, sub=sub))
+            live = {(s.number, v.key, u[0] if u else 0) for s, v, u in ds.triples()}
+            self._cache = {kk: vv for kk, vv in self._cache.items() if kk in live}
             self._cache[k] = hit
         return hit[1]
 
@@ -1111,8 +1325,9 @@ class SpecgramCell(_Cell):
         seg = SEGMENTS_S[self.seg_box.currentIndex()]
         ovl = OVERLAPS[self.ovl_box.currentIndex()]
         st = self._range(self.unit)
-        inputs = (self.pick, _input_key(ds, self.sel, self.var, seg, ovl), self.db,
-                  st["auto"], None if st["auto"] else st[self.db])
+        inputs = (self.pick, self.sub_n, _input_key(ds, self.sel, self.var, seg, ovl,
+                                                    sub=self._sub(ds)),
+                  self.db, st["auto"], None if st["auto"] else st[self.db])
         if inputs == self._last:
             return
         self._last = inputs
@@ -1122,7 +1337,7 @@ class SpecgramCell(_Cell):
         if g is None:
             self.img.clear()
             self.levels = None
-            self.plot.setTitle(f"{self.var.label}  #{self.sel.number}: shorter than one segment",
+            self.plot.setTitle(f"{self.tile_name}: shorter than one segment",
                                color=sel_color(self.sel.number).name(), size="9pt")
             self._show_unit()
             return
@@ -1134,7 +1349,7 @@ class SpecgramCell(_Cell):
         df = f[1] - f[0] if len(f) > 1 else 1.0
         rect = pg.QtCore.QRectF(tc[0] - dt / 2, -df / 2, dt * len(tc), df * len(f))
         self.img.setImage(v, autoLevels=False, levels=self.levels, rect=rect)
-        self.plot.setTitle(f"{self.var.label}  #{self.sel.number}", color=sel_color(self.sel.number).name(),
+        self.plot.setTitle(self.tile_name, color=sel_color(self.sel.number).name(),
                            size="9pt")
         self.plot.setYRange(0.0, float(rect.bottom()), padding=0)
         self.cbar.setLevels(self.levels)
@@ -1207,7 +1422,7 @@ class CursorCell(_Cell):
         self._unit = f"dB re 1 {spec.unit}" if spec.db else spec.unit
         self.plot.setLabel("left", self._unit)
         self.title.setText(f"Spectrum at the cursors: <span style='color:"
-                           f"{sel_color(spec.sel.number).name()}'>{spec.var.label}  #{spec.sel.number}</span>")
+                           f"{sel_color(spec.sel.number).name()}'>{spec.tile_name}</span>")
         nums = {n for n, _t in cursors}
         for n in [n for n in self.curves if n not in nums]:
             self.plot.removeItem(self.curves.pop(n))

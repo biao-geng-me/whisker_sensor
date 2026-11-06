@@ -25,7 +25,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
-from PyQt6.QtCore import Qt  # noqa: E402
+from PyQt6.QtCore import QPointF, Qt  # noqa: E402
 from PyQt6.QtWidgets import QApplication, QMessageBox  # noqa: E402
 
 from wavi_py.daq.analysis import (ROV, Dataset, Selection, SelSource, rov_variables,  # noqa: E402
@@ -367,4 +367,65 @@ def test_zoom_box_and_cursor_labels(app, win):
     assert line.label.toPlainText() == "t=2.50 s"
     assert all(ln.label.toPlainText() == "t=2.50 s" for (_p, ln) in aw._wave_lines.lines.values())
     assert _pump(app, lambda: aw.at_cursors.plot.legend.items[0][1].text.startswith("t=2.50 s"), 2)
+    aw.close()
+
+
+def test_multiple_sub_ranges(app, win):
+    from wavi_py.tests.test_analysis import _drag
+    from wavi_py.tests.test_analysis_r2 import _Click, _window
+    aw, sels = _window(app, win)                                 # 3 selections x 4 gauges
+    wc, sp, sg = aw.compare, aw.spectrum, aw.spectrogram
+    vb = wc.rows["mV"].getViewBox()
+    aw._act_select.setChecked(True)
+    _drag(vb, 0.2, 1.2)
+    _drag(vb, 1.5, 2.5)
+    assert [u[0] for u in aw.subs] == [1, 2]
+    assert aw.subs[0][1:] == pytest.approx((0.2, 1.2), abs=0.05)
+    assert len(wc.bands) == 2 * len(wc.rows)
+    # one trace per (variable, selection, sub-range)
+    assert _pump(app, lambda: len(sp.curves) == 4 * 3 * 2, 3)
+    assert {k[2] for k in sp.curves} == {1, 2}
+    f1, _ = sp.curves[(1, "wsk:0", 1)].getData()
+    assert f1[1] - f1[0] == pytest.approx(1.0 / (aw.subs[0][2] - aw.subs[0][1]), rel=0.1)
+    assert "s1" in sp.header.sub.text() and "s2" in sp.header.sub.text()
+    texts = [lab.text for _s, lab in sp.rows["mV"].legend.items]
+    assert any(t.startswith("s1 ") for t in texts) and any(t.startswith("s2 ") for t in texts)
+    assert {sp.curves[(1, "wsk:0", n)].opts["pen"].style() for n in (1, 2)} == \
+        {Qt.PenStyle.SolidLine, Qt.PenStyle.DashLine}
+    # the spectrogram's picker can show either; its tile is that sub-range's
+    assert sg.sub_box.isVisible() and sg.sub_box.count() == 2
+    sg.seg_box.setCurrentIndex(0)                               # 0.25 s: several in a 1 s range
+    sg.set_pick(2, "wsk:1", 2)
+    assert _pump(app, lambda: sg.sel is sels[1] and sg.sub_n == 2 and sg.data is not None, 2)
+    tc = sg.data[0]
+    a, b = aw.subs[1][1:]
+    assert tc[0] >= a - 1e-6 and tc[-1] <= b + 1e-6
+    assert sg.tile_name == "LBL (W1) B #2 s2"
+    # a body drag moves it (Select off), its length kept; only its traces recompute
+    aw._act_select.setChecked(False)
+    band = next(bd for bd in wc.bands if bd.number == 2)
+    n0 = sp.computed
+    band.setRegion((2.0, 3.0))
+    band.sigRegionChanged.emit(band)
+    assert aw.subs[1][1:] == pytest.approx((2.0, 3.0))
+    assert _pump(app, lambda: sp.computed == n0 + 4 * 3, 2)        # s2's twelve, not s1's
+    # with Select on, a drag on a body makes another one (the band leaves it to the row)
+    aw._act_select.setChecked(True)
+    _drag(vb, 2.2, 2.8)
+    assert [u[0] for u in aw.subs] == [1, 2, 3]
+    aw._act_select.setChecked(False)
+    # right-click deletes one; Del deletes the hovered one; Esc clears all
+    next(bd for bd in wc.bands if bd.number == 3).mouseClickEvent(
+        _Click(QPointF(), Qt.MouseButton.RightButton))
+    assert [u[0] for u in aw.subs] == [1, 2]
+    wc.hovered_sub = 1
+    next(a_ for a_ in aw.actions() if a_.text() == "Delete cursor / selection").trigger()
+    assert [u[0] for u in aw.subs] == [2] and len(win._selections) == 3
+    assert _pump(app, lambda: len(sp.curves) == 4 * 3, 2)
+    aw._act_clear_sub.trigger()
+    assert aw.subs == () and not wc.bands
+    assert _pump(app, lambda: not sg.sub_box.isVisible() and sg.sub_n == 0, 2)
+    assert _pump(app, lambda: set(sp.curves) == {(s.number, k) for s in sels
+                                                 for k in ("wsk:0", "wsk:1", "wsk:2", "wsk:3")}, 2)
+    assert sp.header.sub.text().startswith("Whole selections")
     aw.close()
