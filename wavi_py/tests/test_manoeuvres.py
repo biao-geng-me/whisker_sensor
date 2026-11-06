@@ -64,12 +64,36 @@ def test_segment_boundaries_and_classes():
     assert all(a.i1 == b.i0 for a, b in zip(segs, segs[1:]))
 
 
-def test_deadband_rest_and_small_wobble():
-    """A stick resting at 0.05 (inside the deadband) is rest; a 0.05 wobble on a
-    held level is no new segment."""
-    fl = flight(10, [(0, (0.05, 0, 0, -0.05)), (4, (0.5, 0, 0, 0)), (6, (0.55, 0, 0, 0)),
-                     (8, (0.5, 0, 0, 0))])
-    assert classes(mn.segment(fl)) == [(0.0, "rest"), (4.0, "single:surge+")]
+def test_rest_tolerance_and_small_wobble():
+    """RC at 1500 +- REST_TOL is rest; a 0.05 wobble on a held level is no new
+    segment (under STEP); a lone small input (0.05, nothing larger) is its own
+    single-axis segment."""
+    fl = flight(14, [(0, (0.01, 0, 0, -0.01)), (4, (0.5, 0, 0, 0)), (6, (0.55, 0, 0, 0)),
+                     (8, (0.5, 0, 0, 0)), (10, (0, 0, 0, 0)), (12, (0, 0, 0, 0.05))])
+    segs = mn.segment(fl)
+    assert classes(segs) == [(0.0, "rest"), (4.0, "single:surge+"), (10.0, "rest"),
+                             (12.0, "single:yaw+")]
+    assert segs[-1].level[3] == pytest.approx(0.05)
+
+
+def test_minor_inputs():
+    """A yaw under MINOR during a surge hold: no new segment, no combo, recorded as
+    minor on the hold and its onset; at MINOR and above: a combo."""
+    fl = flight(20, [(0, (0, 0, 0, 0)), (3, (0.75, 0, 0, 0)), (5, (0.75, 0, 0, 0.1)),
+                     (6, (0.75, 0, 0, -0.12)), (7, (0.75, 0, 0, 0)), (10, (0, 0, 0, 0)),
+                     (13, (0.5, 0, 0, 0)), (15, (0.5, 0, 0, 0.3)), (17, (0, 0, 0, 0))])
+    segs = mn.segment(fl)
+    assert classes(segs) == [(0.0, "rest"), (3.0, "single:surge+"), (10.0, "rest"),
+                             (13.0, "single:surge+"), (15.0, "combo"), (17.0, "rest")]
+    assert segs[1].minor == {"yaw": {"max": 0.12, "share": 0.286}}     # 2 s of 7 s
+    assert segs[3].minor == {} and segs[1].level[3] == 0.0
+    doc = mn.extract(fl)
+    hold = next(e for e in doc["events"] if e["kind"] == "hold" and e["t"] == 3.0)
+    on = next(e for e in doc["events"] if e["type"] == "onset" and e["t"] == 3.0)
+    assert hold["minor"] == on["minor"] == {"yaw": {"max": 0.12, "share": 0.286}}
+    assert doc["segments"][1]["minor"]["yaw"]["max"] == 0.12
+    assert np.array_equal(mn.effective_demand(np.array([[0.1, 0, 0, 0.05], [0.5, 0, 0, 0.1]])),
+                          [[0.1, 0, 0, 0.05], [0.5, 0, 0, 0]])
 
 
 def test_debounce_ramp_and_blips():
@@ -353,7 +377,7 @@ def test_sidecar_from_a_recording(tmp_path):
     assert path == out / "st_2026-11-05_1200_00.00_test.manoeuvres.json"
     assert mn.is_current(rec, out) and not mn.is_current(rec)
     assert not list(tmp_path.glob("*.npz"))                   # no caches next to it
-    assert mn.read_doc(path)["v"] == mn.VERSION and doc["constants"]["deadband"] == mn.DEADBAND
+    assert mn.read_doc(path)["v"] == mn.VERSION and doc["constants"]["minor"] == mn.MINOR
     assert doc["stem"] == "st_2026-11-05_1200_00.00_test" and doc["tag"] == "test"
     r = doc["recording"]
     assert r["armed_spans"][0][0] == pytest.approx(2.0 - first + 0.007, abs=0.01)

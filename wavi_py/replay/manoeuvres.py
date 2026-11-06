@@ -20,14 +20,26 @@ MAVLink at receive time; ``Flight``).
 
 Demand: ``u = (raw - 1500) / 400`` per axis (RC ch5 surge, ch6 sway, ch3 heave,
 ch4 yaw), pilot gain included. Neutral is fixed at 1500: a stick held for most
-of a run must not become its rest. ``|u| <= DEADBAND`` is rest; the median of
-those samples is reported per axis as the rest offset.
+of a run must not become its rest. The pilot's stick deadband and expo put RC at
+exactly 1500 at rest, so ``|u| <= REST_TOL`` is rest (the tolerance is a legacy
+fallback: before the deadband, on 2026-11-03, a stick rested at ~+10 %); the
+median of the samples with ``|u| <= REST_OFFSET_MAX`` is reported per axis as
+the rest offset.
+
+Minor inputs: an axis under ``MINOR`` while another axis is at or above it (a
+small yaw correction during a surge) is dropped from the *effective demand*
+(``effective_demand``) that segments are cut on, so it neither starts a segment
+nor makes a hold a combo; each hold and transition records what was dropped as
+``minor: {axis: {"max": max |u|, "share": fraction of the span}}``, so filters
+can leave corrected holds out. A small input with no larger axis is kept: a
+segment of its own.
 
 Segments (``segment``): armed time only (disarmed spans are ``disarmed``
-segments). A new segment starts where any axis moves more than ``DEADBAND``
-from the value at the segment's start; a segment shorter than ``DEBOUNCE_S``
-(a stick on its way between levels) joins the next one, and neighbours whose
-median levels are within ``DEADBAND`` on every axis are one. Class: ``rest``,
+segments). On the effective demand, a new segment starts where the set of
+active axes changes or any axis moves more than ``STEP`` from the value at the
+segment's start; a segment shorter than ``DEBOUNCE_S`` (a stick on its way
+between levels) joins the next one, and neighbours with the same active axes
+whose median levels are within ``STEP`` are one. Class: ``rest``,
 ``single:<axis><sign>`` (with its level) or ``combo``.
 
 Events (``extract``): a ``hold`` per armed segment, and a ``transition`` at
@@ -101,7 +113,11 @@ AXES = ("surge", "sway", "heave", "yaw")
 RC_CHANNEL = {"surge": 5, "sway": 6, "heave": 3, "yaw": 4}
 NEUTRAL_US = 1500
 FULL_US = 400                   # full stick (after the pilot gain): u = +-1
-DEADBAND = 0.08                 # |u| at or below: rest; a larger change: a new segment
+REST_TOL = 0.02                 # |u| at or below: rest (RC rests at exactly 1500 behind the
+                                # pilot's stick deadband; the tolerance is a legacy fallback)
+STEP = 0.08                     # a held level moving more than this: a new segment
+MINOR = 0.15                    # |u| under this next to a larger axis: a minor input (module doc)
+REST_OFFSET_MAX = MINOR         # the rest offset is the median of |u| <= this
 DEBOUNCE_S = 0.15               # shorter segments join the next one
 PRE_S = 2.0                     # transition window: PRE_S before .. POST_S after
 POST_S = 5.0
@@ -139,7 +155,8 @@ G = 9.80665
 def constants() -> dict:
     """The module's tunables, as written into every sidecar."""
     return {"fs_hz": FS_HZ, "axes": list(AXES), "rc_channel": RC_CHANNEL,
-            "neutral_us": NEUTRAL_US, "full_us": FULL_US, "deadband": DEADBAND,
+            "neutral_us": NEUTRAL_US, "full_us": FULL_US, "rest_tol": REST_TOL,
+            "step": STEP, "minor": MINOR,
             "debounce_s": DEBOUNCE_S, "pre_s": PRE_S, "post_s": POST_S, "quiet_s": QUIET_S,
             "baseline_s": BASELINE_S, "pre_motion_s": PRE_MOTION_S, "peak_s": PEAK_S,
             "steady_min_s": STEADY_MIN_S, "decay_min_s": DECAY_MIN_S, "band_hz": list(BAND_HZ),
@@ -391,8 +408,9 @@ class Segment:
     i1: int
     t0: float
     t1: float
-    level: np.ndarray           # (4,) median demand, AXES order
+    level: np.ndarray           # (4,) median effective demand, AXES order
     armed: bool = True
+    minor: dict = field(default_factory=dict)   # minor inputs dropped (``_minor``)
 
     @property
     def duration(self) -> float:
@@ -400,7 +418,7 @@ class Segment:
 
     @property
     def signs(self) -> np.ndarray:
-        return np.where(np.abs(self.level) > DEADBAND, np.sign(self.level), 0).astype(int)
+        return np.where(np.abs(self.level) > REST_TOL, np.sign(self.level), 0).astype(int)
 
     @property
     def cls(self) -> str:
@@ -431,16 +449,41 @@ def _runs(mask: np.ndarray) -> list[tuple[int, int, bool]]:
     return [(int(a), int(b), bool(mask[a])) for a, b in zip(starts, ends)]
 
 
+def effective_demand(u: np.ndarray) -> np.ndarray:
+    """The demand the segments are cut on: per sample, an axis under ``MINOR``
+    while another axis is at or above it is zeroed (a correction held alongside
+    the main input); small inputs on their own are kept."""
+    a = np.abs(u)
+    major = (a >= MINOR).any(axis=1, keepdims=True)
+    return np.where(major & (a < MINOR), 0.0, u)
+
+
+def _active(v: np.ndarray) -> np.ndarray:
+    return np.abs(v) > REST_TOL
+
+
 def _split(u: np.ndarray, i0: int, i1: int) -> list[int]:
-    """Segment starts in [i0, i1): a new one where any axis is more than DEADBAND
-    from the value at the current segment's start."""
+    """Segment starts in [i0, i1): a new one where the set of active axes changes
+    or any axis moves more than STEP from the value at the segment's start."""
     starts = [i0]
     ref = u[i0]
     for i in range(i0 + 1, i1):
-        if np.any(np.abs(u[i] - ref) > DEADBAND):
+        if (np.any(_active(u[i]) != _active(ref)) or np.any(np.abs(u[i] - ref) > STEP)):
             starts.append(i)
             ref = u[i]
     return starts
+
+
+def _minor(u: np.ndarray, ue: np.ndarray) -> dict:
+    """{axis: {"max": max |u|, "share": fraction of samples active}} of the inputs
+    the effective demand dropped in a span."""
+    out = {}
+    for k, ax in enumerate(AXES):
+        dropped = (ue[:, k] == 0) & _active(u[:, k])
+        if dropped.any():
+            out[ax] = {"max": _f(np.max(np.abs(u[dropped, k])), 3),
+                       "share": _f(dropped.mean(), 3)}
+    return out
 
 
 def segment(fl: Flight) -> list[Segment]:
@@ -448,11 +491,17 @@ def segment(fl: Flight) -> list[Segment]:
     out: list[Segment] = []
     dt = fl.dt
     min_n = max(1, int(round(DEBOUNCE_S * FS_HZ)))
+    ue = effective_demand(fl.u)
+
+    def seg(s0: int, s1: int) -> Segment:
+        return Segment(s0, s1, s0 * dt, s1 * dt, np.median(ue[s0:s1], axis=0),
+                       minor=_minor(fl.u[s0:s1], ue[s0:s1]))
+
     for a, b, armed in _runs(fl.armed):
         if not armed:
             out.append(Segment(a, b, a * dt, b * dt, np.zeros(4), armed=False))
             continue
-        starts = _split(fl.u, a, b)
+        starts = _split(ue, a, b)
         bounds = list(zip(starts, starts[1:] + [b]))
         # de-bounce: a short segment joins the next (the last one joins the one before)
         changed = True
@@ -467,16 +516,14 @@ def segment(fl: Flight) -> list[Segment]:
                     del bounds[j]
                     changed = True
                     break
-        # neighbours at the same level (within the deadband on every axis): one
-        segs = [Segment(s, e, s * dt, e * dt, np.median(fl.u[s:e], axis=0)) for s, e in bounds]
+        # neighbours with the same active axes and levels within STEP: one
         merged: list[Segment] = []
-        for sg in segs:
+        for sg in (seg(s, e) for s, e in bounds):
             if merged:
                 p = merged[-1]
                 if (np.array_equal(p.signs, sg.signs)
-                        and np.all(np.abs(p.level - sg.level) <= DEADBAND)):
-                    merged[-1] = Segment(p.i0, sg.i1, p.t0, sg.t1,
-                                         np.median(fl.u[p.i0:sg.i1], axis=0))
+                        and np.all(np.abs(p.level - sg.level) <= STEP)):
+                    merged[-1] = seg(p.i0, sg.i1)
                     continue
             merged.append(sg)
         out += merged
@@ -641,7 +688,7 @@ def measure(pp: _Prepared, segs: list[Segment], j: int, kind: str) -> dict:
         t = seg.t0
         t_start, t_end = seg.t0, seg.t1
         resp = seg
-        ev.update({"type": "hold", "class": seg.cls, "axes": seg.axes,
+        ev.update({"type": "hold", "class": seg.cls, "axes": seg.axes, "minor": seg.minor,
                    "level": [_f(v, 3) for v in seg.level], "duration_s": _f(seg.duration)})
         peak_win = (seg.t0, seg.t1)
         resp_win = (seg.t0, seg.t1)
@@ -654,7 +701,7 @@ def measure(pp: _Prepared, segs: list[Segment], j: int, kind: str) -> dict:
         side = a if typ == "release" else seg
         t_start, t_end = max(run0, t - PRE_S), min(run1, t + POST_S)
         ev.update({"type": typ, "class": side.cls, "from": a.cls, "to": seg.cls,
-                   "axes": side.axes, "axis": AXES[ax],
+                   "axes": side.axes, "minor": side.minor, "axis": AXES[ax],
                    "sign": int(np.sign(side.level[ax])) if side.signs[ax] else
                    int(np.sign(dlev[ax])),
                    "level_from": [_f(v, 3) for v in a.level],
@@ -845,9 +892,12 @@ def extract(fl: Flight, dome: Optional[DomeMap] = None) -> dict:
     rest = {}
     for k, a in enumerate(AXES):
         x = fl.u[am, k]
-        small = x[np.abs(x) <= DEADBAND]
+        small = x[np.abs(x) <= REST_OFFSET_MAX]
         rest[a] = {"offset": _f(np.median(small), 3) if len(small) else None,
-                   "active_frac": _f(np.mean(np.abs(x) > DEADBAND), 3) if len(x) else None}
+                   "active_frac": _f(np.mean(np.abs(x) > REST_TOL), 3) if len(x) else None,
+                   # active but small (rest offset or a minor input)
+                   "small_frac": _f(np.mean((np.abs(x) > REST_TOL) & (np.abs(x) < MINOR)), 3)
+                   if len(x) else None}
     rn = recname.parse(fl.stem)
     return {"v": VERSION, "stem": fl.stem,
             "start": rn.start.isoformat(timespec="seconds") if rn else None,
@@ -858,6 +908,7 @@ def extract(fl: Flight, dome: Optional[DomeMap] = None) -> dict:
                           "positions": [k for k, _ in pp.positions],
                           "mix_check": mix_check(fl, segs)},
             "segments": [{"t0": _f(s.t0, 7), "t1": _f(s.t1, 7), "class": s.cls, "axes": s.axes,
+                          "minor": s.minor,
                           "level": [_f(v, 3) for v in s.level]} for s in segs],
             "events": events}
 
