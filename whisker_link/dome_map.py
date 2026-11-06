@@ -10,6 +10,8 @@ tube axis, +y up, +x port):
 
     {
       "format": "wavi-dome-map/2",
+      "id": "2026-11-05", "from": "2026-11-05T00:00",   # optional: a map history entry
+      "whisker_set": "3x-cut-72",                       # optional: the set of whiskers
       "calibration_file": "whisker_calibration.json",   # optional, relative
       "whisker_length_mm": 130.0,                       # default per position
       "unused_gauges": {"W3_B": "why"},                 # optional bookkeeping
@@ -35,6 +37,14 @@ channel.
 Geometry: ``root`` is where the whisker leaves the dome, ``axis`` its outward
 rest direction, ``e1`` (optional) the drag direction (default: +z projected
 normal to the axis, i.e. meridional, toward the front, as in the asset).
+
+History: ``wavi_py/assets/dome/maps/`` holds one map per dome configuration,
+each with an ``id`` and the local time it holds ``from``
+(``wavi_py/replay/dome_maps.py`` picks one per recording). ``whisker_set`` names
+the set of whiskers (top level, and per position where it differs); a length
+(``whisker_length_mm``, a position's ``length_mm``) may be null where unknown:
+the geometry then uses ``DEFAULT_LENGTH_MM`` and ``Position.length_known`` is
+None. A ``sensor_id`` is a non-empty string or a number.
 
 ``reference`` (optional): gauges of a sensor with no whisker (inside the dome),
 which sees no flow and tracks the slow common-mode drift of the bridges
@@ -98,11 +108,12 @@ AXES = ("drag", "lift")
 # the map shipped with wavi_py (the ROV dome as wired on 2026-10-29)
 DEFAULT_MAP = Path(__file__).resolve().parents[1] / "wavi_py" / "assets" / "dome" / "dome_map.json"
 
-_MAP_KEYS = {"format", "description", "frame", "coordinates", "polarity_note",
+_MAP_KEYS = {"format", "id", "from", "whisker_set", "description", "frame", "coordinates", "polarity_note",
              "calibration_file", "whisker_length_mm", "unused_gauges", "reference",
              "positions"}
 _REF_KEYS = {"sensor_id", "gauges", "note"}
-_POS_KEYS = {"daq", "sensor_id", "label", "root", "axis", "e1", "length_mm", "note"}
+_POS_KEYS = {"daq", "sensor_id", "label", "root", "axis", "e1", "length_mm", "whisker_set",
+             "note"}
 _AXIS_KEYS = {"ch", "polarity", "reason"}
 _CAL_KEYS = {"format", "description", "sensors"}
 _SENSOR_KEYS = {"deg_per_mv", "date", "source", "note"}
@@ -132,12 +143,14 @@ class Position:
     key: str                     # the position, e.g. "LFM"
     daq: dict                    # "drag" / "lift" -> Gauge
     label: str
-    sensor_id: Optional[str]
+    sensor_id: object            # str, int or None
     root: np.ndarray             # (3,) mm
     axis: np.ndarray             # (3,) unit, outward
     e1: np.ndarray               # (3,) unit, normal to axis: drag + direction
-    length: float                # mm
+    length: float                # mm (DEFAULT_LENGTH_MM where unknown)
     note: str = ""
+    whisker_set: str = ""
+    length_known: Optional[float] = None    # mm as the map gives it; None: unknown
 
     @property
     def slots(self) -> str:
@@ -187,6 +200,10 @@ class DomeMap:
     sensors: dict = field(default_factory=dict)   # sensor_id -> SensorCal
     unused: dict = field(default_factory=dict)    # channel index -> reason
     reference: Optional[Reference] = None
+    id: str = ""                                  # a history entry's id
+    valid_from: str = ""                          # its "from" (local ISO time)
+    whisker_set: str = ""
+    doc: Optional[dict] = field(default=None, repr=False)   # the JSON it was made from
     path: Optional[Path] = None
     calibration_path: Optional[Path] = None
 
@@ -217,8 +234,12 @@ class DomeMap:
         if doc.get("format") != MAP_FORMAT:
             raise err(f"format must be {MAP_FORMAT!r} (got {doc.get('format')!r})")
         _no_unknown(doc, _MAP_KEYS, err, "top level")
-        length0 = _positive(doc.get("whisker_length_mm", DEFAULT_LENGTH_MM), err,
-                            "whisker_length_mm")
+        wl = doc.get("whisker_length_mm", DEFAULT_LENGTH_MM)
+        length0 = None if wl is None else _positive(wl, err, "whisker_length_mm")
+        for k in ("id", "from", "whisker_set"):
+            if k in doc and not isinstance(doc[k], str):
+                raise err(f"{k} must be a string")
+        set0 = str(doc.get("whisker_set", ""))
         unused = {}
         ug = doc.get("unused_gauges", {})
         if not isinstance(ug, dict):
@@ -275,8 +296,9 @@ class DomeMap:
                 by_gauge[g.ch] = f"{key} {ax}"
             sid = p.get("sensor_id")
             if sid is not None:
-                if not isinstance(sid, str) or not sid.strip():
-                    raise err(f"{what}: sensor_id must be a non-empty string or null")
+                if isinstance(sid, bool) or not (isinstance(sid, int) or
+                                                 (isinstance(sid, str) and sid.strip())):
+                    raise err(f"{what}: sensor_id must be a non-empty string, a number or null")
                 if sid in by_sensor:
                     raise err(f"{what}: sensor_id {sid!r} is also at position {by_sensor[sid]!r}")
                 by_sensor[sid] = key
@@ -293,12 +315,22 @@ class DomeMap:
             if np.linalg.norm(e1) < 1e-6:
                 raise err(f"{what}: e1 is parallel to the axis")
             e1 = e1 / np.linalg.norm(e1)
-            length = _positive(p.get("length_mm", length0), err, f"{what} length_mm")
+            lm = p.get("length_mm", length0)
+            known = None if lm is None else _positive(lm, err, f"{what} length_mm")
+            length = known if known is not None else DEFAULT_LENGTH_MM
+            ws = p.get("whisker_set", set0)
+            if not isinstance(ws, str):
+                raise err(f"{what}: whisker_set must be a string")
             positions.append(Position(key, daq, label.strip(), sid, root, axis, e1, length,
-                                      str(p.get("note", ""))))
-        return cls(positions, dict(sensors or {}), unused, reference)
+                                      str(p.get("note", "")), ws, known))
+        return cls(positions, dict(sensors or {}), unused, reference, str(doc.get("id", "")),
+                   str(doc.get("from", "")), set0, doc)
 
     # ----- queries
+    def position(self, key: str) -> Optional[Position]:
+        """The position ``key`` (e.g. ``LFM``), None if the map has none."""
+        return next((p for p in self.positions if p.key == key), None)
+
     def gauge_owner(self) -> dict:
         """channel index -> (Position, axis)"""
         return {g.ch: (p, ax) for p in self.positions for ax, g in p.daq.items()
@@ -326,10 +358,11 @@ class DomeMap:
         return out
 
     def sensor_cal(self, pos: Position) -> Optional[SensorCal]:
-        return self.sensors.get(pos.sensor_id) if pos.sensor_id else None
+        return self.sensors.get(str(pos.sensor_id)) if pos.sensor_id is not None else None
 
     def uncalibrated(self) -> list:
-        """Positions on the placeholder gain: no sensor_id, or no calibration for it."""
+        """Positions on the placeholder gain: no sensor_id, or no calibration for it
+        (calibration files key sensors by string: sensor 7 is "7")."""
         return [p.key for p in self.positions if self.sensor_cal(p) is None]
 
     # ----- the dome pose model's inputs

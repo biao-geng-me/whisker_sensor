@@ -250,10 +250,15 @@ class WaviClient:
             return self.send_command(cmd)
         return self._send_cmd(b"S")
 
+    def set_record_dome_map(self, dome_map) -> None:
+        """The dome map (``DomeMap`` or None) the next local copies carry."""
+        self._record_dome_map = dome_map
+
     def start_local_copy(self, path: str) -> None:
-        """Event streams: tee the raw stream to the local .jsonl ``path``."""
+        """Event streams: tee the raw stream to the local .jsonl ``path``, with the
+        dome map of ``set_record_dome_map`` after the hello."""
         if isinstance(self._reader, ServerReader):
-            self._reader.start_tee(path)
+            self._reader.start_tee(path, getattr(self, "_record_dome_map", None))
 
     def local_copy_time(self) -> Optional[float]:
         """Seconds into the local copy (``start_local_copy``) of the newest line

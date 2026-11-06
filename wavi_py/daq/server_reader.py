@@ -25,7 +25,8 @@ spectrogram views work unchanged. Differences:
   ``whisker_link/esp32_fault.py``) go in ``bus`` metadata as ``fault_marks``:
   the newest few as ``(n, mark)``. The current state is in the status record
   (``server_status["esp32"]["fault"]``).
-- ``start_tee(path)`` copies the raw stream to a local .jsonl — the same
+- ``start_tee(path, dome_map)`` copies the raw stream to a local .jsonl (the
+  active dome map in a line after the hello) — the same
   format as the recording on the Pi, so ``whisker_link.convert`` reads both.
 - Sample times: a timed bus (``SampleBus(timed=True)``) gets each scan's and
   each IMU row's time in session seconds (zero at the hello), from the device
@@ -146,7 +147,9 @@ class ServerReader:
     def send(self, cmd: dict) -> None:
         self._transport.write((json.dumps(cmd) + "\n").encode())
 
-    def start_tee(self, path: str) -> None:
+    def start_tee(self, path: str, dome_map=None) -> None:
+        """Copy the stream to ``path``; ``dome_map`` (a ``DomeMap``, optional) is
+        written right after the hello (``replay/dome_maps.py``)."""
         with self._tee_lock:
             if self._tee is not None:
                 self._tee.close()
@@ -155,6 +158,9 @@ class ServerReader:
             # re-stamp it "now" so the file's time zero is the record start.
             hello = dict(self.hello, t=self._last_t or self.hello.get("t", 0.0))
             self._tee.write((json.dumps(hello) + "\n").encode())
+            if dome_map is not None:
+                from wavi_py.replay.dome_maps import dome_map_line
+                self._tee.write(dome_map_line(dome_map))
             self.tee_t0 = float(hello["t"])   # the copy's zero on the receive clock (notes)
 
     def stop_tee(self) -> None:

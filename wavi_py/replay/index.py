@@ -194,6 +194,8 @@ class RecordingIndex(TimelineQueries):
                     kind, ti = k_wsk, 10
                 elif line.startswith(b'{"k":"mav"'):
                     kind, ti = k_mav, 10
+                elif line.startswith(b'{"k":"dome_map"'):
+                    continue                            # no "t": not a line of the timeline
                 else:
                     i = line.find(b'"k":')
                     if i < 0:

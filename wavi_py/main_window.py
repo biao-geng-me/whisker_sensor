@@ -1907,7 +1907,8 @@ class MainWindow(QMainWindow):
         self._is_recording = True
         # from the oldest sample not yet final (the provisional ones come later)
         self._rec_from = self._next_idx - (self._despiker.pending if self._despiker else 0)
-        # the full whisker+IMU stream to a local .jsonl next to the .dat
+        # the full whisker+IMU stream to a local .jsonl next to the .dat, with the map
+        self._client.set_record_dome_map(self._dome_map)
         if self._vehicle_live:
             self._client.start_local_copy(str(fullpath.with_suffix(".jsonl")))
         else:

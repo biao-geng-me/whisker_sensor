@@ -1,11 +1,13 @@
 """Time series by name over a time range: the one read API of the plot data.
 
-Two sources, each its own time axis (session seconds, sorted):
+Three sources, each its own time axis (session seconds, sorted):
 
 - ``WSK``: the whisker gauges, mV at the ADC (before V0 and the display scale),
   columns in stream order (W1_A, W1_B, ...);
 - ``IMU``: the IMU rows (``daq.server_reader.IMU_CHANNELS``: accel mg, gyro
-  mrad/s, attitude rad).
+  mrad/s, attitude rad);
+- ``CMD``: the pilot's demand and the projected thrust (``daq/vehicle.py``
+  ``CMD_CHANNELS``), a recording's only (the live buffers have none).
 
 Two implementations of ``Series``:
 
@@ -37,7 +39,8 @@ from typing import Optional, Sequence, Union
 
 import numpy as np
 
-WSK, IMU = "wsk", "imu"
+WSK, IMU, CMD = "wsk", "imu", "cmd"
+SOURCES = (WSK, IMU, CMD)
 Cols = Union[slice, Sequence[int], np.ndarray]
 
 
@@ -107,7 +110,7 @@ class Series:
     def channels(self, names: Sequence[str], t0: float, t1: float,
                  despike: bool = False) -> dict[str, tuple[np.ndarray, np.ndarray]]:
         out = {}
-        for src in (WSK, IMU):
+        for src in SOURCES:
             have = self.names(src)
             want = [n for n in names if n in have]
             if want:
@@ -130,9 +133,8 @@ class ArraySeries(Series):
     The arrays are used as given (not copied); reads return copies."""
 
     def __init__(self, data: Optional[dict] = None, names: Optional[dict] = None) -> None:
-        self._data = {WSK: (np.empty(0), np.empty((0, 0), np.float32)),
-                      IMU: (np.empty(0), np.empty((0, 0), np.float32))}
-        self._names: dict[str, list[str]] = {WSK: [], IMU: []}
+        self._data = {src: (np.empty(0), np.empty((0, 0), np.float32)) for src in SOURCES}
+        self._names: dict[str, list[str]] = {src: [] for src in SOURCES}
         for src, (t, y) in (data or {}).items():
             self.set(src, t, y)
         for src, n in (names or {}).items():

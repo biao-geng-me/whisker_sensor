@@ -53,7 +53,8 @@ def test_default_map_is_the_users_table():
         assert (p.daq["drag"].name, p.daq["lift"].name) == (f"{w}_A", f"{w}_B")
         got[w] = p.key
     assert got == {w: pos for w, pos in want.items() if pos != "X"}
-    assert all(p.sensor_id is None for p in m.positions)
+    ids = {p.key: p.sensor_id for p in m.positions}       # the user's numbering, 11-05
+    assert ids["LFU"] == 1 and ids["RBL"] == 12 and ids["RFU"] == 14
     assert m.uncalibrated() == [p.key for p in m.positions]
     names = m.whisker_names()
     assert names[6] == "LFU (W7)" and names[2] == "W3"

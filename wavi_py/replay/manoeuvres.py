@@ -74,6 +74,10 @@ Per event:
   flight at 100-600 uV);
 - quality: ADC-flagged scans and railed gauges in the window, baseline_clean.
 
+The positions and the reference come from the recording's own dome map
+(``replay/dome_maps.dome_map_for``: embedded, else the history entry at its
+start); the sidecar's ``recording.dome_map`` / ``whisker_set`` name it.
+
 Sidecar: ``write_manoeuvres_for`` (``tools/make_manoeuvres.py`` for old
 recordings and for a folder that is not ours: ``--out``), ``is_current``,
 ``write_manoeuvres_in_background`` (as the card, ``replay/card.py``);
@@ -97,22 +101,21 @@ import numpy as np
 from scipy.optimize import curve_fit
 from scipy.signal import butter, savgol_filter, sosfiltfilt
 
+from wavi_py.daq.vehicle import (AXES, DOF, FULL_US, MIX, MOTOR_DIRECTION, NEUTRAL_US,
+                                 RC_CHANNEL)
 from wavi_py.replay import recname
 from wavi_py.replay.events import ARDUSUB_MODES, AUTOPILOT, MAV_MODE_FLAG_SAFETY_ARMED
 from wavi_py.replay.index import K, RecordingIndex, _int_after, cache_paths
 from wavi_py.replay.store import RecordingStore
+from wavi_py.replay.dome_maps import dome_map_for
 from whisker_link.dome_map import DEFAULT_MAP, DomeMap
 from whisker_link.esp32_frame import MV_PER_CODE
 
-VERSION = 1
+VERSION = 2                     # 2: the recording's own dome map (replay/dome_maps.py)
 SUFFIX = ".manoeuvres.json"
 MADE_BY = f"wavi_py manoeuvres v{VERSION}"
 
 FS_HZ = 50.0                    # the analysis grid
-AXES = ("surge", "sway", "heave", "yaw")
-RC_CHANNEL = {"surge": 5, "sway": 6, "heave": 3, "yaw": 4}
-NEUTRAL_US = 1500
-FULL_US = 400                   # full stick (after the pilot gain): u = +-1
 REST_TOL = 0.02                 # |u| at or below: rest (RC rests at exactly 1500 behind the
                                 # pilot's stick deadband; the tolerance is a legacy fallback)
 STEP = 0.08                     # a held level moving more than this: a new segment
@@ -135,15 +138,8 @@ DEPTH_NEG_CM = 10.0             # depth below -this anywhere: the surface refere
 LEVEL_DEG = 10.0                # |roll| and |pitch| under this: level
 RAIL_MV = 8388607 * MV_PER_CODE * 0.999
 
-# ArduSub AP_Motors6DOF, SUB_FRAME_VECTORED_6DOF (the BlueROV2 Heavy), per motor
-# 1..8: roll, pitch, yaw, throttle (heave), forward (surge), lateral (sway) factors
-DOF = ("roll", "pitch", "yaw", "heave", "surge", "sway")
-MIX = np.array([[0, 0, 1, 0, -1, 1], [0, 0, -1, 0, -1, -1], [0, 0, -1, 0, 1, 1],
-                [0, 0, 1, 0, 1, -1], [1, -1, 0, -1, 0, 0], [-1, -1, 0, -1, 0, 0],
-                [1, 1, 0, -1, 0, 0], [-1, 1, 0, -1, 0, 0]], dtype=np.float64)
-# MOT_n_DIRECTION of this vehicle (not in the recordings): the sign of each servo's
-# correlation with the mixed RC demand, the same on every 2026-11-05 run
-MOTOR_DIRECTION = (-1, -1, 1, 1, -1, 1, 1, -1)
+# the stick axes, ArduSub's BlueROV2 Heavy mix and this vehicle's motor directions:
+# daq/vehicle.py (AXES, RC_CHANNEL, NEUTRAL_US, FULL_US, DOF, MIX, MOTOR_DIRECTION)
 MOTION = ("yaw_rate_dps", "roll_rate_dps", "pitch_rate_dps", "depth_rate_cms",
           "acc_x", "acc_y", "acc_z")
 # a response smaller than this (or than 3x the scatter before) gets no rise time
@@ -904,6 +900,8 @@ def extract(fl: Flight, dome: Optional[DomeMap] = None) -> dict:
             "tag": rn.tag if rn else "", "made_by": MADE_BY, "constants": constants(),
             "recording": {**fl.meta, "armed_s": _f(am.sum() / FS_HZ),
                           "rest": rest, "reference": pp.ref_names,
+                          "dome_map": dome.id if dome is not None else None,
+                          "whisker_set": dome.whisker_set if dome is not None else None,
                           "depth_min_cm": _f(pp.depth_min), "depth_ok": pp.depth_ok,
                           "positions": [k for k, _ in pp.positions],
                           "mix_check": mix_check(fl, segs)},
@@ -968,7 +966,7 @@ def write_manoeuvres_for(recording: Union[str, Path], out_dir: Union[str, Path, 
     t0 = time.perf_counter()
     fl = load_flight(rec, cache=cache)
     t1 = time.perf_counter()
-    doc = extract(fl, dome)
+    doc = extract(fl, dome if dome is not None else dome_map_for(rec))
     t2 = time.perf_counter()
     if out_dir is not None:
         Path(out_dir).mkdir(parents=True, exist_ok=True)
