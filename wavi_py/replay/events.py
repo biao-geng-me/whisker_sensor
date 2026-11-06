@@ -13,7 +13,11 @@ can follow a live stream. It collects:
 - whisker scan sequence gaps (and a restart of the counter: a reboot);
 - increments of the ESP32 / ADC error counters in the 1 Hz status, summed
   over ``REPEAT_S`` into one entry;
-- the external pressure (SCALED_PRESSURE2, the Bar30) for depth.
+- the external pressure (SCALED_PRESSURE2, the Bar30) for depth;
+- the mode changes ``mode_changes`` [(t, name)] (the timeline's mode band) and
+  the vehicle telemetry the Analysis window plots (``rov``, a
+  ``replay/rov.RovTrack``: pilot commands, thrusters, current, climb, heading,
+  vibration, pilot gain).
 
 Depth = (pressure - surface) / (rho g), with the surface pressure the median
 over the first ``SURFACE_S`` of disarmed time (a vehicle sits at the surface
@@ -39,6 +43,8 @@ from dataclasses import asdict, dataclass, replace
 from typing import Callable, Optional
 
 import numpy as np
+
+from wavi_py.replay.rov import TYPES as ROV_TYPES, RovData, RovTrack, rov_data
 
 REPEAT_S = 10.0                 # repeats / counter increments within this go into one entry
 SURFACE_S = 10.0                # disarmed time the surface pressure is the median of
@@ -99,6 +105,8 @@ class EventTracker:
         self._surface_t0: Optional[float] = None
         self._surface_dt = 0.0
         self._last_press_t: Optional[float] = None
+        self.mode_changes: list[tuple[float, str]] = []
+        self.rov = RovTrack()
 
     # ----- feeding
 
@@ -120,6 +128,8 @@ class EventTracker:
                 self._statustext(t, d)
             elif mtype == "SCALED_PRESSURE2":
                 self._pressure(t, d)
+            elif mtype in ROV_TYPES or mtype == "PARAM_VALUE":
+                self.rov.feed(ev)
         elif k == "wsk":
             if "seq" in ev:
                 self._wsk_seq(t, int(ev["seq"]))
@@ -172,6 +182,7 @@ class EventTracker:
             self.events.append(Event(t, "mode", name if self._mode is None
                                      else f"{ARDUSUB_MODES.get(int(self._mode), self._mode)}"
                                      f" -> {name}"))
+            self.mode_changes.append((t, name))
             self._mode = mode
 
     def _statustext(self, t: float, d: dict) -> None:
@@ -261,6 +272,10 @@ class TimelineQueries:
     def depth(self, rho: float = WATER_DENSITY) -> tuple[np.ndarray, np.ndarray]:
         raise NotImplementedError
 
+    def rov(self) -> RovData:
+        """The vehicle telemetry (``replay/rov.py``), session seconds; empty without."""
+        return RovData()
+
     def depth_at(self, t_sess: float, rho: float = WATER_DENSITY) -> Optional[float]:
         t, d = self.depth(rho)
         if not len(t):
@@ -348,3 +363,8 @@ class LiveTimeline(TimelineQueries):
         with self._tr.lock:
             t, d = self._tr.depth_cm(rho)
         return t - self._t0(), d
+
+    def rov(self) -> RovData:
+        with self._tr.lock:
+            modes = list(self._tr.mode_changes)
+        return rov_data(self._tr.rov, self._t0(), modes, self.armed_spans, self.duration)

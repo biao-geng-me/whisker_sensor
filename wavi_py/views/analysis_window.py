@@ -73,7 +73,7 @@ from PyQt6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication, 
 import numpy as np
 import pyqtgraph as pg
 
-from wavi_py.daq.analysis import DEPTH, Dataset, Selection, Variable
+from wavi_py.daq.analysis import DEPTH, ROV, Dataset, Selection, Variable
 from wavi_py.daq.series import IMU, WSK
 from wavi_py.views.analysis_cells import (CursorCell, CursorLines, SpecgramCell, SpectrumCell,
                                           WaveCell, shades_of)
@@ -418,7 +418,7 @@ class AnalysisWindow(ViewWindow):
         self._live_timer.timeout.connect(self._poll_source)
         if replay is not None:
             replay.positionChanged.connect(self._on_position)
-            replay.sourceChanged.connect(self._request)
+            replay.sourceChanged.connect(self._on_data_changed)   # the ROV group comes and goes
         model.added.connect(self._on_added)
         model.removed.connect(self._on_removed)
         model.changed.connect(self._on_changed)
@@ -504,6 +504,8 @@ class AnalysisWindow(ViewWindow):
 
     def set_checked(self, keys: Sequence[str], on: bool = True, column: int = PLOTS) -> None:
         keys = set(keys)
+        if column == PLOTS:                           # timeline-only variables have no Plots box
+            keys -= {v.key for v in self._vars if not v.plots}
         self.var_tree.blockSignals(True)
         for it in self._var_leaves():
             if it.data(0, _KEY) in keys:
@@ -689,9 +691,11 @@ class AnalysisWindow(ViewWindow):
                 it.setCheckState(col, Qt.CheckState.Unchecked)
             return it
         tops = {WSK: node(self.var_tree, "Whiskers"), IMU: node(self.var_tree, "IMU")}
+        if any(v.source == ROV for v in new):
+            tops[ROV] = node(self.var_tree, "ROV")
         groups: dict = {}
         for v in new:
-            side = WSK if v.source == WSK else IMU
+            side = v.source if v.source in (WSK, ROV) else IMU
             top = tops[side]
             if v.source == DEPTH:
                 parent = top
@@ -699,15 +703,17 @@ class AnalysisWindow(ViewWindow):
                 parent = groups.get((side, v.group))
                 if parent is None:
                     parent = groups[(side, v.group)] = node(top, v.group)
-            it = QTreeWidgetItem(parent, [v.label.split(" ")[-1] if v.source != DEPTH else v.label])
+            text = v.label if v.source == ROV else \
+                v.label.split(" ")[-1] if v.source != DEPTH else v.label
+            it = QTreeWidgetItem(parent, [text])
             it.setFlags(flags)
             it.setData(0, _KEY, v.key)
-            it.setToolTip(0, f"{v.label} ({v.unit})")
-            for col in (PLOTS, TIMELINE):
+            it.setToolTip(0, f"{v.label} ({v.unit})" if v.plots else f"{v.label}: timeline only")
+            for col in (PLOTS, TIMELINE) if v.plots else (TIMELINE,):
                 it.setCheckState(col, Qt.CheckState.Checked if v.key in keep[col]
                                  else Qt.CheckState.Unchecked)
-        tops[IMU].setExpanded(True)
-        tops[WSK].setExpanded(True)
+        for top in tops.values():
+            top.setExpanded(True)
         self.var_tree.blockSignals(False)
         self._fix_parents()
 
@@ -974,6 +980,7 @@ class AnalysisWindow(ViewWindow):
     def _poll_source(self) -> None:
         """Live: the timeline follows the buffers (once a second, while shown)."""
         if self.replay is None or not self.replay.active:
+            self._rebuild_vars()                    # live telemetry may have started
             self._request()
 
     def _render(self) -> None:

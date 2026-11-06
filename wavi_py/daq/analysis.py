@@ -7,11 +7,16 @@ on; adjusting it is limited to what was copied). The selection model and its
 drawing are in ``views/selections.py``.
 
 A ``Variable`` is one curve's worth of data by key: ``wsk:<col>`` (a gauge, the
-series' stream-order column), ``imu:<col>`` (``IMU_CHANNELS``) or ``depth`` (the
-source's depth from the external pressure, which is not in the series). Each has
-a unit group, the rows of Compare (and of C2's Spectrum): mV, mg, mrad/s, deg,
-cm, as the IMU window shows them (accel and gyro as the series has them, the
-attitude's rad in degrees). The gauges are
+series' stream-order column), ``imu:<col>`` (``IMU_CHANNELS``), ``depth`` (the
+source's depth from the external pressure, which is not in the series) or
+``rov:<name>`` (the vehicle telemetry, ``replay/rov.py``: pilot commands,
+thrusters, current, climb, heading, vibration; not in the series either, so
+read like the depth). Each has a unit group, the rows of the waveform and the
+spectrum: mV, mg, mrad/s, deg, cm, as the IMU window shows them (accel and gyro
+as the series has them, the attitude's rad in degrees), then the ROV's: pilot
+and thrust (-1 .. +1), A, m/s, hdg (deg, unwrapped), m/s². ``rov:mode`` (the
+mode spans, armed and the pilot gain) is a timeline band only (``plots``
+False): it is not a curve. The gauges are
 drawn as the Line window draws them, (raw - V0) * scale, so the curves line up
 with what was selected.
 
@@ -48,9 +53,13 @@ from typing import Optional, Sequence
 import numpy as np
 
 from wavi_py.daq.series import IMU, WSK, ArraySeries, Series, peak_decimate, span_index
+from wavi_py.replay.rov import MODE_KEY, RovData
 
 DEPTH = "depth"
-UNIT_GROUPS = ("mV", "mg", "mrad/s", "deg", "cm")      # Compare's rows, top to bottom
+ROV = "rov"
+# the rows, top to bottom ("mode" is the timeline's band row)
+UNIT_GROUPS = ("mV", "mg", "mrad/s", "deg", "cm", "mode", "pilot", "thrust", "A", "m/s", "hdg",
+               "m/s²")
 _RAD_DEG = 180.0 / math.pi
 
 # (IMU column, group label, axis label, unit, factor): the IMU window's units
@@ -65,11 +74,19 @@ IMU_VARS = (
 
 @dataclass
 class SelSource:
-    """What a selection reads: a ``Series`` and the depth ``(t, cm)`` (may be empty).
-    ``snapshot``: a copy of the live buffers (one version: Despike does not apply)."""
+    """What a selection reads: a ``Series``, the depth ``(t, cm)`` (may be empty) and
+    the vehicle telemetry (``RovData``, may be empty). ``snapshot``: a copy of the
+    live buffers (one version: Despike does not apply)."""
     series: Series
     depth: tuple = (np.empty(0), np.empty(0))
     snapshot: bool = False
+    rov: RovData = field(default_factory=RovData)
+
+    def aux(self, var: "Variable") -> tuple[np.ndarray, np.ndarray]:
+        """(t, y) of a variable that is not in the series (depth, ROV)."""
+        if var.source == DEPTH:
+            return self.depth
+        return self.rov.series(var.key)
 
     def extent(self) -> Optional[tuple[float, float]]:
         """The span the selection can cover: whisker and IMU data together."""
@@ -79,7 +96,7 @@ class SelSource:
         return min(e[0] for e in ex), max(e[1] for e in ex)
 
 
-def snapshot_of(series: Series, depth=None) -> SelSource:
+def snapshot_of(series: Series, depth=None, rov: Optional[RovData] = None) -> SelSource:
     """A copy of ``series`` (the live buffers: they move on) as a ``SelSource``."""
     data, names = {}, {}
     for src in (WSK, IMU):
@@ -90,7 +107,8 @@ def snapshot_of(series: Series, depth=None) -> SelSource:
         names[src] = series.names(src)
     d = (np.empty(0), np.empty(0)) if depth is None else \
         (np.array(depth[0], dtype=float), np.array(depth[1], dtype=float))
-    return SelSource(ArraySeries(data, names), d, snapshot=True)
+    return SelSource(ArraySeries(data, names), d, snapshot=True,
+                     rov=rov.copy() if rov else RovData())
 
 
 @dataclass(eq=False)
@@ -121,10 +139,11 @@ class Variable:
     key: str                 # wsk:<col>, imu:<col>, depth
     label: str               # "W3 A", "Accel x", "Depth"
     unit: str                # one of UNIT_GROUPS
-    source: str              # WSK, IMU or DEPTH
+    source: str              # WSK, IMU, DEPTH or ROV
     col: int = 0
     factor: float = 1.0
     group: str = ""          # the tree's parent: the sensor name, "Accel", ...
+    plots: bool = True       # False: timeline only (the mode band)
 
 
 def whisker_variables(nch: int, sensor_names: Sequence[str]) -> list[Variable]:
@@ -143,6 +162,22 @@ def imu_variables(depth: bool = True) -> list[Variable]:
     if depth:
         out.append(Variable(DEPTH, "Depth", "cm", DEPTH, 0, 1.0, "Depth"))
     return out
+
+
+def rov_variables(rov: Optional[RovData]) -> list[Variable]:
+    """The vehicle telemetry ``rov`` has (``RovData.variables``); none without."""
+    if not rov:
+        return []
+    return [Variable(k, lab, u, ROV, 0, 1.0, g, plots=(k != MODE_KEY))
+            for k, lab, u, g in rov.variables()]
+
+
+def _aux_samples(t: np.ndarray, y: np.ndarray, t0: float, t1: float):
+    """The samples of an aux series in [t0, t1], NaN (not sent) dropped."""
+    i0, i1 = span_index(t, t0, t1)
+    t, y = np.asarray(t[i0:i1], float), np.asarray(y[i0:i1], float)
+    ok = np.isfinite(y)
+    return (t, y) if ok.all() else (t[ok], y[ok])
 
 
 def envelope_within(series: Series, source: str, cols, t0: float, t1: float, n: int,
@@ -207,6 +242,8 @@ class Dataset:
         """Columns ``source`` has in this selection's series (0: none)."""
         if source == DEPTH:
             return len(sel.source.depth[0])
+        if source == ROV:
+            return int(bool(sel.source.rov))
         return len(sel.source.series.names(source))
 
     def traces(self, n_px: int) -> list[Trace]:
@@ -230,9 +267,11 @@ class Dataset:
                 for j, v in enumerate(want):
                     out.append(Trace(sel, v, t, self._convert(v, y[:, j])))
             for v in self.variables:
-                if v.source == DEPTH and self._have(sel, DEPTH):
-                    dt, dd = sel.source.depth
+                if v.source in (DEPTH, ROV) and v.plots and self._have(sel, v.source):
+                    dt, dd = sel.source.aux(v)
                     i0, i1 = span_index(dt, sel.t0, sel.t1)
+                    if i1 <= i0:
+                        continue
                     t, y = peak_decimate(dt[i0:i1], np.asarray(dd[i0:i1], float)[:, None],
                                          max(1, (i1 - i0) // max(1, n)))
                     out.append(Trace(sel, v, t - sel.t0, y[:, 0]))
@@ -247,6 +286,10 @@ class Dataset:
             dt, dd = sel.source.depth
             i0, i1 = span_index(dt, t0, t1)
             return np.array(dt[i0:i1]), np.asarray(dd[i0:i1], dtype=float)
+        if var.source == ROV:
+            if not var.plots:
+                return np.empty(0), np.empty(0)
+            return _aux_samples(*sel.source.rov.series(var.key), t0, t1)
         ser = sel.source.series
         names = ser.names(var.source)
         if var.col >= len(names):
@@ -315,13 +358,14 @@ class Dataset:
                                 self.despike and src == WSK)
             for j, v in enumerate(want):
                 out.append(Trace(None, v, t, self._convert(v, y[:, j])))
-        dt, dd = source.depth
-        if len(dt) and any(v.source == DEPTH for v in self.variables):
+        for v in self.variables:
+            if v.source not in (DEPTH, ROV) or not v.plots:
+                continue
+            dt, dd = source.aux(v)
             i0, i1 = span_index(dt, t0, t1)
             if i1 > i0:
                 t, y = peak_decimate(dt[i0:i1], np.asarray(dd[i0:i1], float)[:, None],
                                      max(1, (i1 - i0) // max(1, n_px)))
-                v = next(v for v in self.variables if v.source == DEPTH)
                 out.append(Trace(None, v, t, y[:, 0]))
         return out
 

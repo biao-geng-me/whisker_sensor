@@ -91,7 +91,8 @@ from wavi_py.config import (
     DEFAULT_VIEW_SPAN_S,
     MIN_REC_LEN_S,
 )
-from wavi_py.daq.analysis import SelSource, imu_variables, snapshot_of, whisker_variables
+from wavi_py.daq.analysis import (SelSource, imu_variables, rov_variables, snapshot_of,
+                                  whisker_variables)
 from wavi_py.daq.despike import Despiker
 from wavi_py.daq.ring import Window
 from wavi_py.daq.series import IMU, WSK, ArraySeries, Series
@@ -1327,8 +1328,9 @@ class MainWindow(QMainWindow):
         unpaused there is none."""
         if self._store is not None:
             src = self._replay.source
-            return SelSource(self._store, src.depth() if src is not None else
-                             (np.empty(0), np.empty(0)))
+            if src is None:
+                return SelSource(self._store)
+            return SelSource(self._store, src.depth(), rov=src.rov())
         if self._replaying:
             return "the whole-recording store is still loading"
         if self._client is None:
@@ -1341,8 +1343,9 @@ class MainWindow(QMainWindow):
         if self._store is None and self._client is None:
             return None
         src = self._replay.source
-        return SelSource(self.series(), src.depth() if src is not None
-                         else (np.empty(0), np.empty(0)))
+        if src is None:
+            return SelSource(self.series())
+        return SelSource(self.series(), src.depth(), rov=src.rov())
 
     def _freeze_selections(self, on: bool) -> None:
         """Live Pause: copy the buffers (and the depth so far) for the selections made
@@ -1353,7 +1356,7 @@ class MainWindow(QMainWindow):
             return
         src = self._replay.source
         self._selections.freeze(snapshot_of(self.series(), src.depth() if src is not None
-                                            else None))
+                                            else None, src.rov() if src is not None else None))
 
     def _line_vars_at(self, plot, scene_pos) -> list[str]:
         """The gauges of the Line plot a region menu opened in (tile, stacked row,
@@ -1379,8 +1382,10 @@ class MainWindow(QMainWindow):
 
     def analysis_variables(self) -> list:
         """The variables an Analysis window lists: every gauge (by the Line window's
-        sensor names), the IMU and depth."""
-        return whisker_variables(self._nch, self._line_view._names) + imu_variables()
+        sensor names), the IMU and depth, and the vehicle telemetry the source has."""
+        src = self._replay.source
+        return (whisker_variables(self._nch, self._line_view._names) + imu_variables()
+                + rov_variables(src.rov() if src is not None else None))
 
     def new_analysis_window(self, sel=None, keys=()) -> AnalysisWindow:
         """A new Analysis window (a closed one is reused): ``sel`` included and
