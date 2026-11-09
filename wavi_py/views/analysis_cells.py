@@ -24,7 +24,11 @@ the selections in their colour (or line style). Rows are unit groups (mV, mg,
 mrad/s, deg, cm, and the ROV's).
 
 - ``WaveCell`` (top left, the former Compare tab): relative time, min / max
-  decimated to the plot width (``Dataset.traces``). With the window's Select on,
+  decimated to the plot width (``Dataset.traces``): following the data, each
+  whole selection; zoomed or panned by hand, only the span shown plus one width
+  each side, re-read when the view leaves it or zooms ``RELOAD_ZOOM`` past it
+  (``_view``), so a zoom gets the detail back down to the raw samples. F fits
+  X back to the whole selections. With the window's Select on,
   a drag makes another sub-range (``SubBand``: a hatched band, numbered s1, s2,
   ... in every row, a different hatch each; its edges and its body drag,
   right-click or Del deletes it; the cell owns them: ``subs``,
@@ -82,7 +86,7 @@ from __future__ import annotations
 from typing import Callable, Optional
 
 import numpy as np
-from PyQt6.QtCore import QPointF, Qt, pyqtSignal
+from PyQt6.QtCore import QPointF, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QBrush, QColor
 from PyQt6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QHBoxLayout, QLabel,
                              QSizePolicy, QStackedWidget, QToolButton, QVBoxLayout, QWidget)
@@ -754,6 +758,9 @@ class SubBand(pg.LinearRegionItem):
         self._owner.hovered_sub = None if ev.isExit() else self.number
 
 
+RELOAD_ZOOM = 1.5               # the waveform re-reads once zoomed this much past the read
+
+
 class WaveCell(_RowsCell):
     """The waveform (see the module doc). ``selecting()``: the window's Select is on;
     ``subsChanged([(number, a, b), ...])``; ``subChanged(the first (a, b) or None)``
@@ -776,6 +783,7 @@ class WaveCell(_RowsCell):
         self._making: Optional[int] = None           # the sub-range a Select drag is making
         self.hovered_sub: Optional[int] = None
         self._bands: dict[tuple, SubBand] = {}       # (row unit, number) -> its band
+        self._loaded: Optional[tuple] = None         # zoomed: the span read (lo, hi, w)
         self.title = self._add_title(
             "Waveform · click a trace: the spectrogram shows it (drawn thick) · drag the teal"
             " line to scrub the plane map")
@@ -793,6 +801,7 @@ class WaveCell(_RowsCell):
         if first is not None:
             first.getViewBox().sigXRangeChanged.connect(
                 lambda _vb, r: self.xChanged.emit(float(r[0]), float(r[1])))
+            first.getViewBox().sigXRangeChanged.connect(self._on_x)
 
     def set_x(self, lo: float, hi: float) -> None:
         """The time range from the spectrogram (the same span, whatever the widths)."""
@@ -971,6 +980,11 @@ class WaveCell(_RowsCell):
         finally:
             self.blockSignals(False)
 
+    def reset_x(self) -> None:
+        """X follows the data again (the whole selections, read whole)."""
+        self._auto = True
+        self._loaded = None
+
     def fit_x(self, longest: float) -> None:
         """X from 0 to the longest selection, unless zoomed by hand."""
         if self._auto and longest > 0:
@@ -978,22 +992,55 @@ class WaveCell(_RowsCell):
             if p is not None:
                 p.setXRange(0.0, longest, padding=0.01)
 
+    def _view(self) -> Optional[tuple[float, float, float]]:
+        """What ``Dataset.traces`` reads (``view``): None while X follows the data
+        (each whole selection); zoomed / panned by hand, the span shown plus one
+        width each side (``_loaded``), kept while the view stays inside it and its
+        width within ``RELOAD_ZOOM`` of the one read for (so a small pan reads
+        nothing)."""
+        if self._auto:
+            self._loaded = None
+            return None
+        p = self.x_plot()
+        if p is None:
+            return None
+        x0, x1 = p.getViewBox().viewRange()[0]
+        w = max(x1 - x0, 1e-9)
+        ld = self._loaded
+        if ld is not None and ld[0] <= x0 and x1 <= ld[1] and \
+                1 / RELOAD_ZOOM <= ld[2] / w <= RELOAD_ZOOM:
+            return ld
+        self._loaded = (x0 - w, x1 + w, w)
+        return self._loaded
+
+    def _on_x(self, *_a) -> None:
+        """X moved: redraw if the span read no longer covers it (after the manual
+        flag lands: pyqtgraph sends the range before ``sigRangeChangedManually``)."""
+        QTimer.singleShot(0, self._check_view)
+
+    def _check_view(self) -> None:
+        if self._auto or not self.rows:
+            return
+        if self._view() != (self._last[-1] if self._last else None):
+            self.changed.emit()
+
     def render(self, ds: Dataset, shades: dict) -> None:
         units = self._units(ds)
         first = self.rows[units[0]]
         n_px = max(50, int(first.getViewBox().width()) or 600)
         v0 = None if ds.v0 is None else np.asarray(ds.v0).tobytes()
+        view = self._view()
         inputs = (n_px, tuple((s.number, s.t0, s.t1, id(s.source)) for s in ds.selections),
                   tuple(v.key for v in ds.variables), ds.despike, v0, ds.scale,
                   tuple(sorted(shades.items(), key=lambda kv: kv[0])), self._auto,
-                  self.color_by, id(self.grid))
+                  self.color_by, id(self.grid), view)
         if inputs == self._last:
             return
         self._last = inputs
         self.renders += 1
         self._index(ds)
         seen = set()
-        for tr in ds.traces(n_px):
+        for tr in ds.traces(n_px, view):
             seen.add((tr.sel.number, tr.var.key))
             self._curve(tr.sel, tr.var, shades[tr.var.key]).setData(tr.t, tr.y)
         self._drop(seen)

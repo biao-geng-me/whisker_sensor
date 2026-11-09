@@ -573,7 +573,7 @@ class AnalysisWindow(ViewWindow):
         self.compare.subsChanged.connect(self._on_subs)
         self.compare.clicked.connect(self._on_wave_click)
         self.spectrogram.clicked.connect(self.add_cursor)
-        for cell in (self.spectrum, self.spectrogram, self.timeline):
+        for cell in (self.compare, self.spectrum, self.spectrogram, self.timeline):
             cell.changed.connect(self._request)
         self.grid.resized.connect(self._on_resized)
         self.spectrogram.plot.getViewBox().sigRangeChangedManually.connect(
@@ -1385,6 +1385,15 @@ class AnalysisWindow(ViewWindow):
         cell's plots). The waveform's rows and the spectrogram share x, so they follow."""
         cell, plot = self._target()
         if cell is None:
+            return
+        if cell is self.compare and self.mode != EVENTS:
+            # the waveform holds only the span in view once zoomed: X back to the
+            # whole selections (it reads them whole again), Y fits
+            cell.reset_x()
+            self._fit_x(max((s.duration for s in self.included), default=0.0))
+            for p in ([plot] if plot is not None else cell.nav_plots()):
+                p.enableAutoRange(y=True)
+            self._request()
             return
         for p in ([plot] if plot is not None else cell.nav_plots()):
             p.getViewBox().autoRange(padding=0.02)

@@ -138,3 +138,38 @@ def test_timeline_zoom_box_time_only(app, win):
     assert y1[1] - y1[0] > 0.6 * (y0[1] - y0[0])                 # Y not boxed (it auto-fits)
     assert not aw.compare.subs and len(aw.model) == 3             # no selection made
     aw.close()
+
+
+def test_waveform_detail_on_zoom(app, win):
+    """Zoomed by hand, the waveform re-reads the span shown: raw samples, not the
+    whole-selection decimation; a small pan reads nothing; F goes back to whole."""
+    sels = [win._selections.create(0.2, 9.8)]                   # ~2400 samples: decimated
+    aw = win.new_analysis_window(sels[0], ["wsk:0"])
+    aw.resize(1400, 900)
+    aw.show()
+    assert _pump(app, lambda: bool(aw.compare.curves), 3)
+    _pump(app, lambda: False, 0.4)
+    c = aw.compare
+    curve = c.curves[(sels[0].number, "wsk:0")]
+    n_whole = len(curve.getData()[0])
+    raw = sels[0].source.series.get("wsk", [0], sels[0].t0, sels[0].t1)[0]
+    assert n_whole < len(raw)                                   # decimated while whole
+    p = c.x_plot()
+    vb = p.getViewBox()
+    vb.setXRange(1.0, 1.4, padding=0)
+    vb.sigRangeChangedManually.emit([True, False])
+    assert _pump(app, lambda: c._loaded is not None and c._last[-1] == c._loaded, 2)
+    t, _y = curve.getData()
+    inside = t[(t >= 1.0) & (t <= 1.4)]
+    raw_in = raw[(raw - sels[0].zero >= 1.0) & (raw - sels[0].zero <= 1.4)]
+    assert len(inside) >= len(raw_in) - 2                       # every sample in view
+    assert t.min() >= 1.0 - 0.41 and t.max() <= 1.4 + 0.41      # only the view +- a width
+    renders = c.renders
+    vb.setXRange(1.05, 1.45, padding=0)                         # small pan: nothing re-read
+    _pump(app, lambda: False, 0.2)
+    assert c.renders == renders
+    aw._target = lambda: (c, None)
+    aw._fit_plot()
+    assert _pump(app, lambda: c._auto and c._last[-1] is None, 2)
+    assert len(curve.getData()[0]) == n_whole
+    aw.close()

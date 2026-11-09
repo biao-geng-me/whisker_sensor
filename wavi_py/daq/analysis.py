@@ -598,18 +598,31 @@ class Dataset:
             out.append(Trace(sel, v, t - zero, y[:, 0]))
         return out
 
-    def traces(self, n_px: int) -> list[Trace]:
+    def traces(self, n_px: int, view: Optional[tuple[float, float, float]] = None) -> list[Trace]:
         """Compare's curves: time relative to each selection's zero, decimated to
         ~``n_px`` columns over the longest selection (a shorter one gets
-        proportionally fewer); at most ``max_traces`` selections (``drawn``)."""
+        proportionally fewer); at most ``max_traces`` selections (``drawn``).
+        ``view`` (lo, hi, w): the waveform zoomed by hand: only [lo, hi] of each
+        selection (relative time) at ``n_px`` columns per ``w`` seconds, so a zoom
+        gets the detail back (raw samples once there are fewer than columns); a
+        selection outside it gets a token 8 columns of the whole."""
         sels = self.drawn()
         longest = max((s.duration for s in sels), default=0.0)
         out: list[Trace] = []
         for sel in sels:
             if sel.duration <= 0:
                 continue
-            n = max(8, int(round(n_px * sel.duration / longest))) if longest > 0 else n_px
-            out += self._curves(sel, sel.source, sel.t0, sel.t1, n, sel.zero)
+            if view is None:
+                a, b = sel.t0, sel.t1
+                n = max(8, int(round(n_px * sel.duration / longest))) if longest > 0 else n_px
+            else:
+                lo, hi, w = view
+                a, b = max(sel.t0, sel.zero + lo), min(sel.t1, sel.zero + hi)
+                if b > a:
+                    n = max(8, int(round(n_px * (b - a) / max(w, 1e-9))))
+                else:
+                    a, b, n = sel.t0, sel.t1, 8
+            out += self._curves(sel, sel.source, a, b, n, sel.zero)
         return out
 
     def samples(self, sel: Selection, var: Variable,
