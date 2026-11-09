@@ -300,7 +300,7 @@ def test_region_menu_spectral_entries(app, win):
     assert aw.spectrum.width() > 1                          # back
     sel2 = w._selections.create(5.0, 7.0)
     w._selections.request("spectrogram", sel2, [])
-    assert w._analysis[-1] is aw and aw.spectrogram.pick == (sel2.number, "wsk:0")
+    assert w._analysis[-1] is aw and aw.spectrogram.pick == (sel2.number, aw.view_keys(["wsk:0"])[0])   # W1 A as its position
     # the menu's entries are enabled now
     w._toggle_line.setChecked(True)
     _pump(app, lambda: False, 0.2)

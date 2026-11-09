@@ -66,8 +66,10 @@ def test_plane_map_head_and_paths(app, win):
     from wavi_py.views.analysis_window import GAUGES_VIEW, PLOTS, POSITIONS_VIEW
     aw, sels = _window(app, win, n_sel=2, keys=("wsk:2",))
     g = aw.grids[PLOTS]
-    # on by default, in the gauge view too (the same cells, A / B chips)
-    assert aw.plane_box.isChecked() and g.map and aw.grid_view.currentText() == GAUGES_VIEW
+    # on by default (D / L view by default), in the gauge view too (the same cells, A / B chips)
+    assert aw.grid_view.currentText() == POSITIONS_VIEW
+    aw.grid_view.setCurrentText(GAUGES_VIEW)
+    assert aw.plane_box.isChecked() and g.map
     assert _pump(app, lambda: g.overlay is not None and bool(g.overlay.head), 5)
     ov = g.overlay
     positions = _positions(g)

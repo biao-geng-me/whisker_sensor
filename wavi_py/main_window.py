@@ -1599,13 +1599,15 @@ class MainWindow(QMainWindow):
         """A region's menu: Compare / Spectrum / Spectrogram in the newest focused
         Analysis window (a new one if none is open), on that tab; or a new window."""
         tab = {COMPARE: "Compare", SPECTRUM: "Spectrum", SPECTROGRAM: "Spectrogram"}.get(action)
+        # the gauges of the Line plot as the window's grid shows them (by position:
+        # the drag / lift of where each is mounted)
         if action == NEW_WINDOW or not self._analysis:
-            win = self.new_analysis_window(sel, keys)
+            win = self.new_analysis_window(sel)
         else:
             win = self._analysis[-1]
             win.include(sel)
-            win.set_checked(keys)
             bring_to_front(win)
+        win.set_checked(win.view_keys(keys))
         if tab is not None:
             win.set_tab(tab)
 

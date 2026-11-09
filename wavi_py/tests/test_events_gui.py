@@ -255,7 +255,7 @@ def test_selections_mode_is_unchanged(app, tmp_path):
         assert w.timeline.isVisible() and w.sel_list.isVisible()
         assert "Analysis 1" in w.windowTitle()
         tops = [w.var_tree.topLevelItem(i).text(0) for i in range(w.var_tree.topLevelItemCount())]
-        assert tops == ["IMU", "ROV"] and not w.grid_positions
+        assert tops == ["IMU", "ROV"] and w.grid_positions          # drag / lift by default
         assert not any(k.startswith(("pos:", "rov:")) for k in w.checked_keys())
     finally:
         w.close()

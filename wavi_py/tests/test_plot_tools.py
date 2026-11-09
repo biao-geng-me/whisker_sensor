@@ -173,3 +173,23 @@ def test_waveform_detail_on_zoom(app, win):
     assert _pump(app, lambda: c._auto and c._last[-1] is None, 2)
     assert len(curve.getData()[0]) == n_whole
     aw.close()
+
+
+def test_dl_default_and_region_keys(app, win):
+    """The grids open by position (drag / lift); a Line region's gauges arrive as
+    the positions they are mounted at."""
+    from wavi_py.views.analysis_window import GAUGES_VIEW, POSITIONS_VIEW
+    from wavi_py.views.selections import COMPARE
+    sel = win._selections.create(1.0, 4.0)
+    win._on_selection_request(COMPARE, sel, ["wsk:10", "wsk:11"])     # W6 A / B
+    aw = win._analysis[-1]
+    assert aw.grid_view.currentText() == POSITIONS_VIEW
+    dm = aw.model.dome_map_fn() or aw._position_map()
+    want = {f"pos:{n}:{ax}" for n in ("LFM", "LFU", "LFL", "LBM", "LBU", "LBL",
+                                       "RFM", "RFU", "RFL", "RBM", "RBU", "RBL")
+            for ax, g in (dm.position(n).daq.items() if dm.position(n) else ())
+            if g.ch in (10, 11)}
+    assert want and set(aw.checked_keys()) == want
+    aw.grid_view.setCurrentText(GAUGES_VIEW)
+    assert aw.view_keys(["wsk:10"]) == ["wsk:10"]
+    aw.close()

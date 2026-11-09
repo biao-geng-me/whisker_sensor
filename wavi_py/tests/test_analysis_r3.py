@@ -247,8 +247,9 @@ def _grid_click(app, g, sensor: int, part: str) -> None:
 
 def test_grid_picker_toggles_and_syncs(app, win):
     from wavi_py.tests.test_analysis_r2 import _window
-    from wavi_py.views.analysis_window import PLOTS, TIMELINE
+    from wavi_py.views.analysis_window import GAUGES_VIEW, PLOTS, TIMELINE
     aw, _sels = _window(app, win, keys=("wsk:2", "wsk:3"))      # a region menu's pre-check
+    aw.grid_view.setCurrentText(GAUGES_VIEW)                     # the A / B picker (D / L default)
     aw.plane_box.setChecked(False)                               # the compact picker
     gp, gt = aw.grids[PLOTS], aw.grids[TIMELINE]
     assert gp.checked == {2, 3}

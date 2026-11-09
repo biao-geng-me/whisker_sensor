@@ -31,7 +31,10 @@ The side panel holds two lists:
   The grids' "by position" view (the combo above them) shows the same cells as
   the dome's positions, the halves drag and lift (``pos:<position>:<axis>``:
   read through each recording's dome map, polarity applied), so one choice
-  reads the same place on the dome in recordings wired differently.
+  reads the same place on the dome in recordings wired differently. It is the
+  default (also for a reused window); a region's Compare / Spectrum /
+  Spectrogram from the Line window checks its gauges as the positions they
+  are mounted at (``view_keys``), so they light up there.
   "Plane map" (next to the combo; on by default, in either view: both views
   are the same cells, only the picker's labels differ) makes the Plots grid the
   Dome view's plane map in small, without taking a cell of the 2x2: every
@@ -131,7 +134,7 @@ from PyQt6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication, 
 import numpy as np
 import pyqtgraph as pg
 
-from wavi_py.daq.analysis import CARD, DEPTH, POS, ROV, Dataset, Selection, Variable
+from wavi_py.daq.analysis import CARD, DEPTH, DOME_ORDER, POS, ROV, Dataset, Selection, Variable
 from wavi_py.daq.plane_overlay import heads, plane_overlay, set_arrows
 from wavi_py.daq.series import IMU, WSK
 from wavi_py.replay import eventset as evs
@@ -518,7 +521,7 @@ class AnalysisWindow(ViewWindow):
         self.grid_view.addItems([GAUGES_VIEW, POSITIONS_VIEW])
         self.grid_view.setToolTip("The grids by gauge (A / B, as wired) or by dome position"
                                   " (drag / lift, through each recording's dome map)")
-        self.grid_view.setCurrentText(POSITIONS_VIEW if mode == EVENTS else GAUGES_VIEW)
+        self.grid_view.setCurrentText(POSITIONS_VIEW)  # drag / lift by default (A / B: wiring)
         self.grid_view.currentTextChanged.connect(lambda _t: self._rebuild_grids())
         self.plane_box = QCheckBox("Plane map")
         self.plane_box.setToolTip(
@@ -759,6 +762,22 @@ class AnalysisWindow(ViewWindow):
             self._tl_edited = True
         self._request()
 
+    def view_keys(self, keys: Sequence[str]) -> list[str]:
+        """``keys`` as the grids show them: by position, a gauge (``wsk:c``) becomes
+        the drag / lift of the position that gauge is mounted at (the replayed
+        recording's dome map, else the window's), with that position's polarity; a
+        gauge at no position stays as it is. By gauge: unchanged."""
+        if not self.grid_positions:
+            return list(keys)
+        dm = self.model.dome_map_fn() or self._position_map()
+        rev: dict = {}
+        for name in DOME_ORDER:
+            p = dm.position(name) if dm is not None else None
+            for ax, g in (p.daq.items() if p is not None else ()):
+                if g.ch is not None:
+                    rev[f"wsk:{int(g.ch)}"] = f"pos:{name}:{ax}"
+        return list(dict.fromkeys(rev.get(k, k) for k in keys))
+
     def set_timeline(self, keys: Sequence[str]) -> None:
         """The Timeline column checks exactly ``keys``."""
         self.set_checked([v.key for v in self._vars], False, TIMELINE)
@@ -801,6 +820,7 @@ class AnalysisWindow(ViewWindow):
         self.set_checked([v.key for v in self._vars], False)
         self.set_checked([v.key for v in self._vars], False, TIMELINE)
         self._tl_edited = False
+        self.grid_view.setCurrentText(POSITIONS_VIEW)
         self.set_color_by(SENSOR if self.mode != EVENTS else SELECTION)
         self.set_sub(None)
         self.cursors = []
