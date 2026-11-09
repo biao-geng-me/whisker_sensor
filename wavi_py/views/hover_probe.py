@@ -16,6 +16,12 @@ its value next to it (labels pushed apart so they do not overlap), plus the x
 at the top of the line. While a readout shows, the cell's legend boxes fade
 (``LEGEND_FADE``): they sit above the data and would hide the labels.
 
+The text boxes are scene items above everything (``TEXT_Z``), not children of
+the row's ViewBox: a ViewBox clips its children, so a box near a row's edge
+(the timeline's short rows) would be cut off or painted over by the row next to
+it. They are placed in scene pixels and flip to the other side of the mouse
+when they would leave the plot area (``_put``).
+
 A cell gives ``probe_items(plot)``: (x name, x unit, x from view, y from view,
 [(label, unit, curve)]): the curves' data are in view coordinates (log10 on a
 log axis), the two functions make them the data's.
@@ -27,7 +33,7 @@ from typing import Optional
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QPointF, Qt
 from PyQt6.QtGui import QColor
 
 HOVER_PX = 8                    # a trace this near the mouse is the hovered one
@@ -37,6 +43,7 @@ PEAK_REL = 0.05                 # a marked peak is at least this fraction of the
 LEGEND_FADE = 0.2               # the legends' opacity while a readout shows
 MAX_PROBE = 16                  # probe labels per row at most
 LABEL_GAP_PX = 15               # probe labels at least this far apart (vertically)
+TEXT_Z = 1e6                    # the boxes: above every row
 _FILL = pg.mkBrush(255, 255, 255, 245)
 _BORDER = pg.mkPen(170, 170, 170)
 
@@ -103,6 +110,39 @@ def nearest_curve(vb: pg.ViewBox, items: list, pt, px: float = HOVER_PX):
     return best
 
 
+def _put(t: pg.TextItem, vb: pg.ViewBox, x: float, y: float, dx: float,
+         anchor: tuple) -> None:
+    """Place the scene-level text ``t`` at view (x, y) of ``vb`` plus ``dx`` px, on
+    the side ``anchor`` says unless it would leave the view's visible area: then on
+    the other side (x: left of the point; y: below / above it)."""
+    sp = vb.mapViewToScene(QPointF(x, y))
+    ax, ay = anchor
+    views = t.scene().views() if t.scene() is not None else []
+    if views:
+        v = views[0]
+        vis = v.mapToScene(v.viewport().rect()).boundingRect()
+        br = t.textItem.boundingRect()
+        w, h = br.width(), br.height()
+        if ax == 0 and sp.x() + dx + w > vis.right():
+            ax, dx = 1, -dx
+        if ay == 1 and sp.y() - h < vis.top():
+            ay = 0
+        elif ay == 0 and sp.y() + h > vis.bottom():
+            ay = 1
+    t.setAnchor((ax, ay))
+    t.setPos(sp.x() + dx, sp.y())
+
+
+def _text(plot: pg.PlotItem, anchor: tuple) -> pg.TextItem:
+    t = pg.TextItem(color=(20, 20, 20), fill=_FILL, anchor=anchor)
+    t.setZValue(TEXT_Z)
+    t.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+    t.setAcceptHoverEvents(False)
+    plot.scene().addItem(t)
+    t.hide()
+    return t
+
+
 class _RowItems:
     """The readout's items in one plot (made on first use)."""
 
@@ -112,9 +152,9 @@ class _RowItems:
         self.halo.setZValue(40)
         self.dots = pg.ScatterPlotItem(size=7, pen=pg.mkPen("k", width=1))
         self.dots.setZValue(45)
-        self.box = pg.TextItem(color=(20, 20, 20), fill=_FILL, border=_BORDER, anchor=(0, 1))
-        self.box.setZValue(50)
-        for it in (self.halo, self.dots, self.box):
+        self.box = _text(plot, (0, 1))
+        self.box.border = _BORDER
+        for it in (self.halo, self.dots):
             it.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
             it.setAcceptHoverEvents(False)
             plot.addItem(it, ignoreBounds=True)
@@ -123,16 +163,19 @@ class _RowItems:
 
     def label(self, i: int) -> pg.TextItem:
         while len(self.labels) <= i:
-            t = pg.TextItem(color=(20, 20, 20), fill=_FILL, anchor=(0, 0.5))
-            t.setZValue(50)
-            t.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
-            self.plot.addItem(t, ignoreBounds=True)
-            self.labels.append(t)
+            self.labels.append(_text(self.plot, (0, 0.5)))
         return self.labels[i]
 
     def hide(self) -> None:
         for it in (self.halo, self.dots, self.box, *self.labels):
             it.hide()
+
+    def drop(self) -> None:
+        """Take the scene-level texts out (the row is gone)."""
+        for t in (self.box, *self.labels):
+            sc = t.scene()
+            if sc is not None:
+                sc.removeItem(t)
 
 
 class HoverProbe:
@@ -148,6 +191,11 @@ class HoverProbe:
     def _items(self, plot: pg.PlotItem) -> _RowItems:
         r = self._rows.get(id(plot))
         if r is None or r.plot is not plot or r.halo.scene() is not plot.scene():
+            if r is not None:
+                try:
+                    r.drop()
+                except RuntimeError:
+                    pass
             r = self._rows[id(plot)] = _RowItems(plot)
         return r
 
@@ -214,9 +262,7 @@ class HoverProbe:
         r.halo.show()
         text = f"{label}\n{xname} = {fmt(fx(pt.x()))} {xunit} · {fmt(fy(float(y[j])))} {unit}"
         r.box.setText(text, color=(20, 20, 20))
-        r.box.setAnchor((0, 1))
-        px_x, _ = vb.viewPixelSize()
-        r.box.setPos(pt.x() + 12 * px_x, pt.y())
+        _put(r.box, vb, pt.x(), pt.y(), 12, (0, 1))
         r.box.show()
         self.shown = [text]
         if self.peaks:
@@ -231,7 +277,7 @@ class HoverProbe:
                     t = r.label(k)
                     s = f"{fmt(fxs[i])} {xunit} · {fmt(ys[i])} {unit}"
                     t.setText(s, color=(20, 20, 20))
-                    t.setPos(x[i] + 4 * px_x, y[i])
+                    _put(t, vb, x[i], y[i], 4, (0, 0.5))
                     t.show()
                     self.shown.append(s)
 
@@ -251,11 +297,10 @@ class HoverProbe:
             pts.append((float(x[j]), float(y[j]), label, unit,
                         QColor(pen.color()) if pen is not None else QColor(40, 40, 40)))
         pts = pts[:MAX_PROBE]
-        px_x, px_y = vb.viewPixelSize()
+        _px_x, px_y = vb.viewPixelSize()
         top = vb.viewRange()[1][1]
         r.box.setText(f"{xname} = {fmt(fx(pt.x()))} {xunit}", color=(20, 20, 20))
-        r.box.setAnchor((0, 0))
-        r.box.setPos(pt.x() + 4 * px_x, top)
+        _put(r.box, vb, pt.x(), top, 4, (0, 0))
         r.box.show()
         self.shown = [f"{xname} = {fmt(fx(pt.x()))} {xunit}"]
         if not pts:
@@ -277,6 +322,6 @@ class HoverProbe:
             t = r.label(n)
             s = f"{label}: {fmt(fy(y))} {unit}"
             t.setText(s, color=color.darker(130))
-            t.setPos(x + 6 * px_x, ly)
+            _put(t, vb, x, ly, 6, (0, 0.5))
             t.show()
             self.shown.append(s)

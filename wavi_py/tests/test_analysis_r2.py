@@ -452,8 +452,9 @@ def test_keys_and_probe(app, win, monkeypatch):
     assert all("#" in t and "mV" in t for t in h.shown[1:])
     r = h._rows[id(aw.compare.rows["mV"])]
     assert r.dots.isVisible() and len(r.dots.data) == n and all(t.isVisible() for t in r.labels[:n])
-    ys = sorted(t.pos().y() for t in r.labels[:n])                            # pushed apart
-    assert min(np.diff(ys)) >= 0.9 * 13 * abs(vb.viewPixelSize()[1])
+    ys = sorted(t.pos().y() for t in r.labels[:n])                # pushed apart (scene px)
+    assert min(np.diff(ys)) >= 0.9 * 13
+    assert all(t.parentItem() is None and t.zValue() >= 1e6 for t in r.labels[:n])   # on top
     assert aw.compare.probes["mV"].isVisible() and aw.compare.probes["mV"].value() == pytest.approx(1.0)
     assert not aw.statusBar().currentMessage()
     tvb = aw.timeline.x_plot().getViewBox()

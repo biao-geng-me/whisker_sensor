@@ -153,6 +153,7 @@ CELLS = ("Compare", "Spectrum", "Spectrogram", "Cursors")   # set_tab names (reg
 SELECTIONS, EVENTS = "selections", "events"
 GAUGES_VIEW, POSITIONS_VIEW = "by gauge (A / B)", "by position (drag / lift)"                 # the window's source mode
 HEAD_COLOR = (0, 130, 110)                                  # the plane head: teal, no cursor's colour
+DEFAULT_PILOT = ("rov:fwd", "rov:lat", "rov:vert", "rov:yaw")  # the timeline's default commands
 PLOTS, TIMELINE = 1, 2                                      # the Variables tree's check columns
 _KEY = Qt.ItemDataRole.UserRole
 _LIVE_POLL_MS = 1000
@@ -1190,13 +1191,16 @@ class AnalysisWindow(ViewWindow):
         self._fix_parents()
 
     def _default_timeline(self, source) -> None:
-        """Until the Timeline column is edited: Depth if the source has depth, else the
-        first variable checked for Plots."""
+        """Until the Timeline column is edited: Depth if the source has depth and the
+        pilot's commands if it has the vehicle (``DEFAULT_PILOT``: forward, lateral,
+        vertical, yaw; not pitch and roll), else the first variable checked for Plots."""
         if self._tl_edited:
             return
         has_depth = source is not None and len(source.depth[0]) > 0
-        plots = self.checked_keys()
-        want = [DEPTH] if has_depth and any(v.key == DEPTH for v in self._vars) else plots[:1]
+        have = {v.key for v in self._vars}
+        want = ([DEPTH] if has_depth and DEPTH in have else []) + \
+            [k for k in DEFAULT_PILOT if k in have]
+        want = want or self.checked_keys()[:1]
         if want and want != self.timeline_keys():
             self.set_checked([v.key for v in self._vars], False, TIMELINE)
             self.set_checked(want, True, TIMELINE)

@@ -48,8 +48,7 @@ def test_analysis_exclusive_and_cursors(app, win):
     _key(vp, Qt.Key.Key_Z)
     assert aw.tools.tool == ZOOM and aw._act_zoom.isChecked() and not aw._act_select.isChecked()
     assert _modes(wave_vbs) == _modes(spec_vbs) == {pg.ViewBox.RectMode}
-    assert _cursor(aw.compare.glw) == _cursor(aw.spectrum.glw) == "zoom"
-    assert _cursor(aw.timeline.glw) == "arrow"                  # no Zoom box in the timeline
+    assert _cursor(aw.compare.glw) == _cursor(aw.spectrum.glw) == _cursor(aw.timeline.glw) == "zoom"
 
     _key(vp, Qt.Key.Key_S)                                       # S while Z is armed: Z goes
     assert aw.tools.tool == SELECT and aw._act_select.isChecked() and not aw._act_zoom.isChecked()
@@ -116,3 +115,26 @@ def test_line_and_imu_exclusive(app, win):
         sel.trigger()
         assert view.tools.tool == PAN and {_cursor(v) for v in views} == {"arrow"}
         view.hide()
+
+
+def test_timeline_zoom_box_time_only(app, win):
+    aw, _sels = _window(app, win)
+    aw.show()
+    _pump(app, lambda: False, 0.3)
+    tl = aw.timeline
+    p = tl.x_plot()
+    vb = p.getViewBox()
+    vp = tl.glw.viewport()
+    _key(vp, Qt.Key.Key_Z)
+    assert vb.state["mouseMode"] == pg.ViewBox.RectMode
+    x0, y0 = vb.viewRange()
+    r = vb.sceneBoundingRect()
+    a = tl.glw.mapFromScene(r.left() + 0.2 * r.width(), r.top() + 0.3 * r.height())
+    b = tl.glw.mapFromScene(r.left() + 0.5 * r.width(), r.top() + 0.6 * r.height())
+    _drag(vp, a, b)
+    _pump(app, lambda: False, 0.2)
+    x1, y1 = vb.viewRange()
+    assert x1[1] - x1[0] < 0.4 * (x0[1] - x0[0]) and tl.zoomed
+    assert y1[1] - y1[0] > 0.6 * (y0[1] - y0[0])                 # Y not boxed (it auto-fits)
+    assert not aw.compare.subs and len(aw.model) == 3             # no selection made
+    aw.close()

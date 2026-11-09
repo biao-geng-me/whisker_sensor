@@ -11,7 +11,8 @@ so the selections and the playhead show.
 The selections are drawn and adjusted with the shared region item
 (``SelectionOverlay``, one per row: edges, and the body once the regions branch
 lands); the playhead is a red line (not draggable). Mouse: a plain drag pans,
-the wheel zooms time, Select (S) + drag makes a new selection (``selections``'
+the wheel zooms time, Zoom box (Z) + drag zooms time to the box (the rows keep
+their Y), Select (S) + drag makes a new selection (``selections``'
 drag hook; the window includes it), a double-click seeks the replay there.
 There is no click-seek, so a click on a region or a near miss does not move
 the playhead. The view starts on the whole source and keeps a hand zoom
@@ -53,8 +54,8 @@ import math
 from typing import Callable, Optional
 
 import numpy as np
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QBrush, QColor
+from PyQt6.QtCore import QPointF, QRectF, Qt, pyqtSignal
+from PyQt6.QtGui import QBrush, QColor, QTransform
 from PyQt6.QtWidgets import QMenu, QWidget
 
 import pyqtgraph as pg
@@ -64,7 +65,7 @@ from wavi_py.daq.series import WSK
 from wavi_py.replay.rov import MODE_KEY
 from wavi_py.daq.series import WSK
 from wavi_py.views.analysis_cells import AXIS_W, SENSOR, SELECTION, _Cell, hook_click, probe_line
-from wavi_py.views.plot_tools import SELECT
+from wavi_py.views.plot_tools import SELECT, ZOOM
 from wavi_py.views.sensor_grid import gauge_color
 from wavi_py.views.selections import SelectionModel, SelectionOverlay, _hook_drag
 from wavi_py.views.whisker_plots import _show_grid
@@ -132,6 +133,24 @@ _ARMED_BRUSH = pg.mkBrush(60, 170, 60, 200)
 _GAIN_PEN = pg.mkPen((40, 40, 40), width=1.5)
 
 
+def _x_only_zoom_box(vb: pg.ViewBox) -> None:
+    """Zoom box in a timeline row: the box spans the row's height and sets time
+    only (each row keeps its own Y)."""
+    def box(p1, p2):
+        r = vb.childGroup.mapRectFromParent(QRectF(QPointF(p1.x(), 0), QPointF(p2.x(), vb.height())))
+        vb.rbScaleBox.setPos(r.topLeft())
+        vb.rbScaleBox.setTransform(QTransform.fromScale(r.width(), r.height()))
+        vb.rbScaleBox.show()
+
+    def show(ax, **_k):
+        ax = ax.normalized()
+        if ax.width() > 0:
+            vb.setXRange(ax.left(), ax.right(), padding=0)
+            vb.sigRangeChangedManually.emit([True, False])
+    vb.updateScaleBox = box
+    vb.showAxRect = show
+
+
 def _row_h(unit: str) -> int:
     return LANE_H if unit == LANE else CARD_H if unit == CARD else ROW_MIN
 
@@ -140,7 +159,7 @@ class TimelineCell(_Cell):
     """See the module doc. ``win``: the Analysis window (its status bar and Select
     action); ``replay``: the ``ReplayModel`` (playhead, seek) or None."""
 
-    TOOLS = (SELECT,)                            # Select makes a selection; no Zoom box (X only)
+    TOOLS = (SELECT, ZOOM)                       # Select: a new selection; Zoom box: time only
     madeSelection = pyqtSignal(object)           # a Select drag here made this one
     laneClicked = pyqtSignal(float, float)       # the lane: a selection of this window
     laneCompare = pyqtSignal(object)             # the lane: Compare similar (the event)
@@ -214,6 +233,8 @@ class TimelineCell(_Cell):
                 self.madeSelection.emit(self.model.selections[-1])
         vb.mouseDragEvent = drag
         hook_click(vb, self._lane_click if unit == LANE else self._click)
+        _x_only_zoom_box(vb)
+        self._apply_tool(p)
         head = pg.InfiniteLine(angle=90, movable=False, pen=_HEAD_PEN)
         head.setZValue(20)
         head.setVisible(False)
@@ -264,6 +285,9 @@ class TimelineCell(_Cell):
 
     def nav_plots(self) -> list[pg.PlotItem]:
         return list(self.rows.values())
+
+    def _zoom_plots(self) -> list[pg.PlotItem]:
+        return list(self._plots.values())               # the hidden rows too (kept)
 
     def x_plot(self) -> Optional[pg.PlotItem]:
         return self._anchor
