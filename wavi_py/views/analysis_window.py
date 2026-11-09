@@ -71,10 +71,12 @@ crosshair with its value and the segment's peak.
 The bottom right shows the picked tile's spectrogram column at each cursor.
 
 Toolbar: Select (S: a drag in the waveform makes the sub-range, in the
-timeline a new selection), Clear sub-range (Esc), Zoom box (Z: a drag in the
-waveform, the spectrum, the spectrogram or the cursor spectra zooms to the box
-drawn, the waveform and spectrogram keeping one time span; R resets; the mouse is
-a magnifier with a + while armed), Probe (P: hover readout in
+timeline a new selection; the mouse is a cross there), Clear sub-range (Esc),
+Zoom box (Z: a drag in the waveform, the spectrum, the spectrogram or the cursor
+spectra zooms to the box drawn, the waveform and spectrogram keeping one time
+span; R resets; the mouse is a magnifier with a + there). Select and Zoom box
+are one exclusive set (``views/plot_tools.py``, as in Line and IMU): arming one
+disarms the other, its key again goes back to Pan. Probe (P: hover readout in
 the waveform, timeline, both spectra and the spectrogram), Reset view (R: the
 cell under the mouse, or all), F (fit the plot under the mouse to its data), Keys,
 Colour by (sensor by default in Selections mode). The Line window's zoom / pan keys act on
@@ -129,7 +131,7 @@ from PyQt6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication, 
 import numpy as np
 import pyqtgraph as pg
 
-from wavi_py.daq.analysis import DEPTH, POS, ROV, Dataset, Selection, Variable
+from wavi_py.daq.analysis import CARD, DEPTH, POS, ROV, Dataset, Selection, Variable
 from wavi_py.daq.plane_overlay import heads, plane_overlay, set_arrows
 from wavi_py.daq.series import IMU, WSK
 from wavi_py.replay import eventset as evs
@@ -141,6 +143,7 @@ from wavi_py.views.event_cells import EventBrowserCell, EventWaveCell, group_col
 from wavi_py.views.event_loader import EventLoader
 from wavi_py.views.event_panel import EventPanel
 from wavi_py.views.hover_probe import HoverProbe
+from wavi_py.views.plot_tools import PAN, SELECT, ZOOM, PlotTools
 from wavi_py.views.sensor_grid import GridLayout, SensorGrid
 from wavi_py.views.render_sched import scheduler
 from wavi_py.views.selections import SelectionModel, sel_color
@@ -157,9 +160,9 @@ TIMELINE_H = 190                                            # its default height
 
 KEYS_HELP = """\
 <table cellspacing=4>
-<tr><td><b>S</b></td><td>Select: drag in the waveform for another sub-range, in the timeline for a new selection</td></tr>
+<tr><td><b>S</b></td><td>Select (cross cursor): drag in the waveform for another sub-range, in the timeline for a new selection. S again: pan</td></tr>
 <tr><td><b>Esc</b></td><td>clear the sub-ranges (all)</td></tr>
-<tr><td><b>Z</b></td><td>zoom box: drag a rectangle to zoom (waveform, spectra, spectrogram); off: a drag pans</td></tr>
+<tr><td><b>Z</b></td><td>zoom box (magnifier cursor): drag a rectangle to zoom (waveform, spectra, spectrogram). Z again: pan. Select and Zoom box: one at a time</td></tr>
 <tr><td><b>P</b></td><td>probe: every trace's value at the mouse, marked and labelled (waveform, timeline, spectra); the spectrogram: t, f, amplitude and the segment's peak</td></tr>
 <tr><td><b>R</b></td><td>reset view: the cell under the mouse (outside the cells: all)</td></tr>
 <tr><td><b>F</b></td><td>fit: the plot under the mouse to its data (x and y)</td></tr>
@@ -632,24 +635,19 @@ class AnalysisWindow(ViewWindow):
         tb = QToolBar("Analysis")
         tb.setMovable(False)
         self.addToolBar(tb)
-        self._act_select = QAction("Select", self, checkable=True)
-        self._act_select.setShortcut(QKeySequence("S"))
-        self._act_select.setToolTip("Drag in the waveform for a sub-range (seconds from each"
-                                    " selection's start; the spectra use it), or in the timeline"
-                                    " for a new selection [S]")
-        self._act_select.toggled.connect(lambda on: self.statusBar().showMessage(
-            "Select: drag in the waveform for a sub-range (Esc clears it), in the timeline for a"
-            " new selection") if on else self.statusBar().clearMessage())
+        self.tools = PlotTools(self)              # Select / Zoom box: one armed at a time
+        self._act_select = self.tools.action(
+            SELECT, "Drag in the waveform for a sub-range (seconds from each selection's start;"
+            " the spectra use it), or in the timeline for a new selection. S again: back to pan [S]")
         self._act_clear_sub = QAction("Clear sub-range", self)
         self._act_clear_sub.setShortcut(QKeySequence(Qt.Key.Key_Escape))
         self._act_clear_sub.setToolTip("Clear every sub-range: back to the whole selections [Esc]")
         self._act_clear_sub.setEnabled(False)
         self._act_clear_sub.triggered.connect(lambda: self.set_sub(None))
-        self._act_zoom = QAction("Zoom box", self, checkable=True)
-        self._act_zoom.setShortcut(QKeySequence("Z"))
-        self._act_zoom.setToolTip("Drag a box to zoom in the waveform, spectrum, spectrogram and"
-                                  " cursor spectra (off: a drag pans). R resets. [Z]")
-        self._act_zoom.toggled.connect(self._on_zoom_toggled)
+        self._act_zoom = self.tools.action(
+            ZOOM, "Drag a box to zoom in the waveform, spectrum, spectrogram and cursor spectra."
+            " Z again: back to pan (a drag pans). R resets. [Z]")
+        self.tools.changed.connect(self._on_tool)
         self._act_probe = QAction("Probe", self, checkable=True)
         self._act_probe.setShortcut(QKeySequence("P"))
         self._act_probe.setToolTip("Show the values under the mouse (waveform, timeline, spectra,"
@@ -1170,14 +1168,15 @@ class AnalysisWindow(ViewWindow):
                 continue                              # the grids
             side = v.source if v.source == ROV else IMU
             top = tops[side]
-            if v.source == DEPTH:
+            if v.source == CARD:                      # its own top-level line
+                parent = self.var_tree
+            elif v.source == DEPTH:
                 parent = top
             else:
                 parent = groups.get((side, v.group))
                 if parent is None:
                     parent = groups[(side, v.group)] = node(top, v.group)
-            text = v.label if v.source == ROV else \
-                v.label.split(" ")[-1] if v.source != DEPTH else v.label
+            text = v.label if v.source in (ROV, DEPTH, CARD) else v.label.split(" ")[-1]
             it = QTreeWidgetItem(parent, [text])
             it.setFlags(flags)
             it.setData(0, _KEY, v.key)
@@ -1394,11 +1393,14 @@ class AnalysisWindow(ViewWindow):
             c.reset_view()
         self._request()
 
-    def _on_zoom_toggled(self, on: bool) -> None:
-        for cell in (self.compare, self.spectrum, self.spectrogram, self.at_cursors):
-            cell.set_zoom_box(on)
-        self.statusBar().showMessage("Zoom box: drag a rectangle to zoom (R resets)" if on
-                                     else "Pan: drag to move the view", 3000)
+    def _on_tool(self, tool: str) -> None:
+        for cell in self.cells():
+            cell.set_tool(tool)
+        self.statusBar().showMessage({
+            SELECT: "Select: drag in the waveform for a sub-range (Esc clears it), in the timeline"
+                    " for a new selection (S again: pan)",
+            ZOOM: "Zoom box: drag a rectangle to zoom (R resets; Z again: pan)",
+        }.get(tool, "Pan: drag to move the view"), 0 if tool != PAN else 3000)
 
     def _show_keys(self) -> None:
         box = QMessageBox(QMessageBox.Icon.NoIcon, "Analysis keys", KEYS_HELP, parent=self)

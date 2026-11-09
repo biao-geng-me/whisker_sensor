@@ -11,7 +11,9 @@ recording in replay). In replay the rows come from the recording's store
 (``replay/store.py``: any span, the full recording included) instead of the
 pipeline's buffer, with the playhead drawn as a red line. The status bar shows the control panel's stream status line (whisker
 rate, scan mode, ADC heartbeat, error counters), and the ESP32 / ADC alarm
-banner sits on top as in the whisker views.
+banner sits on top as in the whisker views. Toolbar: Link to Line, Select (S,
+added by the main window) and Zoom box (Z), one armed at a time with the cursor
+to match (``views/plot_tools.py``, as in Line and Analysis).
 
 Redraw cost: new rows only mark the view dirty; the render scheduler redraws
 it at most ``MAX_HZ`` times a second while shown, with the curves min/max
@@ -34,6 +36,7 @@ from wavi_py.config import DEFAULT_VIEW_SPAN_S
 from wavi_py.daq.series import IMU, ArraySeries, Series
 from wavi_py.views.base import ViewWindow
 from wavi_py.views.line_view import _HEAD_PEN, _MIN_SPAN_S, follow_window
+from wavi_py.views.plot_tools import PAN, SELECT, ZOOM, PlotTools
 from wavi_py.views.render_sched import GraphicsLayoutWidget, scheduler
 from wavi_py.views.whisker_plots import _ElidedLabel, _show_grid, set_pen_width
 
@@ -100,6 +103,15 @@ class ImuView(ViewWindow):
             p.addItem(line, ignoreBounds=True)
             self._head_lines.append(line)
         p.setLabel("bottom", "Time", units="s")
+        # the drag tools (Zoom box here; the main window adds Select): one armed at a time
+        self.tools = PlotTools(self)
+        tb.addAction(self.tools.action(ZOOM, "Drag a box to zoom (Z again: drag pans). Wheel zooms"
+                                             " either way; the plot's A button refits. [Z]"))
+        self.tools.add([p.getViewBox() for p in self._plots], [glw])
+        self.tools.changed.connect(lambda tool: self.statusBar().showMessage({
+            ZOOM: "Zoom box: drag a rectangle to zoom (Z again: pan)",
+            SELECT: "Select: drag in a plot to make a selection (S again: pan)"}.get(
+                tool, "Pan: drag to move the view"), 0 if tool != PAN else 3000))
         self._stream_status = _ElidedLabel()
         self.statusBar().addPermanentWidget(self._stream_status, 1)
 

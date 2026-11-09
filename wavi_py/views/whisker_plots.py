@@ -71,6 +71,7 @@ from PyQt6.QtWidgets import (QAbstractSpinBox, QApplication, QComboBox, QDoubleS
 import pyqtgraph as pg
 
 from wavi_py.views.base import ViewWindow
+from wavi_py.views.plot_tools import SELECT, ZOOM, PlotTools
 from wavi_py.views.render_sched import GraphicsLayoutWidget, PlotWidget, scheduler
 
 
@@ -453,11 +454,13 @@ class WhiskerPlotsView(ViewWindow):
         self._act_grid.setToolTip("One tile per sensor instead of one stacked axis")
         self._act_grid.toggled.connect(self._on_grid_toggled)
 
-        self._act_zoom = QAction("Zoom box", self, checkable=True)
-        self._act_zoom.setToolTip("Drag a box to zoom (off: drag pans). Wheel zooms either way. [Z]")
-        self._act_zoom.setShortcut(QKeySequence("Z"))
-        self._act_zoom.toggled.connect(self._on_zoom_toggled)
-
+        # the drag tools (Zoom box here; the main window adds Select): one armed at a time
+        self.tools = PlotTools(self)
+        self._act_zoom = self.tools.action(
+            ZOOM, "Drag a box to zoom (Z again: drag pans). Wheel zooms either way. [Z]")
+        self.tools.add(lambda: [p.getViewBox() for p in self._all_plots()],
+                       [self._stacked, self._grid, self._single_plot])
+        self.tools.changed.connect(self._on_tool)
         self._act_reset = QAction("Reset view", self)
         self._act_reset.setShortcut(QKeySequence("R"))
         self._act_reset.triggered.connect(self._reset_view)
@@ -872,11 +875,10 @@ class WhiskerPlotsView(ViewWindow):
         fit()
         return frame
 
-    def _on_zoom_toggled(self, on: bool) -> None:
-        mode = pg.ViewBox.RectMode if on else pg.ViewBox.PanMode
-        for p in self._all_plots():
-            p.getViewBox().setMouseMode(mode)
-        msg = "Zoom box: drag a rectangle to zoom" if on else "Pan: drag to move the view"
+    def _on_tool(self, tool: str) -> None:
+        msg = {ZOOM: "Zoom box: drag a rectangle to zoom (Z again: pan)",
+               SELECT: "Select: drag in a plot to make a selection (S again: pan)"}.get(
+                   tool, "Pan: drag to move the view")
         hint = self._idle_hint()
         self.statusBar().showMessage(f"{msg}. {hint}" if hint else msg)
 

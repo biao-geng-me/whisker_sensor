@@ -270,7 +270,7 @@ class EventWaveCell(_Cell):
             p.getAxis("left").enableAutoSIPrefix(False)
             p.getAxis("left").setWidth(AXIS_W if c == 0 else 38)
             p.setMinimumHeight(PANEL_MIN_H)
-            self._apply_zoom_box(p)                      # the window's Zoom box (Z)
+            self._apply_tool(p)                          # the window's drag tool
             if r == nrows - 1:
                 p.setLabel("bottom", "s from the onset")
             if first is None:

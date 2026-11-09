@@ -102,7 +102,7 @@ from wavi_py.config import (
     DEFAULT_VIEW_SPAN_S,
     MIN_REC_LEN_S,
 )
-from wavi_py.daq.analysis import (DOME_ORDER, SelSource, imu_variables, position_variables,
+from wavi_py.daq.analysis import (DOME_ORDER, SelSource, card_variable, imu_variables, position_variables,
                                   rov_axis_variables, rov_variables, snapshot_of,
                                   whisker_variables)
 from wavi_py.daq.despike import Despiker
@@ -1439,12 +1439,12 @@ class MainWindow(QMainWindow):
     def analysis_variables(self) -> list:
         """The variables an Analysis window lists: every gauge (by the Line window's
         sensor names), the IMU and depth, the vehicle telemetry the source has (with
-        the demand and thrust per axis) and the dome's positions (drag / lift through
-        the dome map)."""
+        the demand and thrust per axis), the dome's positions (drag / lift through
+        the dome map) and the timeline's activity row (the recording card's preview)."""
         src = self._replay.source
         return (whisker_variables(self._nch, self._line_view._names) + imu_variables()
                 + rov_variables(src.rov() if src is not None else None)
-                + position_variables(DOME_ORDER))
+                + position_variables(DOME_ORDER) + [card_variable()])
 
     def events_variables(self) -> list:
         """An Events window's variables: as ``analysis_variables``, the ROV's per-axis

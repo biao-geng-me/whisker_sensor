@@ -66,8 +66,10 @@ Every cell has a header with an expand and a collapse button at its right
 (``expandRequested``: the cell takes the whole 2x2, again: back;
 ``collapseRequested``; ``TITLE`` names it on the window's restore bar).
 
-Zoom box (the window's toggle, Z): ``set_zoom_box`` puts the cell's plots in
-pyqtgraph's rectangle mode (a drag zooms to the box; rows made later follow).
+Drag tools (the window's exclusive Select / Zoom box, ``views/plot_tools.py``):
+``set_tool`` puts the cell's plots in the tool's mouse mode and cursor, for the
+tools the cell takes (``TOOLS``: the waveform Select and Zoom box, the timeline
+Select, the spectra and the spectrogram Zoom box); rows made later follow.
 
 Navigation (the window's keys and Probe) goes through ``nav_plots`` (the plots
 a Y key may act on), ``x_plot`` (the one X keys scale), ``on_manual`` (a key
@@ -81,7 +83,7 @@ from typing import Callable, Optional
 
 import numpy as np
 from PyQt6.QtCore import QPointF, Qt, pyqtSignal
-from PyQt6.QtGui import QBrush, QColor, QCursor, QPainter, QPen, QPixmap
+from PyQt6.QtGui import QBrush, QColor
 from PyQt6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QHBoxLayout, QLabel,
                              QSizePolicy, QStackedWidget, QToolButton, QVBoxLayout, QWidget)
 
@@ -89,6 +91,7 @@ import pyqtgraph as pg
 
 from wavi_py.daq.analysis import UNIT_GROUPS, Dataset, spectrogram_column
 from wavi_py.daq.series import WSK
+from wavi_py.views.plot_tools import PAN, SELECT, ZOOM, apply_tool, effective, zoom_cursor  # noqa: F401
 from wavi_py.views.render_sched import GraphicsLayoutWidget
 from wavi_py.views.selections import sel_color
 from wavi_py.views.sensor_grid import GridLegend, gauge_color
@@ -359,6 +362,7 @@ class _Cell(QWidget):
     collapseRequested = pyqtSignal()             # its header's collapse button
     expandRequested = pyqtSignal()               # its header's expand button
     TITLE = ""                                   # the window's restore bar names it so
+    TOOLS: tuple = (ZOOM,)                       # the drag tools it takes (set_tool)
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -380,7 +384,7 @@ class _Cell(QWidget):
         self._pages.addWidget(self.glw)
         self._last: Optional[tuple] = None           # the last render's inputs
         self.renders = 0                             # renders that did any work (tests)
-        self.zoom_box = False                        # a drag zooms to a box (else pans)
+        self.tool = PAN                              # the window's drag tool (set_tool)
 
     def _add_header(self, sub_line: bool = True) -> _Header:
         self.header = _Header(sub_line=sub_line)
@@ -413,18 +417,19 @@ class _Cell(QWidget):
         return (self._pages.currentIndex() == 1 and not self.isHidden() and self.width() > 1
                 and self.height() > 1)
 
-    def set_zoom_box(self, on: bool) -> None:
-        self.zoom_box = bool(on)
-        for p in self._zoom_plots():
-            self._apply_zoom_box(p)
-        vp = self.glw.viewport()
-        if self.zoom_box:
-            vp.setCursor(zoom_cursor())
-        else:
-            vp.unsetCursor()
+    def set_tool(self, tool: str) -> None:
+        """The window's drag tool (``views/plot_tools.py``); one this cell does not
+        take (``TOOLS``) leaves it panning, with the arrow."""
+        self.tool = tool
+        apply_tool(tool, [p.getViewBox() for p in self._zoom_plots()], [self.glw], self.TOOLS)
 
-    def _apply_zoom_box(self, p: pg.PlotItem) -> None:
-        p.getViewBox().setMouseMode(pg.ViewBox.RectMode if self.zoom_box else pg.ViewBox.PanMode)
+    @property
+    def zoom_box(self) -> bool:
+        return effective(self.tool, self.TOOLS) == ZOOM
+
+    def _apply_tool(self, p: pg.PlotItem) -> None:
+        """A plot made after ``set_tool``: in step with it."""
+        apply_tool(self.tool, [p.getViewBox()], (), self.TOOLS)
 
     def _zoom_plots(self) -> list[pg.PlotItem]:
         return self.nav_plots()
@@ -500,7 +505,7 @@ class _RowsCell(_Cell):
             if first is None:
                 first = p
             p.getViewBox().sigRangeChangedManually.connect(self._on_manual)
-            self._apply_zoom_box(p)
+            self._apply_tool(p)
             self.rows[u] = p
             self.probes[u] = probe_line(p)
             self._row_added(p)
@@ -682,31 +687,6 @@ class _RowsCell(_Cell):
         return "t", "s", (lambda x: x), (lambda y: y)
 
 
-_ZOOM_CURSOR = None
-
-
-def zoom_cursor() -> QCursor:
-    """A magnifier with a + in its lens (Zoom box armed); the hot spot is the lens' centre."""
-    global _ZOOM_CURSOR
-    if _ZOOM_CURSOR is None:
-        pm = QPixmap(32, 32)
-        pm.fill(Qt.GlobalColor.transparent)
-        p = QPainter(pm)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        for color, w in ((QColor(255, 255, 255), 5.0), (QColor(20, 20, 20), 2.2)):
-            p.setPen(QPen(color, w, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-            p.setBrush(Qt.BrushStyle.NoBrush)
-            p.drawEllipse(QPointF(12, 12), 8.5, 8.5)
-            p.drawLine(QPointF(18.5, 18.5), QPointF(28, 28))
-            p.drawLine(QPointF(8, 12), QPointF(16, 12))
-            p.drawLine(QPointF(12, 8), QPointF(12, 16))
-        p.setPen(QPen(QColor(20, 20, 20), 4.0, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-        p.drawLine(QPointF(20, 20), QPointF(27, 27))         # the handle, thicker
-        p.end()
-        _ZOOM_CURSOR = QCursor(pm, 12, 12)
-    return _ZOOM_CURSOR
-
-
 class SpecBand(pg.LinearRegionItem):
     """A sub-range on the spectrogram: display only, a light veil with white edges
     and its number (the tile stays the whole selection)."""
@@ -781,6 +761,7 @@ class WaveCell(_RowsCell):
 
     X_LABEL = ("Time from the selection's start", "s")
     TITLE = "Waveform"
+    TOOLS = (SELECT, ZOOM)
     subChanged = pyqtSignal(object)
     subsChanged = pyqtSignal(list)
     clicked = pyqtSignal(float, object)

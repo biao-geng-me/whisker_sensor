@@ -89,9 +89,12 @@ from wavi_py.replay.rov import AXIS_KEYS, MODE_KEY, RovData, axis_variables
 DEPTH = "depth"
 ROV = "rov"
 POS = "pos"
-# the rows, top to bottom ("mode" is the timeline's band row)
+CARD = "card"                   # the timeline's activity row (the recording card's preview)
+CARD_KEY = "rec:card"
+# the rows, top to bottom ("mode" is the timeline's band row, "card" its heatmap row:
+# the timeline puts both on top)
 UNIT_GROUPS = ("mV", "mg", "mrad/s", "deg", "cm", "mode", "pilot", "thrust", "A", "m/s", "hdg",
-               "m/s²")
+               "m/s²", "card")
 MAX_TRACES = 200                # selections ``traces`` draws at most
 REF_LP_HZ = 0.5                 # the reference drift's low-pass (replay/manoeuvres.py)
 AGG_DT = 0.02                   # the aggregates' grid step (s)
@@ -224,6 +227,32 @@ def rov_variables(rov: Optional[RovData]) -> list[Variable]:
         return []
     return [Variable(k, lab, u, ROV, 0, 1.0, g, plots=(k != MODE_KEY))
             for k, lab, u, g in rov.variables()]
+
+
+def card_variable() -> Variable:
+    """The timeline's activity row: the recording card's preview (``replay/card.py``),
+    timeline only."""
+    return Variable(CARD_KEY, "Activity (card)", "card", CARD, 0, 1.0, "Recording", plots=False)
+
+
+def card_image(source: SelSource, t0: float, t1: float, nbins: int,
+               despike: bool = False) -> Optional[tuple[np.ndarray, float, float]]:
+    """The recording card's preview over [t0, t1] of ``source`` (clipped to the
+    whisker data): each gauge's RMS about its own mean in each of ``nbins`` equal
+    spans, in dB re 1 mV quantised to 0..255 on the card's fixed scale
+    (``card.rms_db`` / ``quantise``: a card's picture, re-binned to the span shown).
+    (q (nch x nbins) uint8, a, b) or None (no whisker data there)."""
+    from wavi_py.replay.card import quantise, rms_db
+    ext = source.series.extent(WSK)
+    if ext is None or nbins < 1:
+        return None
+    a, b = max(t0, ext[0]), min(t1, ext[1])
+    if not b > a:
+        return None
+    t, y = source.series.get(WSK, slice(None), a, b, despike)
+    if not len(t) or y.ndim != 2:
+        return None
+    return quantise(rms_db(np.asarray(t, np.float64) - a, y, b - a, nbins)), a, b
 
 
 def rov_axis_variables() -> list[Variable]:

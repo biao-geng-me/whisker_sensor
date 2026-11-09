@@ -22,6 +22,13 @@ one labelled band per flight-mode span (MANUAL blue, ALT_HOLD yellow, ...),
 the armed spans as a green bar along its bottom, and the pilot gain as a step
 line on its 0 .. 1 axis.
 
+The activity row (the Timeline variable "Activity (card)", ``rec:card``, timeline
+only, on top): the recording card's preview (``replay/card.py``: each gauge's RMS
+about its mean per time bin, dB re 1 mV on the card's fixed -40..+15 dB scale,
+inferno, W1 A on top) computed from the source for the span shown, a bin per 2 px
+(``daq/analysis.card_image``), so it reads like the Recordings window's thumbnail
+zoomed out and sharpens when zoomed in; live data too. Hover: gauge and dB.
+
 Each row keeps at least ``ROW_MIN`` px, so its y labels don't overlap; the
 cell's minimum height grows with the rows, and the window's splitter makes
 room for it.
@@ -52,10 +59,12 @@ from PyQt6.QtWidgets import QMenu, QWidget
 
 import pyqtgraph as pg
 
-from wavi_py.daq.analysis import UNIT_GROUPS, Dataset
+from wavi_py.daq.analysis import CARD_KEY, UNIT_GROUPS, Dataset, card_image
+from wavi_py.daq.series import WSK
 from wavi_py.replay.rov import MODE_KEY
 from wavi_py.daq.series import WSK
 from wavi_py.views.analysis_cells import AXIS_W, SENSOR, SELECTION, _Cell, hook_click, probe_line
+from wavi_py.views.plot_tools import SELECT
 from wavi_py.views.sensor_grid import gauge_color
 from wavi_py.views.selections import SelectionModel, SelectionOverlay, _hook_drag
 from wavi_py.views.whisker_plots import _show_grid
@@ -69,6 +78,8 @@ ROW_MIN = 58                                     # px a row keeps (its y labels 
 _AXIS_H = 34                                     # the bottom row's time axis and label
 LANE = "stick"                                   # the manoeuvre lane's row key
 LANE_H = 34
+CARD = "card"                                    # the activity row's key (its unit)
+CARD_H = 72                                      # px: 32 gauges at ~2 px each
 LANE_COLORS = {"surge": (31, 119, 180), "sway": (44, 160, 44), "heave": (148, 103, 189),
                "yaw": (230, 120, 0)}
 COMBO_COLOR = (120, 120, 120)
@@ -121,10 +132,15 @@ _ARMED_BRUSH = pg.mkBrush(60, 170, 60, 200)
 _GAIN_PEN = pg.mkPen((40, 40, 40), width=1.5)
 
 
+def _row_h(unit: str) -> int:
+    return LANE_H if unit == LANE else CARD_H if unit == CARD else ROW_MIN
+
+
 class TimelineCell(_Cell):
     """See the module doc. ``win``: the Analysis window (its status bar and Select
     action); ``replay``: the ``ReplayModel`` (playhead, seek) or None."""
 
+    TOOLS = (SELECT,)                            # Select makes a selection; no Zoom box (X only)
     madeSelection = pyqtSignal(object)           # a Select drag here made this one
     laneClicked = pyqtSignal(float, float)       # the lane: a selection of this window
     laneCompare = pyqtSignal(object)             # the lane: Compare similar (the event)
@@ -150,6 +166,8 @@ class TimelineCell(_Cell):
         self.color_by = SELECTION                        # sensor: the gauges in their own colour
         self._mode_items: list = []                      # the mode band's spans and labels
         self._mode_key = None
+        self._card_img = None                            # the activity row's image
+        self._card = None                                # (q, a, b) drawn
         self._show_rows([_BARE])
         self.glw.scene().sigMouseMoved.connect(self._lane_hover)
 
@@ -176,6 +194,11 @@ class TimelineCell(_Cell):
             p.showGrid(x=True, y=False)
         if unit == "cm":
             p.getViewBox().invertY(True)                 # depth goes down
+        if unit == CARD:                                 # gauges top to bottom, no y ticks
+            p.setLabel("left", "activity")
+            p.getViewBox().invertY(True)
+            p.getAxis("left").setTicks([[]])
+            p.showGrid(x=True, y=False)
         vb = p.getViewBox()
         vb.sigRangeChangedManually.connect(self._on_manual)
         vb.sigXRangeChanged.connect(lambda *_: self.changed.emit())   # re-decimate
@@ -225,12 +248,12 @@ class TimelineCell(_Cell):
         last = self.rows[units[-1]]
         last.setLabel("bottom", "Recording time", units="s")
         for u, p in self.rows.items():
-            base = LANE_H if u == LANE else ROW_MIN
+            base = _row_h(u)
             p.setMinimumHeight(base + (_AXIS_H if p is last else 0))
             if u == LANE:
                 p.setMaximumHeight(base + (_AXIS_H if p is last else 0))
         # the splitter keeps the timeline at least this tall (it grows with the rows)
-        self.setMinimumHeight(sum(LANE_H if u == LANE else ROW_MIN for u in units) + _AXIS_H + 6)
+        self.setMinimumHeight(sum(_row_h(u) for u in units) + _AXIS_H + 6)
         self.show_position()
 
     def _on_manual(self, *_a) -> None:
@@ -306,9 +329,11 @@ class TimelineCell(_Cell):
         for e in more:
             extent = e if extent is None else (min(extent[0], e[0]), max(extent[1], e[1]))
         units = [u for u in UNIT_GROUPS if any(v.unit == u for v in ds.variables)]
-        if self._lane_doc is not None:     # mode band, stick lane, then the variables' rows
-            band = [u for u in units if u == "mode"]
-            units = band + [LANE] + [u for u in units if u != "mode"]
+        # the activity row on top; with the stick lane: the mode band, the lane, then
+        # the variables' rows
+        top = [u for u in ((CARD, "mode") if self._lane_doc is not None else (CARD,)) if u in units]
+        units = top + ([LANE] if self._lane_doc is not None else []) + \
+            [u for u in units if u not in top]
         units = units or [_BARE]
         self._show_rows(units)
         new_extent = extent != self._extent
@@ -343,6 +368,8 @@ class TimelineCell(_Cell):
             c.setPen(pg.mkPen(color, width=1.5 if v.unit == "cm" else 1))
             c.setData(tr.t, tr.y)
             seen.add(v.key)
+        self._draw_card(source if any(v.key == CARD_KEY for v in ds.variables) else None,
+                        x0, x1, n_px, ds.despike)
         if any(v.key == MODE_KEY for v in ds.variables) and source is not None:
             self._draw_modes(source.rov)
             seen.add(MODE_KEY)
@@ -353,6 +380,42 @@ class TimelineCell(_Cell):
             self._plots[c.unit].removeItem(c)
         self._legends(ds)
         self.glw.scene().prepareForPaint()
+
+    def _draw_card(self, source, x0: float, x1: float, n_px: int, despike: bool) -> None:
+        """The activity row: the recording card's preview (gauge rows, W1 A on top;
+        inferno, the card's fixed dB scale) over the span shown, a column per 2 px."""
+        got = card_image(source, x0, x1, max(16, n_px // 2), despike) if source is not None else None
+        img = self._card_img
+        if got is None:
+            if img is not None:
+                img.setVisible(False)
+            self._card = None
+            return
+        q, a, b = got
+        if img is None:
+            from wavi_py.views.recordings_browser import _lut
+            img = self._card_img = pg.ImageItem(axisOrder="row-major")
+            img.setLookupTable(_lut())
+            img.setZValue(-30)
+            self._row(CARD).addItem(img, ignoreBounds=True)
+        img.setImage(q, levels=(0, 255), autoLevels=False)
+        img.setRect(a, 0.0, b - a, q.shape[0])
+        img.setVisible(True)
+        p = self._row(CARD)
+        p.setYRange(0, q.shape[0], padding=0)
+        p.getViewBox().setLimits(yMin=0, yMax=q.shape[0])
+        self._card = (q, a, b)
+
+    def card_at(self, t: float, y: float) -> Optional[tuple[int, float]]:
+        """(gauge column, dB) of the activity row at (t, y), or None."""
+        if self._card is None:
+            return None
+        q, a, b = self._card
+        if not a <= t < b or not 0 <= y < q.shape[0]:
+            return None
+        from wavi_py.replay.card import HI_DB, LO_DB
+        g, i = int(y), min(int((t - a) / (b - a) * q.shape[1]), q.shape[1] - 1)
+        return g, LO_DB + q[g, i] * (HI_DB - LO_DB) / 255.0
 
     def _draw_modes(self, rov) -> None:
         """The mode band row (see the module doc); rebuilt only when the spans, the
@@ -452,6 +515,14 @@ class TimelineCell(_Cell):
         return ev
 
     def _lane_hover(self, pos) -> None:
+        c = self._plots.get(CARD)
+        if c is not None and CARD in self.rows and c.sceneBoundingRect().contains(pos):
+            pt = c.getViewBox().mapSceneToView(pos)
+            got = self.card_at(float(pt.x()), float(pt.y()))
+            names = {v.col: v.label for v in getattr(self._win, "_vars", []) if v.source == WSK}
+            self.glw.setToolTip("" if got is None else
+                                f"{names.get(got[0], f'gauge {got[0]}')}: {got[1]:.0f} dB re 1 mV RMS")
+            return
         p = self._plots.get(LANE)
         if p is None or LANE not in self.rows or not p.sceneBoundingRect().contains(pos):
             return

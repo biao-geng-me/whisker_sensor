@@ -48,7 +48,7 @@ _KEYS_HELP = """\
 <tr><td><b>D</b></td><td>dB / linear amplitude</td></tr>
 <tr><td><b>W</b></td><td>FFT window length: 0.5 / 1 / 2 / 5 s</td></tr>
 <tr><td><b>Y</b></td><td>link Y: all grid tiles share one Y range</td></tr>
-<tr><td><b>Z</b></td><td>zoom box mode (drag a rectangle) / pan mode</td></tr>
+<tr><td><b>Z</b></td><td>zoom box (magnifier cursor): drag a rectangle to zoom; Z again: pan</td></tr>
 <tr><td><b>Esc</b></td><td>back to all whiskers</td></tr>
 </table>
 The framed tile is the one last under the mouse. Mouse: wheel zooms frequency and

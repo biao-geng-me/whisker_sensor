@@ -56,7 +56,8 @@ _KEYS_HELP = """\
 <tr><td><b>. &nbsp;,</b></td><td>zoom Y in / out: all tiles (stacked: trace gain; Y fixed: the +- value)</td></tr>
 <tr><td><b>arrows</b></td><td>move the data (Left: traces slide left); Left / Right all plots (leaves live), Up / Down the framed tile</td></tr>
 <tr><td><b>Y</b></td><td>link Y: all grid tiles share one Y range</td></tr>
-<tr><td><b>Z</b></td><td>zoom box mode (drag a rectangle) / pan mode</td></tr>
+<tr><td><b>S</b></td><td>select (cross cursor): drag in a plot to make a selection; S again: pan</td></tr>
+<tr><td><b>Z</b></td><td>zoom box (magnifier cursor): drag a rectangle to zoom; Z again: pan. Select and Zoom box: one at a time</td></tr>
 <tr><td><b>0</b></td><td>re-zero (re-capture V0)</td></tr>
 <tr><td><b>Q</b></td><td>zero at: the next click in a plot re-zeroes at that time</td></tr>
 <tr><td><b>Esc</b></td><td>back to all whiskers</td></tr>

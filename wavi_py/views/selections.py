@@ -23,7 +23,9 @@ analysis window / Delete: ``model.requested``); the hovered one is
 
 ``attach_select`` gives a plot window the Select toggle (S) and Del: with Select
 on, a left drag in a plot makes a new selection (a per-instance wrapper of the
-ViewBox's ``mouseDragEvent``, so the view classes stay as they are).
+ViewBox's ``mouseDragEvent``, so the view classes stay as they are). Select is
+one of the window's exclusive drag tools (``views/plot_tools.py``, with Zoom
+box): arming it disarms Zoom box, and the plots show the cross cursor.
 """
 
 from __future__ import annotations
@@ -37,6 +39,7 @@ from PyQt6.QtWidgets import QMainWindow, QMenu, QToolBar
 import pyqtgraph as pg
 
 from wavi_py.daq.analysis import Selection, SelSource
+from wavi_py.views.plot_tools import SELECT, PlotTools
 
 # selection colours by number (1 -> the first); distinct from the red playhead,
 # the blue loop range and the green armed spans
@@ -311,11 +314,14 @@ def attach_select(win: QMainWindow, model: SelectionModel, viewboxes: Sequence[p
                   after: Optional[QAction] = None) -> QAction:
     """The Select toggle (S) and Del in ``win``'s first toolbar (after ``after``), and
     the drag that makes a selection in each of ``viewboxes``. Returns the toggle."""
-    act = QAction("Select", win, checkable=True)
-    act.setShortcut(QKeySequence("S"))
-    act.setToolTip("Drag in a plot to make a selection (time window) for the Analysis window;"
-                   " drag its edges to change it (Select off: its body to move it),"
-                   " right-click it for its menu [S]")
+    tools = getattr(win, "tools", None)          # the window's drag tools (views/plot_tools.py)
+    if tools is None:
+        tools = win.tools = PlotTools(win)
+        tools.add(list(viewboxes), list({id(v): v for vb in viewboxes for v in vb.scene().views()}
+                                        .values()))
+    act = tools.action(SELECT, "Drag in a plot to make a selection (time window) for the Analysis"
+                       " window; drag its edges to change it (Select off: its body to move it),"
+                       " right-click it for its menu. S again: back to pan [S]")
     tb = win.findChildren(QToolBar)[0]
     acts = tb.actions()
     nxt = acts[acts.index(after) + 1] if after in acts and acts.index(after) + 1 < len(acts) else None
@@ -323,9 +329,6 @@ def attach_select(win: QMainWindow, model: SelectionModel, viewboxes: Sequence[p
     w = tb.widgetForAction(act)
     if w is not None:
         w.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-    act.toggled.connect(lambda on: win.statusBar().showMessage(
-        "Select: drag in a plot to make a selection (S again: off)") if on
-        else win.statusBar().clearMessage())
     delete = QAction("Delete selection", win)
     delete.setShortcuts([QKeySequence(Qt.Key.Key_Delete), QKeySequence(Qt.Key.Key_Backspace)])
     delete.triggered.connect(lambda: model.remove(model.hovered))
