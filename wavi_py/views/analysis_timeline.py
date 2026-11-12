@@ -8,12 +8,19 @@ envelope, so the whole 13 min dive draws as cheaply as a minute). Depth goes
 down, as on the strip. With no Timeline variable there is still one bare row,
 so the selections and the playhead show.
 
+Live it shows the window's copy of the stream (``AnalysisWindow.take_copy``:
+the buffers, and the depth and telemetry since the stream started, as of when
+it was taken), which does not move: nothing is read again until the window
+takes another.
+
 The selections are drawn and adjusted with the shared region item
 (``SelectionOverlay``, one per row: edges, and the body once the regions branch
-lands); the playhead is a red line (not draggable). Mouse: a plain drag pans,
+lands); the playhead is a red line (not draggable; replay only: a live copy
+ends where it was taken). Mouse: a plain drag pans,
 the wheel zooms time, Zoom box (Z) + drag zooms time to the box (the rows keep
 their Y), Select (S) + drag makes a new selection (``selections``'
-drag hook; the window includes it), a double-click seeks the replay there.
+drag hook; live it reads the window's copy, so no Pause is needed; the window
+includes it), a double-click seeks the replay there.
 There is no click-seek, so a click on a region or a near miss does not move
 the playhead. The view starts on the whole source and keeps a hand zoom
 (``zoomed``) until Reset (R).
@@ -221,7 +228,9 @@ class TimelineCell(_Cell):
         vb = p.getViewBox()
         vb.sigRangeChangedManually.connect(self._on_manual)
         vb.sigXRangeChanged.connect(lambda *_: self.changed.emit())   # re-decimate
-        _hook_drag(self._win, vb, self.model, self._select)
+        # live: a selection made here reads the copy shown here (not the Pause's)
+        _hook_drag(self._win, vb, self.model, self._select,
+                   getattr(self._win, "live_copy", None))
         vb.select_action = self._select      # as in Line: Select on, a body drag selects anew
         hooked = vb.mouseDragEvent
 
@@ -323,8 +332,8 @@ class TimelineCell(_Cell):
     # ----- playhead
 
     def show_position(self, *_a) -> None:
-        r = self.replay
-        t = r.position if r is not None and r.source is not None else math.nan
+        r = self.replay                                # replay only (live: a copy, no "now")
+        t = r.position if r is not None and r.active else math.nan
         for u, head in self._heads.items():
             on = math.isfinite(t) and u in self.rows
             if on:
@@ -343,7 +352,7 @@ class TimelineCell(_Cell):
     # ----- drawing
 
     def render(self, source, ds: Dataset) -> None:
-        """``source``: a ``SelSource`` (the whole recording / the live buffers) or None;
+        """``source``: a ``SelSource`` (the whole recording / the window's live copy) or None;
         ``ds``: the Timeline variables with the display context (no selections)."""
         extent = source.extent() if source is not None else None
         depth_t = source.depth[0] if source is not None else np.empty(0)

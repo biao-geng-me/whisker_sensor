@@ -36,7 +36,9 @@ line's bytes (the index pass, ``replay/index.py``, which does not
 ``json.loads`` the ~75k such lines of a 13 min dive), ``feed`` from a parsed
 event (live, ``daq/server_reader.py`` via the tracker). Both convert the same
 way (``_value``). Times are the Pi's receive time (as the depth's); the
-messages are unevenly spaced at about 19 Hz. ``RovData`` is the result in
+messages are unevenly spaced at about 19 Hz. Its rows are ``daq/grow.Rows``:
+a live stream is read again and again while it grows (``arrays``), and each
+read converts only the rows since the last. ``RovData`` is the result in
 session seconds, one ``(t, y)`` per variable key (``rov:fwd``, ``rov:thr1``,
 ...), cached in the index.
 """
@@ -48,6 +50,8 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
+
+from wavi_py.daq.grow import Rows
 
 NEUTRAL_US, SPAN_US = 1500.0, 400.0
 AUTOPILOT_SRC = b'"src":[1,1]'
@@ -115,11 +119,12 @@ class RovTrack:
 
     def __init__(self) -> None:
         self.lock = threading.Lock()
-        self.rows: dict[str, list] = {t: [] for t in TYPES}     # type -> [(t, v0, v1, ...)]
+        # type -> its rows (t, v0, v1, ...): ``daq/grow.Rows``, so a read of a live
+        # stream converts only the rows since the last one
+        self.rows: dict[str, Rows] = {t: Rows(1 + len(FIELDS[t])) for t in TYPES}
         self.frame: Optional[int] = None                         # FRAME_CONFIG
         self._hdg_last: Optional[float] = None
         self._hdg_off = 0.0
-        self._cache: dict[str, tuple] = {}
 
     def _add(self, mtype: str, t: float, vals: list) -> None:
         if mtype == "VFR_HUD" and np.isfinite(vals[1]):         # heading, unwrapped
@@ -168,18 +173,14 @@ class RovTrack:
             self._add(name, float(ev.get("t", 0.0)), vals)
 
     def arrays(self) -> dict[str, tuple[np.ndarray, np.ndarray]]:
-        """{type: (t (N,), y (N, m))} on the receive clock, for the types seen
-        (re-made only for a type that grew)."""
+        """{type: (t (N,), y (N, m))} on the receive clock, for the types seen: views
+        of rows that do not change afterwards (only the new rows are converted)."""
         out = {}
         with self.lock:
             for name, rows in self.rows.items():
-                if not rows:
-                    continue
-                hit = self._cache.get(name)
-                if hit is None or hit[0] != len(rows):
-                    a = np.asarray(rows, dtype=np.float64)
-                    hit = self._cache[name] = (len(rows), a[:, 0], a[:, 1:])
-                out[name] = (hit[1], hit[2])
+                if len(rows):
+                    a = rows.array()
+                    out[name] = (a[:, 0], a[:, 1:])
         return out
 
 

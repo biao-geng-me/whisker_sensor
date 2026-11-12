@@ -35,7 +35,9 @@ Selections and the Analysis windows (``views/selections.py``,
 and IMU plots and on every timeline strip; a new selection reads the replay
 store, or live the copy of the buffers taken at Pause (``_freeze_selections``).
 The Analysis windows are kept here (``_analysis``; closed ones are reused), the
-newest focused one takes a region's Compare.
+newest focused one takes a region's Compare. Live an Analysis window's timeline
+shows a copy too (``_timeline_source``: taken when the window is opened or
+asked for again, the Pause's while paused), not the running stream.
 
 Events windows (the Analysis window in Events mode; ``_events_windows``, not
 reused): the panel's Events button / Go to → Events... (the open recording,
@@ -790,7 +792,9 @@ class MainWindow(QMainWindow):
 
         self._analysis_btn = QPushButton("Analysis")
         self._analysis_btn.setToolTip("The Analysis window last used (a new one if none is open):"
-                                      " compare selections")
+                                      " compare selections.\nLive it works on a copy of the stream"
+                                      " up to now and does not follow it: click again for a newer"
+                                      " copy.")
         self._analysis_btn.clicked.connect(self.show_analysis)
         self._events_btn = QPushButton("Events")
         self._events_btn.setToolTip("A new Events window: the manoeuvre events of the open recording"
@@ -1127,6 +1131,8 @@ class MainWindow(QMainWindow):
         # the new bus's V0 is ignored and FFT/plots use stale offsets.
         self._v0 = np.zeros(self._nch, dtype=np.float32)
         self._selections.clear()                     # their times meant the last source
+        for win in self._analysis + self._analysis_spare:
+            win.drop_copy()                          # and so did their live copies
         self._selections.set_context(despike=self._despike_chk.isChecked(), v0=self._v0,
                                      scale=self._scale)
         self._t0_unix = None
@@ -1394,25 +1400,35 @@ class MainWindow(QMainWindow):
         return "pause first (a live selection is taken from the paused buffers)"
 
     def _timeline_source(self):
-        """What an Analysis window's timeline shows: the whole recording in replay,
-        else the live buffers (``series()``) with the depth so far; None before any."""
+        """What an Analysis window's timeline shows: the whole recording in replay
+        (the playback buffers until the store is built); live a copy as of now, the
+        Pause's while paused, for the window to keep (``AnalysisWindow.take_copy``:
+        it asks once, not on every redraw); None before any."""
         if self._store is None and self._client is None:
             return None
+        if not self._replaying:
+            frozen = self._selections.frozen_source
+            return frozen if frozen is not None else self._live_copy()
         src = self._replay.source
         if src is None:
             return SelSource(self.series())
         return SelSource(self.series(), src.depth(), rov=src.rov())
 
+    def _live_copy(self) -> SelSource:
+        """A copy of the live buffers with the depth and telemetry of the stream so
+        far (~3 MB for 90 s of 32 gauges, plus ~0.2 MB a minute of stream)."""
+        src = self._replay.source
+        return snapshot_of(self.series(), src.depth() if src is not None else None,
+                           src.rov() if src is not None else None)
+
     def _freeze_selections(self, on: bool) -> None:
         """Live Pause: copy the buffers (and the depth so far) for the selections made
-        while paused (~3 MB for 90 s of 32 gauges); Resume lets go of the copy (the
-        selections made on it keep it)."""
+        while paused; Resume lets go of the copy (the selections made on it, and an
+        Analysis window opened meanwhile, keep it)."""
         if not on or self._client is None:
             self._selections.freeze(None)
             return
-        src = self._replay.source
-        self._selections.freeze(snapshot_of(self.series(), src.depth() if src is not None
-                                            else None, src.rov() if src is not None else None))
+        self._selections.freeze(self._live_copy())
 
     def _line_vars_at(self, plot, scene_pos) -> list[str]:
         """The gauges of the Line plot a region menu opened in (tile, stacked row,
@@ -1570,6 +1586,7 @@ class MainWindow(QMainWindow):
             win.activated.connect(self._on_analysis_activated)
             self._add_chrome(win)
         self._analysis.append(win)
+        win.take_copy()                           # live: what its timeline shows, from now
         for s in ([sel] if sel is not None else self._selections.selections):
             win.include(s)
         win.set_checked(keys)
@@ -1577,10 +1594,12 @@ class MainWindow(QMainWindow):
         return win
 
     def show_analysis(self) -> AnalysisWindow:
-        """The panel's Analysis button: raise the most recently focused Analysis window,
-        or open a new one (every selection included) if none is open."""
+        """The panel's Analysis button: raise the most recently focused Analysis window
+        (live: with a new copy of the stream up to now), or open a new one (every
+        selection included) if none is open."""
         if self._analysis:
             win = self._analysis[-1]
+            win.take_copy()                       # live: asked for again, a copy up to now
             bring_to_front(win)
             return win
         return self.new_analysis_window()

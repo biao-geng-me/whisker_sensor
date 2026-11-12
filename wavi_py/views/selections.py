@@ -93,17 +93,21 @@ class SelectionModel(QObject):
     def by_number(self, number: int) -> Optional[Selection]:
         return next((s for s in self._sels if s.number == number), None)
 
-    def create(self, t0: float, t1: float) -> Union[Selection, str]:
+    def create(self, t0: float, t1: float,
+               source: Optional[SelSource] = None) -> Union[Selection, str]:
         """A new selection over [t0, t1] on the current source (the frozen live copy
-        while paused); a str (the reason) if there is none to select from."""
-        src = self._frozen if self._frozen is not None else self.source_fn()
+        while paused), or on ``source`` (an Analysis window's own live copy); a str
+        (the reason) if there is none to select from."""
+        src = source if source is not None else \
+            (self._frozen if self._frozen is not None else self.source_fn())
         if isinstance(src, str):
             return src
         bounds = src.extent()
         if bounds is None:
             return "no data to select"
+        # a live copy has no recording's map: its Positions read the window's active one
         sel = Selection(self._next, 0.0, 0.0, src, bounds,
-                        dome_map=None if self._frozen is not None else self.dome_map_fn())
+                        dome_map=None if src.snapshot else self.dome_map_fn())
         sel.t0, sel.t1 = sel.clamp(t0, t1)
         self._next += 1
         self._sels.append(sel)
@@ -150,6 +154,11 @@ class SelectionModel(QObject):
         """Live paused: new selections read ``src`` (the buffers copied at Pause);
         None (resumed): back to ``source_fn``. Selections made meanwhile keep it."""
         self._frozen = src
+
+    @property
+    def frozen_source(self) -> Optional[SelSource]:
+        """The copy taken at Pause, while live is paused (else None)."""
+        return self._frozen
 
     @property
     def frozen(self) -> bool:
@@ -339,7 +348,10 @@ def attach_select(win: QMainWindow, model: SelectionModel, viewboxes: Sequence[p
     return act
 
 
-def _hook_drag(win: QMainWindow, vb: pg.ViewBox, model: SelectionModel, act: QAction) -> None:
+def _hook_drag(win: QMainWindow, vb: pg.ViewBox, model: SelectionModel, act: QAction,
+               source_fn: Optional[Callable] = None) -> None:
+    """A Select drag in ``vb`` makes a selection; ``source_fn()``: the source it reads
+    (an Analysis window's live copy) or None: the model's current one."""
     state: dict = {"sel": None}
 
     def drag(ev, axis=None):
@@ -349,7 +361,7 @@ def _hook_drag(win: QMainWindow, vb: pg.ViewBox, model: SelectionModel, act: QAc
         x0 = vb.mapSceneToView(ev.buttonDownScenePos()).x()
         x = vb.mapSceneToView(ev.scenePos()).x()
         if ev.isStart():
-            sel = model.create(x0, x)
+            sel = model.create(x0, x, source_fn() if source_fn is not None else None)
             if isinstance(sel, str):
                 win.statusBar().showMessage(f"Select: {sel}", 5000)
                 sel = None

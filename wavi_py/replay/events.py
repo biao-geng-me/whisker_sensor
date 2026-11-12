@@ -44,6 +44,7 @@ from typing import Callable, Optional
 
 import numpy as np
 
+from wavi_py.daq.grow import Rows
 from wavi_py.replay.rov import TYPES as ROV_TYPES, RovData, RovTrack, rov_data
 
 REPEAT_S = 10.0                 # repeats / counter increments within this go into one entry
@@ -98,9 +99,9 @@ class EventTracker:
         self._counters: Optional[dict] = None
         self._counter_ev: Optional[Event] = None
         self._counter_sum: dict[str, int] = {}
-        # pressure (hPa) for depth, and which samples were taken disarmed
-        self.press_t: list[float] = []
-        self.press_hpa: list[float] = []
+        # pressure (t, hPa) for depth (``daq/grow.Rows``: a live read converts only the
+        # new samples), and the samples taken disarmed
+        self._press = Rows(2)
         self._surface: list[float] = []
         self._surface_t0: Optional[float] = None
         self._surface_dt = 0.0
@@ -202,8 +203,7 @@ class EventTracker:
         if p is None:
             return
         p = float(p)
-        self.press_t.append(t)
-        self.press_hpa.append(p)
+        self._press.append((t, p))
         # the first SURFACE_S of disarmed time (before the first heartbeat counts as disarmed)
         if not self._armed and self._surface_dt < SURFACE_S:
             if self._last_press_t is not None and self._surface:
@@ -237,23 +237,34 @@ class EventTracker:
     def armed(self) -> Optional[bool]:
         return self._armed
 
+    @property
+    def press_t(self) -> np.ndarray:
+        """The pressure samples' times (receive clock): a view, see ``Rows``."""
+        return self._press.array()[:, 0]
+
+    @property
+    def press_hpa(self) -> np.ndarray:
+        return self._press.array()[:, 1]
+
     def surface_hpa(self) -> Optional[float]:
         """The surface pressure: the median over the first disarmed seconds (the
         first 2 s of data if the vehicle never was disarmed)."""
         if len(self._surface) >= 5:
             return float(np.median(self._surface))
-        if self.press_hpa:
-            t = np.asarray(self.press_t)
-            return float(np.median(np.asarray(self.press_hpa)[t <= t[0] + 2.0]))
+        a = self._press.array()
+        if len(a):
+            t = a[:, 0]
+            return float(np.median(a[:, 1][t <= t[0] + 2.0]))
         return None
 
     def depth_cm(self, rho: float = WATER_DENSITY) -> tuple[np.ndarray, np.ndarray]:
-        """(t, depth in cm) from the external pressure; empty without it."""
+        """(t, depth in cm) from the external pressure; empty without it. ``t`` is a
+        view of the tracker's samples (not to be written)."""
         p0 = self.surface_hpa()
         if p0 is None:
             return np.empty(0), np.empty(0)
-        return (np.asarray(self.press_t, dtype=np.float64),
-                (np.asarray(self.press_hpa, dtype=np.float64) - p0) / hpa_per_cm(rho))
+        a = self._press.array()
+        return a[:, 0], (a[:, 1] - p0) / hpa_per_cm(rho)
 
     def sorted_events(self) -> list[Event]:
         return sorted(self.events, key=lambda e: e.t)

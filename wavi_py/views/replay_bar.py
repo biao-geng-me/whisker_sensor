@@ -24,7 +24,9 @@ closed) and the loop range (Loop: ``LOOP_S`` either side of the
 playhead; drag its edges), an event list (picking one goes to ``EVENT_LEAD_S``
 before it), previous / next event, and Export (``exportRequested``: the panel
 saves the loop range, see replay/export.py), and Notes (``notesRequested``:
-the panel opens the notes list).
+the panel opens the notes list). Live it is redrawn from the stream so far once
+a second (``sourceUpdated``), but only while it shows: every window has one,
+most of them hidden, and a hidden one catches up when it is shown.
 
 ROV lanes (``ROV ▾`` on the side, or a right-click on the strip): the vehicle
 telemetry (``replay/rov.py``, the source's ``rov()``: pilot demand, thrusters,
@@ -861,8 +863,9 @@ class TimelineBar(QWidget):
         self.strip.head.sigDragged.connect(self._on_drag)
         self.strip.head.sigPositionChangeFinished.connect(self._on_drag_done)
         self.strip.loop.sigRegionChangeFinished.connect(self._on_loop_dragged)
+        self._stale = False                # hidden when the stream grew: redrawn on show
         model.sourceChanged.connect(self._rebuild)
-        model.sourceUpdated.connect(self._rebuild)
+        model.sourceUpdated.connect(self._update)
         model.positionChanged.connect(self._show_position)
         model.loopChanged.connect(self._show_loop)
         model.stateChanged.connect(self._show_state)
@@ -872,7 +875,20 @@ class TimelineBar(QWidget):
 
     # ----- model -> widgets
 
+    def _update(self) -> None:
+        """Live, once a second: more depth / events. A hidden bar waits for its show."""
+        if self.isVisible():
+            self._rebuild()
+        else:
+            self._stale = True
+
+    def showEvent(self, event) -> None:  # noqa: N802 — Qt naming
+        super().showEvent(event)
+        if self._stale:
+            self._rebuild()
+
     def _rebuild(self) -> None:
+        self._stale = False
         m = self.model
         src = m.source
         self.controls.setVisible(m.active)

@@ -319,7 +319,7 @@ class RecordingIndex(TimelineQueries):
         self.armed_spans = [[a - t0, (b - t0) if b is not None else end]
                             for a, b in tr.armed_spans]
         self.press_t = np.asarray(tr.press_t, dtype=np.float64) - t0
-        self.press_hpa = np.asarray(tr.press_hpa, dtype=np.float64)
+        self.press_hpa = np.array(tr.press_hpa, dtype=np.float64)     # its own copy
         self.surface_hpa = tr.surface_hpa()
         self.rov_data = rov_data(tr.rov, t0, tr.mode_changes, self.armed_spans, end)
 

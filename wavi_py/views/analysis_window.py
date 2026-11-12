@@ -115,6 +115,17 @@ newest focused one takes a region's Compare). Model changes only mark the
 window dirty: the render scheduler redraws it at most ``MAX_HZ`` a second, and
 not at all while it is hidden or closed (closing only hides it; the panel
 reuses it for the next new window).
+
+Live (no recording open) a window works on a copy and stands still: the
+selections read the copy they were made on, and the timeline shows the
+window's own (``take_copy``: the buffers, and the depth and telemetry since
+the stream started, up to that moment; the Pause's copy while paused). It is
+taken when the window is asked for (opened, or raised by the panel's Analysis
+button) and replaced by a newer one that an included selection reads (a region
+sent here after a later Pause); the stream running on does not change it, and
+nothing of the stream is read on a redraw. (Read live on every redraw, an hour
+of telemetry kept the GUI thread busy.) A Select drag in the timeline makes a
+selection on that copy, paused or not.
 """
 
 from __future__ import annotations
@@ -475,6 +486,7 @@ class AnalysisWindow(ViewWindow):
         self._default_map = None
         self._grid_key = None
         self._source_fn = source_fn
+        self._copy = None                         # live: the timeline's copy (take_copy)
         self.replay = replay
         self._vars: list[Variable] = []
         self._included: list[Selection] = []
@@ -721,6 +733,49 @@ class AnalysisWindow(ViewWindow):
         """The included selections still in the model, in model order."""
         return [s for s in self.model.selections if s in self._included]
 
+    # ----- live: the copy the timeline shows
+
+    def _live(self) -> bool:
+        """No recording open: the timeline shows a copy (see the module doc)."""
+        return self.mode != EVENTS and (self.replay is None or not self.replay.active)
+
+    def take_copy(self) -> None:
+        """Live: the timeline's copy, as of now (``source_fn``: the Pause's copy
+        while paused, else a new one); it stays until the next. Nothing in replay."""
+        if not self._live():
+            self._copy = None
+            return
+        self._copy = timeline_source_of(self._source_fn)
+        ext = self._copy.extent() if self._copy is not None else None
+        if ext is not None:
+            self.statusBar().showMessage(
+                f"Live copy: gauges {ext[0]:.1f} .. {ext[1]:.1f} s. It does not follow the"
+                " stream; the panel's Analysis button takes a new one.", 8000)
+        self._request()
+
+    def drop_copy(self) -> None:
+        """Another stream / recording: the copy meant the last one."""
+        self._copy = None
+        self._request()
+
+    def live_copy(self):
+        """The copy a selection made in the timeline reads (None: not live, or none)."""
+        return self._copy if self._live() else None
+
+    def _adopt(self, sel: Selection) -> None:
+        """An included selection on a newer live copy (a later Pause): the timeline
+        shows that one from now on, so it has the data under the selection."""
+        src = sel.source
+        if not self._live() or not getattr(src, "snapshot", False) or src is self._copy:
+            return
+        new, old = src.extent(), self._copy.extent() if self._copy is not None else None
+        if new is not None and (old is None or new[1] > old[1]):
+            self._copy = src
+
+    def _source(self):
+        """What the timeline shows: the whole recording in replay, live the copy."""
+        return self._copy if self._live() else timeline_source_of(self._source_fn)
+
     def include(self, sel: Selection, on: bool = True) -> None:
         if on and sel not in self._included:
             self._included.append(sel)
@@ -728,6 +783,7 @@ class AnalysisWindow(ViewWindow):
             self._included.remove(sel)
         if on:
             self._last_included = sel
+            self._adopt(sel)
         self._lists_dirty = True
         self._sync_lists()
         self._request()
@@ -817,6 +873,7 @@ class AnalysisWindow(ViewWindow):
         self.number = number
         self.setWindowTitle(self._title(number))
         self._included = []
+        self._copy = None
         self.set_checked([v.key for v in self._vars], False)
         self.set_checked([v.key for v in self._vars], False, TIMELINE)
         self._tl_edited = False
@@ -1524,9 +1581,10 @@ class AnalysisWindow(ViewWindow):
             self.timeline.show_position()
 
     def _poll_source(self) -> None:
-        """Live: the timeline follows the buffers (once a second, while shown)."""
+        """Live, once a second while shown: the variables (the vehicle's telemetry may
+        have started). The timeline's copy is not touched."""
         if self.replay is None or not self.replay.active:
-            self._rebuild_vars()                    # live telemetry may have started
+            self._rebuild_vars()
             self._request()
 
     # ----- Events mode
@@ -1746,7 +1804,7 @@ class AnalysisWindow(ViewWindow):
         if self.mode == EVENTS:
             self._render_events()
             return
-        src = timeline_source_of(self._source_fn)
+        src = self._source()
         self._default_timeline(src)
         if _open(self.timeline):
             got = self._manoeuvres_fn()
