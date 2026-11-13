@@ -21,7 +21,7 @@ Nothing in the views is changed: the bench wraps their redraw / paint methods.
 Windows: line, spectrum, fft, spec, imu, dome, rov. The Dome and ROV views
 need a GL context (on the cluster: Xvfb + Mesa llvmpipe, xrun.sh). The Sim
 transport has no IMU, so with ``imu`` the bench feeds the IMU window the way the
-control panel does for the Server transport: 100 Hz rows, 30 s kept, every tick.
+control panel does for the Server transport: 100 Hz rows, the newest ``t_buffer_s`` kept, every tick.
 
 ``--replay FILE.jsonl [--speed 4|max] [--start S]`` runs a recording instead
 (the real IMU, MAVLink and status included) and adds a ``replay`` record: the
@@ -225,16 +225,23 @@ def main() -> None:
         if args.full_span:
             QTimer.singleShot(int(args.warmup * 500), lambda: lv._zoom_x(1e6))
 
-    # IMU: what the control panel does for the Server transport, 100 Hz, every tick
-    imu_rows = collections.deque(maxlen=int(mw._t_buffer_s * 100))
+    # IMU: what the control panel does for the Server transport, 100 Hz, every tick:
+    # the newest t_buffer_s of rows as one array, rebuilt (new rows stacked on, the
+    # oldest dropped) as MainWindow._ingest does; its cost is "imu_buffer" in the tick
+    imu_keep = int(mw._t_buffer_s * 100)
+    imu_rows = np.empty((0, 9), np.float32)
     imu_state = np.zeros(9)
 
     def feed_imu() -> None:
-        nonlocal imu_state
-        for _ in range(5):
+        nonlocal imu_state, imu_rows
+        new = np.empty((5, 9), np.float32)
+        for i in range(5):
             imu_state = imu_state + np.random.normal(0, [5, 5, 5, 2, 2, 2, .002, .002, .002])
-            imu_rows.append(imu_state.astype(np.float32))
-        rows = np.array(imu_rows)
+            new[i] = imu_state
+        t0, c0 = time.perf_counter(), time.thread_time()
+        imu_rows = np.vstack([imu_rows, new])[-imu_keep:]
+        METERS["tick.imu_buffer"].add(time.perf_counter() - t0, time.thread_time() - c0)
+        rows = imu_rows
         n = len(rows)
         # on the whisker time axis, so the IMU window linked to the Line window shows them
         end = float(mw._sig_t[-1]) if np.isfinite(mw._sig_t[-1]) else 0.0

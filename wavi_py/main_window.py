@@ -22,7 +22,7 @@ whole file in replay), so the Line and IMU windows share one time axis (session
 seconds) and the IMU window can follow the Line window's time range.
 
 Plot data: the Line and IMU windows read through the series API
-(``daq/series.py``). Live, that is the rolling buffers (``t_buffer_s``, 90 s by
+(``daq/series.py``). Live, that is the rolling buffers (``t_buffer_s``, 5 min by
 default; the windows open on the newest ``DEFAULT_VIEW_SPAN_S``); in replay,
 once it is built in the background after the index (``_store_job``), the whole
 recording (``replay/store.py``), drawn for any span and following the
@@ -1416,7 +1416,7 @@ class MainWindow(QMainWindow):
 
     def _live_copy(self) -> SelSource:
         """A copy of the live buffers with the depth and telemetry of the stream so
-        far (~3 MB for 90 s of 32 gauges, plus ~0.2 MB a minute of stream)."""
+        far (~10 MB for 5 min of 32 gauges at 250 Hz, plus ~0.2 MB a minute of stream)."""
         src = self._replay.source
         return snapshot_of(self.series(), src.depth() if src is not None else None,
                            src.rov() if src is not None else None)

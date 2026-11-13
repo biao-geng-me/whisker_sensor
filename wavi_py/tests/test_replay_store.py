@@ -327,7 +327,7 @@ def test_scrub_moves_views_without_transport(app, win):
 
 def test_line_live_no_copy_until_paused(app, line):
     """Live, the Line window reads the caller's buffer (shifted in place each tick, no
-    90 s copy); Pause freezes a copy, as the buffer keeps moving under it."""
+    whole-buffer copy); Pause freezes a copy, as the buffer keeps moving under it."""
     t = np.arange(1000) / 250.0
     sig = np.zeros((1000, 4), np.float32)
     line.update_view(t, sig, np.zeros(4, np.float32), 1.0, x_range=(t[-1] - 4.0, t[-1]))

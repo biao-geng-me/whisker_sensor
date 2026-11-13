@@ -380,7 +380,7 @@ class LineView(WhiskerPlotsView):
             self._request_render()
             return
         # live, the caller's buffer itself (a view of the ring's window, daq/ring.py: no
-        # 90 s copy per tick; it stays valid until the ring next moves, and every tick
+        # whole-buffer copy per tick; it stays valid until the ring next moves, and every tick
         # that moves it pushes the new view here); paused, a copy, as the ring keeps
         # moving (and compacting) under a paused window
         if self._paused:

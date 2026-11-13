@@ -1,8 +1,8 @@
 """The newest ``n`` rows of a stream, always one contiguous array, appended in
 amortized O(rows appended): the GUI's live whisker buffer.
 
-A plain "shift left, append" buffer moves all ``n`` rows on every append (90 s
-of 32 gauges at 250 Hz is 2.9 MB per tick). A ring with a wrapping write
+A plain "shift left, append" buffer moves all ``n`` rows on every append (5 min
+of 32 gauges at 250 Hz is 9.6 MB per tick). A ring with a wrapping write
 pointer moves nothing, but its newest ``n`` rows are then two pieces, and every
 reader (``buf[-n:]``, the spectrogram's fancy indices, the Line window's
 in-place read, ``series()``) would have to unwrap them.
@@ -11,7 +11,7 @@ in-place read, ``series()``) would have to unwrap them.
 is ``storage[w - n:w]`` (a view, as a shifted buffer would be), an append
 writes its rows at ``w`` and moves ``w``; when they don't fit, the newest
 rows are first copied back to the start (a compaction: ``n`` rows once every
-``slack`` appended rows; with ``slack = n``, one 2.9 MB copy per 90 s instead
+``slack`` appended rows; with ``slack = n``, one 9.6 MB copy per 5 min instead
 of one per tick).
 
 Several arrays with the same rows (samples and their times) share the pointer,
